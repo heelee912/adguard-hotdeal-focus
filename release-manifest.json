@@ -1,0 +1,244 @@
+{
+  "artifacts": {
+    "filter.txt": {
+      "bytes": 11707,
+      "installedRulesSha256": "561a2ba553589c67d7873b20a532bb446bae6f8bef011287c353bf26133cb9a7",
+      "sha256": "9ef7301255056e8ca9fe2b1e91bd29f7f8edea5f312ab000f465638a8d4f065a",
+      "version": "1.0.0"
+    },
+    "hotdeal-focus.user.js": {
+      "bytes": 161161,
+      "canonicalTextSha256": "991c1553ba27f7c8a0052f7af146443fd7fef20a983ca268bc756712d558af49",
+      "sha256": "760c223c16108c421476d2832ab17060c81ca3dc034236986622d07c1532df5a",
+      "version": "0.3.6"
+    }
+  },
+  "configSha256": "f576531c758bdde08b4691f132e28a07d2665ec72ce3b47d052f90fea4d3c8a5",
+  "coverage": {
+    "approvedVariantCount": 0,
+    "contractCount": 8,
+    "layoutCount": 8,
+    "layoutFamilyCount": 8,
+    "routeCount": 12,
+    "siteCount": 7,
+    "sites": [
+      {
+        "id": "arcalive",
+        "layouts": [
+          {
+            "applicableProfiles": [
+              "desktop",
+              "mobile"
+            ],
+            "domain": "arca.live",
+            "id": "hotdeal",
+            "paths": [
+              "|/b/hotdeal/"
+            ],
+            "requiredRoles": [
+              "body",
+              "comments",
+              "title"
+            ],
+            "variants": []
+          }
+        ]
+      },
+      {
+        "id": "clien",
+        "layouts": [
+          {
+            "applicableProfiles": [
+              "desktop",
+              "mobile"
+            ],
+            "domain": "clien.net",
+            "id": "jirum",
+            "paths": [
+              "|/service/board/jirum/"
+            ],
+            "requiredRoles": [
+              "body",
+              "comments",
+              "title"
+            ],
+            "variants": []
+          }
+        ]
+      },
+      {
+        "id": "eomisae",
+        "layouts": [
+          {
+            "applicableProfiles": [
+              "desktop",
+              "mobile"
+            ],
+            "domain": "eomisae.co.kr",
+            "id": "hotdeal",
+            "paths": [
+              "|/fs/",
+              "|/index.php?document_srl=",
+              "|/os/",
+              "|/rt/"
+            ],
+            "requiredRoles": [
+              "body",
+              "comments",
+              "product",
+              "title"
+            ],
+            "variants": []
+          }
+        ]
+      },
+      {
+        "id": "ppomppu",
+        "layouts": [
+          {
+            "applicableProfiles": [
+              "mobile"
+            ],
+            "domain": "ppomppu.co.kr",
+            "id": "mobile",
+            "paths": [
+              "|/new/bbs_view.php?id=ppomppu^"
+            ],
+            "requiredRoles": [
+              "body",
+              "comments",
+              "product",
+              "title"
+            ],
+            "variants": []
+          },
+          {
+            "applicableProfiles": [
+              "desktop"
+            ],
+            "domain": "ppomppu.co.kr",
+            "id": "pc",
+            "paths": [
+              "|/zboard/view.php?id=ppomppu^"
+            ],
+            "requiredRoles": [
+              "body",
+              "comments",
+              "product",
+              "title"
+            ],
+            "variants": []
+          }
+        ]
+      },
+      {
+        "id": "quasarzone",
+        "layouts": [
+          {
+            "applicableProfiles": [
+              "desktop",
+              "mobile"
+            ],
+            "domain": "quasarzone.com",
+            "id": "market",
+            "paths": [
+              "|/bbs/qb_*/views/"
+            ],
+            "requiredRoles": [
+              "body",
+              "comments",
+              "product",
+              "title"
+            ],
+            "variants": []
+          }
+        ]
+      },
+      {
+        "id": "ruliweb",
+        "layouts": [
+          {
+            "applicableProfiles": [
+              "desktop",
+              "mobile"
+            ],
+            "domain": "ruliweb.com",
+            "id": "hotdeal",
+            "paths": [
+              "|/market/board/1020/read/",
+              "|/news/board/1020/read/"
+            ],
+            "requiredRoles": [
+              "body",
+              "comments",
+              "title"
+            ],
+            "variants": []
+          }
+        ]
+      },
+      {
+        "id": "zod",
+        "layouts": [
+          {
+            "applicableProfiles": [
+              "desktop",
+              "mobile"
+            ],
+            "domain": "zod.kr",
+            "id": "deal",
+            "paths": [
+              "|/deal/"
+            ],
+            "requiredRoles": [
+              "body",
+              "comments",
+              "product",
+              "title"
+            ],
+            "variants": []
+          }
+        ]
+      }
+    ]
+  },
+  "filterSubscriptionUrl": "https://github.com/heelee912/adguard-hotdeal-focus/releases/download/gate-v1.0.0/filter.txt",
+  "gateArtifactVersion": "1.0.0",
+  "generatorVersion": "0.3.6",
+  "promotion": null,
+  "protocolVersion": 1,
+  "releaseVersion": "0.3.6",
+  "rollback_of": null,
+  "schemaVersion": 1,
+  "sourceIntegrity": {
+    "config/gate-artifacts.json": {
+      "bytes": 449,
+      "sha256": "c9656ed065347738bf5c81802e80695a71d3529cffaea1ba2371b1a9b695356c"
+    },
+    "config/sites.json": {
+      "bytes": 18586,
+      "sha256": "f576531c758bdde08b4691f132e28a07d2665ec72ce3b47d052f90fea4d3c8a5"
+    },
+    "filter-static.txt": {
+      "bytes": 5640,
+      "sha256": "f2447c6c026b8309ab6cb6a2f7622daa0e3cad3d7329f357a4dd0ad62792e49f"
+    },
+    "package-lock.json": {
+      "bytes": 1826,
+      "sha256": "88833c126d000a0de8d7ddf72ff8afcabf228458641cfb3f4adf60aaa890a4a3"
+    },
+    "package.json": {
+      "bytes": 983,
+      "sha256": "10a3ec24cf2e4a9f86b79484a482bafea12b93ce230d312ff291835548040c14"
+    },
+    "tests/fixtures/behavior-baseline.json": {
+      "bytes": 1986,
+      "sha256": "6178dd84a619a79915cd75ce679c107ab5580de606ffc0e984b62be427e1c8c5"
+    },
+    "tests/fixtures/dom-regressions.json": {
+      "bytes": 21686,
+      "sha256": "026cd9565e6208c23ffbfde7b89aa9298bf6303e0f74b9fc554835e73caf4813"
+    }
+  },
+  "status": "release-ready"
+}

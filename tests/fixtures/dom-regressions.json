@@ -1,0 +1,154 @@
+{
+  "schema_version": 1,
+  "description": "Sanitized June/July DOM contracts. Content is synthetic; structure reproduces reader-gate boundaries.",
+  "fixtures": [
+    {
+      "id": "clien-jirum-june",
+      "site_id": "clien",
+      "layout_id": "jirum",
+      "vintage": "june",
+      "url": "https://www.clien.net/service/board/jirum/99000001",
+      "body_html": "<div class=\"content_view\" data-fixture-node-id=\"shell\"><div class=\"post_title\"><h1 class=\"post_subject\" data-fixture-node-id=\"title\">DOM regression fixture</h1></div><article class=\"post_article\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></article><section class=\"post_comment\" role=\"feed\" data-fixture-node-id=\"comments\"><div class=\"comment_head\">comment count chrome</div><div class=\"comment ad_banner\"><article class=\"comment_row\">comment one</article><article class=\"comment_row\">comment two</article><article class=\"comment_row\">comment three</article></div><nav class=\"comment_nav\"><button>next comments</button></nav><div class=\"comment_msg\" hidden>message chrome</div><form id=\"comment_write_div\"><textarea></textarea></form><div class=\"fr-overlay\"></div></section></div>"
+    },
+    {
+      "id": "clien-jirum-july",
+      "site_id": "clien",
+      "layout_id": "jirum",
+      "vintage": "july",
+      "url": "https://www.clien.net/service/board/jirum/99000002",
+      "body_html": "<main class=\"content_view responsive\" data-fixture-node-id=\"shell\"><header class=\"post_title\"><h1 class=\"post_subject\" data-fixture-node-id=\"title\">DOM regression fixture</h1></header><article class=\"post_article\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></article><div class=\"post_comment\" role=\"feed\" data-fixture-node-id=\"comments\"><div class=\"comment_head\">comment count chrome</div><ol class=\"comment ad_banner\"><li class=\"comment_row\">comment one</li><li class=\"comment_row\">comment two</li><li class=\"comment_row\">comment three</li></ol><nav class=\"comment_nav\"><a href=\"#comments-next\">next comments</a></nav><div class=\"comment_msg\" hidden>message chrome</div><form id=\"comment_write_div\"><textarea></textarea></form><div class=\"fr-overlay\"></div></div></main>"
+    },
+    {
+      "id": "clien-jirum-heterogeneous-comments",
+      "site_id": "clien",
+      "layout_id": "jirum",
+      "vintage": "heterogeneous-comments",
+      "url": "https://www.clien.net/service/board/jirum/99000003",
+      "body_html": "<main class=\"content_view responsive\" data-fixture-node-id=\"shell\"><header><h1 class=\"post_subject\" data-fixture-node-id=\"title\">DOM regression fixture</h1></header><article class=\"post_article\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p></article><section class=\"post_comment\" role=\"feed\" data-fixture-node-id=\"comments\"><div class=\"comment_head\">comment chrome</div><div class=\"comment ad_banner\"><article class=\"comment_row top-level\">top-level comment</article><aside class=\"comment_row nested-reply\">nested reply with deliberately heterogeneous descendants</aside></div><div class=\"comment_msg\" hidden>message chrome</div><form id=\"comment_write_div\"><textarea></textarea></form><div class=\"fr-overlay\"></div></section></main>"
+    },
+    {
+      "id": "clien-jirum-spoofed-public-marker",
+      "site_id": "clien",
+      "layout_id": "jirum",
+      "vintage": "spoofed-marker",
+      "url": "https://www.clien.net/service/board/jirum/99000004",
+      "body_html": "<main class=\"content_view\" data-fixture-node-id=\"shell\"><h1 class=\"post_subject\" data-fixture-node-id=\"title\">DOM regression fixture</h1><article class=\"post_article\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p></article><aside data-hotdeal-focus-keep=\"spoof\" data-hotdeal-focus-deep=\"body\" data-hotdeal-focus-role=\"body\" data-fixture-node-id=\"spoofed-noise\">spoofed sidebar must never become visible</aside><section class=\"post_comment\" role=\"feed\" data-fixture-node-id=\"comments\"><div class=\"comment_head\">comment chrome</div><div class=\"comment ad_banner\"><article class=\"comment_row\">comment</article></div><div class=\"comment_msg\" hidden>message chrome</div><form id=\"comment_write_div\"><textarea></textarea></form><div class=\"fr-overlay\"></div></section></main>"
+    },
+    {
+      "id": "ppomppu-pc-june",
+      "site_id": "ppomppu",
+      "layout_id": "pc",
+      "vintage": "june",
+      "profile": "desktop",
+      "url": "https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu&no=99000001",
+      "body_html": "<div id=\"wrapper\" class=\"wrapper\" data-fixture-node-id=\"shell\"><div id=\"topTitle\"><h1 data-fixture-node-id=\"title\">DOM regression fixture</h1><table class=\"topTitle-link\" data-fixture-node-id=\"product\"><tr><td>Product price USD 10 buy</td><td><a href=\"https://shop.invalid/product\">purchase link</a></td></tr></table></div><article class=\"board-contents\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></article><div id=\"comment_list_area\" role=\"feed\" data-fixture-node-id=\"comments\"><div id=\"iC_101\" class=\"comment_wrapper comment_template_depth1\">top-level comment</div><div id=\"iC_102\" class=\"comment_wrapper comment_template_depth2\">nested reply</div></div></div>"
+    },
+    {
+      "id": "ppomppu-pc-july",
+      "site_id": "ppomppu",
+      "layout_id": "pc",
+      "vintage": "july",
+      "profile": "desktop",
+      "url": "https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu&no=99000002",
+      "body_html": "<main class=\"wrapper container\" data-fixture-node-id=\"shell\"><section id=\"topTitle\"><h1 data-fixture-node-id=\"title\">DOM regression fixture</h1><dl class=\"subject_preface topTitle-link\" data-fixture-node-id=\"product\"><dt>Product price</dt><dd>USD 10 <a href=\"https://shop.invalid/product\">buy product</a></dd></dl></section><article class=\"board-contents\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></article><div id=\"comment_list_area\" role=\"feed\" data-fixture-node-id=\"comments\"><div id=\"iC_201\" class=\"comment_wrapper comment_template_depth1\">first comment</div><div id=\"iC_202\" class=\"comment_wrapper comment_template_depth2 alternate\"><span>reply content</span></div></div></main>"
+    },
+    {
+      "id": "ppomppu-mobile-june",
+      "site_id": "ppomppu",
+      "layout_id": "mobile",
+      "vintage": "june",
+      "profile": "mobile",
+      "url": "https://m.ppomppu.co.kr/new/bbs_view.php?id=ppomppu&no=99000001",
+      "body_html": "<section class=\"bbs view\" data-fixture-node-id=\"shell\"><h4 data-fixture-node-id=\"title\">DOM regression fixture <span class=\"info\"><a class=\"noeffect subject_preface\" href=\"https://shop.invalid/product\" data-fixture-node-id=\"product\">Product price USD 10 buy</a></span></h4><article id=\"KH_Content\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></article><div id=\"cmAr\" class=\"comments reply\" role=\"feed\" data-fixture-node-id=\"comments\"><aside id=\"hot-comment-preview\" data-fixture-node-id=\"hot-comment-preview\">popular preview noise</aside><div id=\"cmList\"><a id=\"cmt-101\"></a><div class=\"sect-cmt\" data-cno=\"101\" data-depth=\"0\">top-level comment text</div><a id=\"cmt-102\"></a><div class=\"sect-cmt reply-shape\" data-cno=\"102\" data-depth=\"1\">heterogeneous reply text</div></div></div></section>"
+    },
+    {
+      "id": "ppomppu-mobile-july",
+      "site_id": "ppomppu",
+      "layout_id": "mobile",
+      "vintage": "july",
+      "profile": "mobile",
+      "url": "https://m.ppomppu.co.kr/new/bbs_view.php?id=ppomppu&no=99000002",
+      "body_html": "<main class=\"bbs view mobile\" data-fixture-node-id=\"shell\"><h4 data-fixture-node-id=\"title\">DOM regression fixture <span class=\"info\"><a class=\"noeffect\" href=\"https://shop.invalid/product\" data-fixture-node-id=\"product\">Product price USD 10 buy</a></span></h4><article id=\"KH_Content\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></article><section id=\"cmAr\" class=\"comments reply\" role=\"feed\" data-fixture-node-id=\"comments\"><div id=\"cmList\"><a id=\"cmt-201\"></a><div class=\"sect-cmt current\" data-cno=\"201\" data-depth=\"0\">first comment text</div><a id=\"cmt-202\"></a><div class=\"sect-cmt nested\" data-cno=\"202\" data-depth=\"1\"><span>nested reply text</span><button class=\"cmt-reply-btn\">reply control</button></div></div></section></main>"
+    },
+    {
+      "id": "ruliweb-hotdeal-june",
+      "site_id": "ruliweb",
+      "layout_id": "hotdeal",
+      "vintage": "june",
+      "url": "https://bbs.ruliweb.com/market/board/1020/read/99000001",
+      "body_html": "<main id=\"board_read\" data-fixture-node-id=\"shell\"><span class=\"category_text\">Hot deal</span><h1 class=\"subject_inner_text\" data-fixture-node-id=\"title\">DOM regression fixture</h1><article class=\"view_content\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p><a href=\"https://shop.invalid/product\">purchase source link inside authored body</a></p><p>Second content paragraph.</p></article><div class=\"comment_view normal\" role=\"feed\" data-fixture-node-id=\"comments\"><article class=\"comment_element\" itemprop=\"comment\">comment one</article><article class=\"comment_element\" itemprop=\"comment\">comment two</article><article class=\"comment_element\" itemprop=\"comment\">comment three</article></div></main>"
+    },
+    {
+      "id": "ruliweb-hotdeal-july",
+      "site_id": "ruliweb",
+      "layout_id": "hotdeal",
+      "vintage": "july",
+      "url": "https://bbs.ruliweb.com/news/board/1020/read/99000002",
+      "body_html": "<article id=\"board_read\" data-fixture-node-id=\"shell\"><div class=\"board-title\"><span class=\"category_text\">Hot deal</span><h1 class=\"subject_inner_text\" data-fixture-node-id=\"title\">DOM regression fixture</h1></div><div class=\"source_url box_line_with_shadow\" data-fixture-node-id=\"product\"><a href=\"https://shop.invalid/product\">purchase source link</a></div><section class=\"view_content\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></section><section class=\"comment_view normal\" role=\"feed\" data-fixture-node-id=\"comments\"><div class=\"comment_element\" itemprop=\"comment\">comment one</div><div class=\"comment_element\" itemprop=\"comment\">comment two</div><div class=\"comment_element\" itemprop=\"comment\">comment three</div></section></article>"
+    },
+    {
+      "id": "quasarzone-market-june",
+      "site_id": "quasarzone",
+      "layout_id": "market",
+      "vintage": "june",
+      "url": "https://quasarzone.com/bbs/qb_saleinfo/views/99000001",
+      "body_html": "<main class=\"market-info-view-wrap common-view-wrap\" data-fixture-node-id=\"shell\"><h1 class=\"title\" data-fixture-node-id=\"title\">DOM regression fixture</h1><table class=\"market-info-view-table\" data-fixture-node-id=\"product\"><tr><td>Product price USD 10 buy</td><td><a href=\"https://shop.invalid/product\">purchase link</a></td></tr></table><article class=\"view-content\"><div class=\"note-editor\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></div></article><section id=\"ajax-reply-list\" role=\"feed\" data-fixture-node-id=\"comments\"><li class=\"reply-item\" itemprop=\"comment\">comment one</li><li class=\"reply-item\" itemprop=\"comment\">comment two</li><li class=\"reply-item\" itemprop=\"comment\">comment three</li></section></main>"
+    },
+    {
+      "id": "quasarzone-market-july",
+      "site_id": "quasarzone",
+      "layout_id": "market",
+      "vintage": "july",
+      "url": "https://quasarzone.com/bbs/qb_saleinfo/views/99000002",
+      "body_html": "<article class=\"market-info-view-wrap common-view-wrap\" data-fixture-node-id=\"shell\"><header><h1 class=\"title\" data-fixture-node-id=\"title\">DOM regression fixture</h1></header><dl class=\"market-info-view-table\" data-fixture-node-id=\"product\"><dt>Product price</dt><dd>USD 10 <a href=\"https://shop.invalid/product\">buy product</a></dd></dl><section class=\"view-content\"><article class=\"note-editor\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></article></section><ol id=\"ajax-reply-list\" role=\"feed\" data-fixture-node-id=\"comments\"><li class=\"reply-item\" itemprop=\"comment\">comment one</li><li class=\"reply-item\" itemprop=\"comment\">comment two</li><li class=\"reply-item\" itemprop=\"comment\">comment three</li></ol></article>"
+    },
+    {
+      "id": "eomisae-hotdeal-june",
+      "site_id": "eomisae",
+      "layout_id": "hotdeal",
+      "vintage": "june",
+      "url": "https://eomisae.co.kr/rt/99000001",
+      "body_html": "<main id=\"bd\" data-fixture-node-id=\"shell\"><section id=\"D_\"><header class=\"_hd\"><h2 data-fixture-node-id=\"title\">DOM regression fixture</h2></header><table class=\"et_vars\" data-fixture-node-id=\"product\"><tr><td>Product price USD 10 buy</td><td><a href=\"https://shop.invalid/product\">purchase link</a></td></tr></table><article><div class=\"rhymix_content\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></div></article></section><section id=\"C_\"><div class=\"_bd\" role=\"feed\" data-fixture-node-id=\"comments\"><div id=\"comment_101\" class=\"_comment depth0\">top-level comment</div><div id=\"comment_102\" class=\"_comment depth1 alternate\"><span>nested reply</span></div></div></section></main>"
+    },
+    {
+      "id": "eomisae-hotdeal-july",
+      "site_id": "eomisae",
+      "layout_id": "hotdeal",
+      "vintage": "july",
+      "url": "https://eomisae.co.kr/index.php?document_srl=99000002",
+      "body_html": "<article id=\"bd\" data-fixture-node-id=\"shell\"><div id=\"D_\"><div class=\"_wrapper\"><header class=\"_hd\"><section class=\"_section\"><h2 data-fixture-node-id=\"title\">DOM regression fixture</h2></section></header><div class=\"_bd\"><dl class=\"et_vars\" data-fixture-node-id=\"product\"><dt>Product price</dt><dd>USD 10 <a href=\"https://shop.invalid/product\">buy product</a></dd></dl><article><div class=\"rhymix_content\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></div></article></div></div></div><section id=\"C_\"><div class=\"_bd\" role=\"feed\" data-fixture-node-id=\"comments\"><div id=\"comment_201\" class=\"_comment depth0\">first comment</div><div id=\"comment_202\" class=\"_comment depth1\"><div>reply content</div></div></div></section></article>"
+    },
+    {
+      "id": "zod-deal-june",
+      "site_id": "zod",
+      "layout_id": "deal",
+      "vintage": "june",
+      "url": "https://zod.kr/deal/99000001",
+      "body_html": "<main class=\"layout-content app-clearfix\" data-fixture-node-id=\"shell\"><article class=\"app-article-wrap\"><header class=\"app-board-article-head\"><h1 data-fixture-node-id=\"title\">DOM regression fixture</h1></header><section class=\"app-article-container\"><table class=\"app-board-extra-value\" data-fixture-node-id=\"product\"><tr><td>Product price USD 10</td><td><a href=\"https://shop.invalid/product\">purchase link</a></td></tr></table><article class=\"app-article-content\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></article></section></article><ul id=\"app-board-comment-list\" role=\"feed\" data-fixture-node-id=\"comments\"><li id=\"comment_101\" class=\"app-comment-item\" itemprop=\"comment\">comment one</li><li id=\"comment_102\" class=\"app-comment-item\" itemprop=\"comment\">comment two</li><li id=\"comment_103\" class=\"app-comment-item\" itemprop=\"comment\">comment three</li></ul></main>"
+    },
+    {
+      "id": "zod-deal-july",
+      "site_id": "zod",
+      "layout_id": "deal",
+      "vintage": "july",
+      "url": "https://zod.kr/deal/99000002",
+      "body_html": "<main data-fixture-node-id=\"shell\"><article><header class=\"app-board-article-head\"><h1 data-fixture-node-id=\"title\">DOM regression fixture</h1></header><section class=\"app-article-container\"><dl class=\"app-board-extra-value\" data-fixture-node-id=\"product\"><dt>Product price</dt><dd>USD 10 <a href=\"https://shop.invalid/product\">buy product</a></dd></dl><section class=\"app-article-content\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></section></section></article><ol id=\"app-board-comment-list\" role=\"feed\" data-fixture-node-id=\"comments\"><li id=\"comment_201\" class=\"app-comment-item\" itemprop=\"comment\">comment one</li><li id=\"comment_202\" class=\"app-comment-item\" itemprop=\"comment\">comment two</li><li id=\"comment_203\" class=\"app-comment-item\" itemprop=\"comment\">comment three</li></ol></main>"
+    },
+    {
+      "id": "arcalive-hotdeal-june",
+      "site_id": "arcalive",
+      "layout_id": "hotdeal",
+      "vintage": "june",
+      "url": "https://arca.live/b/hotdeal/99000001",
+      "body_html": "<article class=\"board-article article-view\" data-fixture-node-id=\"shell\"><header class=\"article-head\"><h1 data-fixture-node-id=\"title\">DOM regression fixture</h1></header><section class=\"article-body\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></section><div class=\"article-comment\" role=\"feed\" data-fixture-node-id=\"comments\"><article class=\"comment-item\" itemprop=\"comment\">comment one</article><article class=\"comment-item\" itemprop=\"comment\">comment two</article><article class=\"comment-item\" itemprop=\"comment\">comment three</article></div></article>"
+    },
+    {
+      "id": "arcalive-hotdeal-july",
+      "site_id": "arcalive",
+      "layout_id": "hotdeal",
+      "vintage": "july",
+      "url": "https://arca.live/b/hotdeal/99000002",
+      "body_html": "<article class=\"board-article article-view\" data-fixture-node-id=\"shell\"><header class=\"article-head\"><h2 class=\"title\" data-fixture-node-id=\"title\">DOM regression fixture</h2></header><section class=\"article-content\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></section><ol class=\"article-comment\" role=\"feed\" data-fixture-node-id=\"comments\"><li class=\"comment-item\" itemprop=\"comment\">comment one</li><li class=\"comment-item\" itemprop=\"comment\">comment two</li><li class=\"comment-item\" itemprop=\"comment\">comment three</li></ol></article>"
+    }
+  ]
+}

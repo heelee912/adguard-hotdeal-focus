@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "release_version": "0.3.5",
+  "protocol_major": 1,
+  "note": "Immutable released behavior contract. Updating this file requires an explicitly reviewed release.",
+  "fixtures": {
+    "clien-jirum-june": { "allowed_node_ids": ["shell", "title", "body", "comments"] },
+    "clien-jirum-july": { "allowed_node_ids": ["shell", "title", "body", "comments"] },
+    "clien-jirum-heterogeneous-comments": { "allowed_node_ids": ["shell", "title", "body", "comments"] },
+    "clien-jirum-spoofed-public-marker": { "allowed_node_ids": ["shell", "title", "body", "comments"] },
+    "ppomppu-pc-june": { "allowed_node_ids": ["shell", "title", "product", "body", "comments"] },
+    "ppomppu-pc-july": { "allowed_node_ids": ["shell", "title", "product", "body", "comments"] },
+    "ppomppu-mobile-june": { "allowed_node_ids": ["shell", "title", "product", "body", "comments"] },
+    "ppomppu-mobile-july": { "allowed_node_ids": ["shell", "title", "product", "body", "comments"] },
+    "ruliweb-hotdeal-june": { "allowed_node_ids": ["shell", "title", "body", "comments"] },
+    "ruliweb-hotdeal-july": { "allowed_node_ids": ["shell", "title", "product", "body", "comments"] },
+    "quasarzone-market-june": { "allowed_node_ids": ["shell", "title", "product", "body", "comments"] },
+    "quasarzone-market-july": { "allowed_node_ids": ["shell", "title", "product", "body", "comments"] },
+    "eomisae-hotdeal-june": { "allowed_node_ids": ["shell", "title", "product", "body", "comments"] },
+    "eomisae-hotdeal-july": { "allowed_node_ids": ["shell", "title", "product", "body", "comments"] },
+    "zod-deal-june": { "allowed_node_ids": ["shell", "title", "product", "body", "comments"] },
+    "zod-deal-july": { "allowed_node_ids": ["shell", "title", "product", "body", "comments"] },
+    "arcalive-hotdeal-june": { "allowed_node_ids": ["shell", "title", "body", "comments"] },
+    "arcalive-hotdeal-july": { "allowed_node_ids": ["shell", "title", "body", "comments"] }
+  }
+}

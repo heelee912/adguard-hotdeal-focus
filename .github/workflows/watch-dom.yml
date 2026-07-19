@@ -1,0 +1,1141 @@
+name: Watch live DOM
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      dispatch_nonce:
+        description: Machine correlation nonce
+        required: false
+        type: string
+
+run-name: hotdeal-focus-watch-dom-${{ inputs.dispatch_nonce || github.run_id }}
+
+permissions: {}
+
+concurrency:
+  group: watch-live-dom
+  cancel-in-progress: false
+
+jobs:
+  audit:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    permissions:
+      contents: read
+    outputs:
+      base_sha: ${{ steps.base.outputs.sha }}
+      failed: ${{ steps.result.outputs.failed }}
+      candidate_count: ${{ steps.queue.outputs.candidate_count }}
+      candidate_total: ${{ steps.queue.outputs.candidate_total }}
+      candidate_batch_start: ${{ steps.queue.outputs.candidate_batch_start }}
+      candidate_batch_size: ${{ steps.queue.outputs.candidate_batch_size }}
+      candidate_matrix: ${{ steps.queue.outputs.candidate_matrix }}
+      queue_sha256: ${{ steps.queue.outputs.queue_sha256 }}
+    steps:
+      - name: Check out the default branch
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Record the immutable audit base
+        id: base
+        shell: bash
+        run: echo "sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install locked audit dependency
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Preflight generated artifacts and coverage
+        id: preflight
+        shell: bash
+        run: |
+          set +e
+          status=0
+          npm run check:node || status=1
+          npm test || status=1
+          npm run build || status=1
+          git diff --exit-code -- . || status=1
+          git ls-files --error-unmatch \
+            filter.txt \
+            filter-static.txt \
+            hotdeal-focus.user.js \
+            release-manifest.json \
+            tests/fixtures/dom-regressions.json \
+            tests/fixtures/behavior-baseline.json >/dev/null || status=1
+          npm run integrity || status=1
+          echo "status=${status}" >> "${GITHUB_OUTPUT}"
+          exit 0
+
+      - name: Install GitHub-hosted Chromium
+        if: steps.preflight.outputs.status == '0'
+        run: npx playwright install --with-deps chromium
+
+      - name: Audit bounded samples and the exact global Algumon source inventory
+        if: steps.preflight.outputs.status == '0'
+        id: live
+        shell: bash
+        run: |
+          set +e
+          status=0
+          timeout --kill-after=5s 60s npm run test:tamper || status=1
+          if [[ "${status}" == "0" ]]; then
+            timeout --kill-after=15s 210m npm run audit:dom -- \
+              --require-algumon-discovery \
+              --synthesize-candidates || status=1
+          fi
+          echo "status=${status}" >> "${GITHUB_OUTPUT}"
+          exit 0
+
+      - name: Publish the full-audit outcome
+        if: always()
+        id: result
+        shell: bash
+        run: |
+          if [[ "${{ steps.preflight.outputs.status }}" == "0" && \
+                "${{ steps.live.outputs.status }}" == "0" ]]; then
+            echo "failed=false" >> "${GITHUB_OUTPUT}"
+          else
+            echo "failed=true" >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Freeze and sign the complete ordered candidate queue
+        if: always()
+        id: queue
+        env:
+          IMMUTABLE_BASE_SHA: ${{ steps.base.outputs.sha }}
+          AUDIT_RUN_NUMBER: ${{ github.run_number }}
+        shell: bash
+        run: |
+          node scripts/candidate_queue.mjs create-queue \
+            --evidence-dir outputs/evidence \
+            --base-sha "${IMMUTABLE_BASE_SHA}" \
+            --run-number "${AUDIT_RUN_NUMBER}" \
+            --output-dir .candidate-queue \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Collect bounded JSON and hash evidence
+        if: always()
+        continue-on-error: true
+        shell: bash
+        run: |
+          node scripts/candidate_queue.mjs collect-evidence \
+            --source-dir outputs/evidence \
+            --output-dir .audit-json-evidence \
+            --max-files 512 \
+            --max-bytes 8388608
+
+      - name: Select a deterministic bounded failure screenshot set
+        if: steps.result.outputs.failed == 'true'
+        continue-on-error: true
+        id: audit_screenshots
+        shell: bash
+        run: |
+          node scripts/candidate_queue.mjs cap-screenshots \
+            --source-dir outputs/evidence \
+            --output-dir .audit-failure-screenshots \
+            --max-files 4 \
+            --max-bytes 4194304 \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Upload the signed candidate queue
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-queue-${{ github.run_id }}
+          path: .candidate-queue/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 2
+
+      - name: Upload normal audit JSON and hashes
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dom-audit-json-${{ github.run_id }}
+          path: .audit-json-evidence/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 2
+
+      - name: Upload bounded failure screenshots
+        if: steps.audit_screenshots.outputs.count != '0'
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dom-audit-failure-screenshots-${{ github.run_id }}
+          path: .audit-failure-screenshots/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  candidate-proof:
+    needs: audit
+    if: >-
+      needs.audit.result == 'success' &&
+      needs.audit.outputs.candidate_count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 65
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix: ${{ fromJSON(needs.audit.outputs.candidate_matrix) }}
+    steps:
+      - name: Check out exactly the audited base
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.audit.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install locked dependency and Chromium
+        id: dependencies
+        continue-on-error: true
+        run: |
+          timeout --kill-after=10s 4m npm ci --ignore-scripts --no-audit --no-fund
+          timeout --kill-after=10s 8m npx playwright install --with-deps chromium
+
+      - name: Download the signed candidate queue
+        if: always()
+        id: queue_download
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: candidate-queue-${{ github.run_id }}
+          path: .candidate-queue
+
+      - name: Reverify and extract only this minimal matrix tuple
+        if: always() && steps.queue_download.outcome == 'success'
+        continue-on-error: true
+        id: candidate
+        env:
+          IMMUTABLE_BASE_SHA: ${{ needs.audit.outputs.base_sha }}
+          EXPECTED_QUEUE_SHA256: ${{ needs.audit.outputs.queue_sha256 }}
+          CANDIDATE_FINGERPRINT: ${{ matrix.fingerprint }}
+          CANDIDATE_INDEX: ${{ matrix.index }}
+        shell: bash
+        run: |
+          timeout --kill-after=5s 1m node scripts/candidate_queue.mjs prepare-candidate \
+            --queue-root .candidate-queue \
+            --expected-base-sha "${IMMUTABLE_BASE_SHA}" \
+            --expected-queue-sha256 "${EXPECTED_QUEUE_SHA256}" \
+            --fingerprint "${CANDIDATE_FINGERPRINT}" \
+            --expected-index "${CANDIDATE_INDEX}" \
+            --output-dir .candidate-work \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Build and prove this candidate in isolation
+        if: >-
+          steps.dependencies.outcome == 'success' &&
+          steps.candidate.outcome == 'success'
+        id: proof
+        env:
+          IMMUTABLE_BASE_SHA: ${{ needs.audit.outputs.base_sha }}
+          EXPECTED_QUEUE_SHA256: ${{ needs.audit.outputs.queue_sha256 }}
+          CANDIDATE_FINGERPRINT: ${{ matrix.fingerprint }}
+          CANDIDATE_INDEX: ${{ matrix.index }}
+          CANDIDATE_SITE_ID: ${{ steps.candidate.outputs.site_id }}
+        shell: bash
+        run: |
+          set +e
+          status=""
+          reason=""
+          draft=.candidate-work/promotion-draft.json
+          draft_root=.candidate-build/draft
+          release_root=.candidate-build/release
+          evidence_root=outputs/candidate-evidence/${CANDIDATE_FINGERPRINT}
+          mkdir -p .candidate-result
+          state_args=()
+          if [[ -f state/approved-variants.json ]]; then
+            state_args=(--merge-approved-state state/approved-variants.json)
+          fi
+
+          timeout --kill-after=5s 4m python scripts/build_filter.py \
+            --candidate-draft "${draft}" \
+            --output-dir "${draft_root}" \
+            "${state_args[@]}"
+          build_exit=$?
+          if [[ "${build_exit}" == "124" || "${build_exit}" == "137" ]]; then
+            status="build-timeout"
+            reason="candidate draft build exceeded four minutes"
+          elif [[ "${build_exit}" != "0" ]]; then
+            status="build-rejected"
+            reason="candidate draft build rejected"
+          fi
+
+          if [[ -z "${status}" ]]; then
+            timeout --kill-after=10s 20m node scripts/audit_pages.mjs \
+              --config "${draft_root}/config/sites.json" \
+              --userscript "${draft_root}/hotdeal-focus.user.js" \
+              --marker-filter "${draft_root}/filter.txt" \
+              --runtime-only \
+              --require-algumon-discovery \
+              --promotion-draft "${draft}" \
+              --draft-manifest "${draft_root}/draft-manifest.json" \
+              --site "${CANDIDATE_SITE_ID}" \
+              --evidence-dir "${evidence_root}"
+            proof_exit=$?
+            if [[ "${proof_exit}" == "124" || "${proof_exit}" == "137" ]]; then
+              status="proof-timeout"
+              reason="isolated live proof exceeded twenty minutes"
+            elif [[ "${proof_exit}" != "0" ]]; then
+              status="live-proof-rejected"
+              reason="isolated live proof rejected"
+            fi
+          fi
+
+          ready=""
+          if [[ -z "${status}" ]]; then
+            mapfile -t ready_files < <(
+              find "${evidence_root}" -mindepth 2 \
+                -name promotion-ready.json -type f -print | sort
+            )
+            if [[ "${#ready_files[@]}" != "1" ]]; then
+              status="proof-missing"
+              reason="isolated proof did not emit exactly one promotion-ready envelope"
+            else
+              ready="${ready_files[0]}"
+            fi
+          fi
+
+          if [[ -z "${status}" ]]; then
+            timeout --kill-after=5s 4m python scripts/build_filter.py \
+              --candidate "${ready}" \
+              --output-dir "${release_root}" \
+              "${state_args[@]}"
+            release_exit=$?
+            if [[ "${release_exit}" == "124" || "${release_exit}" == "137" ]]; then
+              status="release-build-timeout"
+              reason="release build exceeded four minutes"
+            elif [[ "${release_exit}" != "0" ]]; then
+              status="release-build-rejected"
+              reason="release build rejected"
+            fi
+          fi
+
+          if [[ -z "${status}" ]]; then
+            timeout --kill-after=5s 4m python scripts/build_filter.py \
+              --candidate "${ready}" \
+              --output-dir "${release_root}" \
+              "${state_args[@]}" \
+              --check
+            check_exit=$?
+            if [[ "${check_exit}" == "124" || "${check_exit}" == "137" ]]; then
+              status="release-check-timeout"
+              reason="release reproducibility check exceeded four minutes"
+            elif [[ "${check_exit}" != "0" ]]; then
+              status="release-check-rejected"
+              reason="release reproducibility check rejected"
+            fi
+          fi
+
+          if [[ -z "${status}" ]]; then
+            cmp --silent "${draft_root}/filter.txt" "${release_root}/filter.txt" && \
+              cmp --silent "${draft_root}/filter-static.txt" \
+                "${release_root}/filter-static.txt" && \
+              cmp --silent "${draft_root}/hotdeal-focus.user.js" \
+                "${release_root}/hotdeal-focus.user.js" && \
+              cmp --silent "${draft_root}/config/sites.json" \
+                "${release_root}/config/sites.json"
+            compare_exit=$?
+            if [[ "${compare_exit}" != "0" ]]; then
+              status="draft-release-mismatch"
+              reason="draft and proven release bytes differ"
+            fi
+          fi
+
+          if [[ -z "${status}" ]]; then
+            status="proven"
+            reason="three independent Algumon proofs passed"
+            mkdir -p .candidate-result/release .candidate-result/proof
+            cp -a "${release_root}/." .candidate-result/release/
+            install -m 0644 "${draft}" \
+              .candidate-result/proof/promotion-draft.json
+            install -m 0644 "${ready}" \
+              .candidate-result/proof/promotion-ready.json
+            install -m 0644 "${draft_root}/draft-manifest.json" \
+              .candidate-result/proof/draft-manifest.json
+          fi
+
+          timeout --kill-after=5s 1m node scripts/candidate_queue.mjs collect-evidence \
+            --source-dir "${evidence_root}" \
+            --output-dir .candidate-json-evidence \
+            --max-files 32 \
+            --max-bytes 65536 || true
+
+          timeout --kill-after=5s 1m node scripts/candidate_queue.mjs seal-result \
+            --queue-root .candidate-queue \
+            --expected-base-sha "${IMMUTABLE_BASE_SHA}" \
+            --expected-queue-sha256 "${EXPECTED_QUEUE_SHA256}" \
+            --fingerprint "${CANDIDATE_FINGERPRINT}" \
+            --expected-index "${CANDIDATE_INDEX}" \
+            --result-dir .candidate-result \
+            --status "${status}" \
+            --reason "${reason}"
+          echo "status=${status}" >> "${GITHUB_OUTPUT}"
+          exit 0
+
+      - name: Canonically seal every recoverable infrastructure failure
+        if: always() && steps.queue_download.outcome == 'success'
+        id: finalize_result
+        continue-on-error: true
+        env:
+          IMMUTABLE_BASE_SHA: ${{ needs.audit.outputs.base_sha }}
+          EXPECTED_QUEUE_SHA256: ${{ needs.audit.outputs.queue_sha256 }}
+          CANDIDATE_FINGERPRINT: ${{ matrix.fingerprint }}
+          CANDIDATE_INDEX: ${{ matrix.index }}
+          DEPENDENCY_OUTCOME: ${{ steps.dependencies.outcome }}
+          PREPARE_OUTCOME: ${{ steps.candidate.outcome }}
+          PROOF_OUTCOME: ${{ steps.proof.outcome }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -f .candidate-result/result-manifest.json ]]; then
+            echo "sealed=true" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          if [[ -e .candidate-result ]]; then
+            mv -- .candidate-result .candidate-result-incomplete
+          fi
+          mkdir .candidate-result
+          reason="dependency=${DEPENDENCY_OUTCOME};prepare=${PREPARE_OUTCOME};proof=${PROOF_OUTCOME}"
+          if timeout --kill-after=5s 1m node scripts/candidate_queue.mjs seal-result \
+            --queue-root .candidate-queue \
+            --expected-base-sha "${IMMUTABLE_BASE_SHA}" \
+            --expected-queue-sha256 "${EXPECTED_QUEUE_SHA256}" \
+            --fingerprint "${CANDIDATE_FINGERPRINT}" \
+            --expected-index "${CANDIDATE_INDEX}" \
+            --result-dir .candidate-result \
+            --status infrastructure-failure \
+            --reason "${reason}"; then
+            echo "sealed=true" >> "${GITHUB_OUTPUT}"
+          else
+            echo "sealed=false" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+
+      - name: Upload the sealed candidate status and proven bytes
+        if: always() && steps.finalize_result.outputs.sealed == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-result-${{ github.run_id }}-${{ matrix.fingerprint }}
+          path: .candidate-result/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 2
+
+      - name: Select a deterministic bounded candidate screenshot set
+        if: always()
+        continue-on-error: true
+        id: candidate_screenshots
+        shell: bash
+        run: |
+          node scripts/candidate_queue.mjs cap-screenshots \
+            --source-dir "outputs/candidate-evidence/${{ matrix.fingerprint }}" \
+            --output-dir .candidate-screenshots \
+            --max-files 2 \
+            --max-bytes 524288 \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Upload bounded candidate JSON and hashes
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-json-${{ github.run_id }}-${{ matrix.fingerprint }}
+          path: .candidate-json-evidence/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 2
+
+      - name: Upload bounded candidate screenshots
+        if: >-
+          steps.candidate_screenshots.outputs.count != '0' &&
+          matrix.index < 4
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-screenshots-${{ github.run_id }}-${{ matrix.fingerprint }}
+          path: .candidate-screenshots/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  aggregate-candidates:
+    needs: [audit, candidate-proof]
+    if: >-
+      always() &&
+      needs.audit.result == 'success' &&
+      needs.audit.outputs.candidate_count != '0'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      candidate_ready: ${{ steps.aggregate.outputs.candidate_ready }}
+      selected_fingerprint: ${{ steps.aggregate.outputs.selected_fingerprint }}
+    steps:
+      - name: Check out exactly the audited base
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.audit.outputs.base_sha }}
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Download the signed candidate queue
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: candidate-queue-${{ github.run_id }}
+          path: .candidate-queue
+
+      - name: Download every independent candidate result
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: candidate-result-${{ github.run_id }}-*
+          path: .candidate-results
+          merge-multiple: false
+
+      - name: Verify the exact result set and atomically select one candidate
+        id: aggregate
+        env:
+          IMMUTABLE_BASE_SHA: ${{ needs.audit.outputs.base_sha }}
+          EXPECTED_QUEUE_SHA256: ${{ needs.audit.outputs.queue_sha256 }}
+          RESULT_PREFIX: candidate-result-${{ github.run_id }}-
+        shell: bash
+        run: |
+          mkdir -p .candidate-results .candidate-aggregate
+          node scripts/candidate_queue.mjs aggregate-results \
+            --queue-root .candidate-queue \
+            --results-root .candidate-results \
+            --artifact-prefix "${RESULT_PREFIX}" \
+            --expected-base-sha "${IMMUTABLE_BASE_SHA}" \
+            --expected-queue-sha256 "${EXPECTED_QUEUE_SHA256}" \
+            --output-dir .promotion-package \
+            --summary-file .candidate-aggregate/summary.json \
+            --github-output "${GITHUB_OUTPUT}"
+
+      - name: Upload the matrix aggregation summary
+        if: always()
+        continue-on-error: true
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: candidate-aggregate-${{ github.run_id }}
+          path: .candidate-aggregate/
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 2
+
+      - name: Upload the one exact release-ready candidate
+        if: steps.aggregate.outputs.candidate_ready == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: promotion-${{ github.run_id }}
+          path: .promotion-package/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  promote:
+    needs: [audit, aggregate-candidates]
+    if: >-
+      needs.aggregate-candidates.outputs.candidate_ready == 'true' &&
+      vars.ENABLE_STATE_COMMITS == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 330
+    permissions:
+      contents: write
+    outputs:
+      commit_sha: ${{ steps.push.outputs.commit_sha }}
+    steps:
+      - name: Check out exactly the audited base
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.audit.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download the exact proven artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: promotion-${{ github.run_id }}
+          path: .promotion-package
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Verify the complete promotion provenance chain
+        env:
+          AUDITED_BASE_SHA: ${{ needs.audit.outputs.base_sha }}
+          EXPECTED_QUEUE_SHA256: ${{ needs.audit.outputs.queue_sha256 }}
+        shell: bash
+        run: |
+          node scripts/candidate_queue.mjs verify-promotion \
+            --promotion-root .promotion-package \
+            --expected-base-sha "${AUDITED_BASE_SHA}" \
+            --expected-queue-sha256 "${EXPECTED_QUEUE_SHA256}"
+
+      - name: Verify the frozen full-audit safety evidence
+        env:
+          AUDITED_BASE_SHA: ${{ needs.audit.outputs.base_sha }}
+        shell: bash
+        run: |
+          proof=.promotion-package/proof
+          test "$(cat "${proof}/base-commit.txt")" = "${AUDITED_BASE_SHA}"
+          (cd "${proof}" && sha256sum --check base-audit-report.sha256)
+          FROZEN_REPORT="${proof}/base-audit-report.json" \
+          PROMOTION_READY="${proof}/promotion-ready.json" \
+          node <<'NODE'
+          const fs = require('node:fs');
+          const report = JSON.parse(fs.readFileSync(process.env.FROZEN_REPORT, 'utf8'));
+          const ready = JSON.parse(fs.readFileSync(process.env.PROMOTION_READY, 'utf8'));
+          const candidateSite = ready.candidate?.siteId;
+          const candidateLayout = ready.candidate?.layoutId;
+          const candidateProfiles = new Set(ready.candidate?.proofProfiles ?? []);
+          const expectedSites = new Set(report.integrity?.config?.requiredSiteIds ?? []);
+          const observedSites = new Set((report.results ?? []).map((result) => result.siteId));
+          if (!candidateSite || report.integrity?.passed !== true ||
+              report.syntheticFixture?.passed !== true ||
+              report.regressionFixtures?.passed !== true ||
+              report.edgeFixtures?.passed !== true ||
+              ready.baseConfigSha256 !== report.integrity?.config?.sha256 ||
+              expectedSites.size === 0 ||
+              [...expectedSites].some((siteId) => !observedSites.has(siteId))) {
+            throw new Error('frozen audit is incomplete or does not match the promotion base');
+          }
+          const zeroLeak = (gate) => gate &&
+            gate.uncoveredUnmarkedCount === 0 &&
+            gate.visibleWithoutKeepCount === 0 &&
+            gate.directVisibleTextLeakCount === 0 &&
+            gate.coveredKeptCount === 0 &&
+            gate.paintProbe?.flashFrameCount === 0;
+          for (const result of report.results ?? []) {
+            const isCandidateTuple =
+              result.siteId === candidateSite &&
+              result.layoutId === candidateLayout &&
+              candidateProfiles.has(result.profile);
+            if (isCandidateTuple || result.passed === true) continue;
+            const gate = result.userscript?.gate;
+            const staticOnlyFailure = (result.failures ?? []).every(
+              (failure) => failure.startsWith('static'),
+            );
+            const safelyReadable = gate?.ready === true && staticOnlyFailure && zeroLeak(gate);
+            const safelyClosed = gate?.ready === false &&
+              gate?.state === 'blocked' && zeroLeak(gate);
+            if (!safelyReadable && !safelyClosed) {
+              throw new Error(`unrelated drift is not fail-closed: ${result.siteId}`);
+            }
+          }
+          NODE
+
+      - name: Revalidate the final bundle against the unchanged base
+        shell: bash
+        run: |
+          state_args=()
+          if [[ -f state/approved-variants.json ]]; then
+            state_args=(--merge-approved-state state/approved-variants.json)
+          fi
+          python scripts/build_filter.py \
+            --candidate .promotion-package/proof/promotion-ready.json \
+            --output-dir .promotion-package/release \
+            "${state_args[@]}" \
+            --check
+
+      - name: Materialize the exact candidate into a local release commit
+        id: materialize
+        shell: bash
+        run: |
+          release=.promotion-package/release
+          for required in \
+            filter.txt \
+            filter-static.txt \
+            hotdeal-focus.user.js \
+            config/sites.json \
+            state/approved-variants.json \
+            release-manifest.json \
+            package.json \
+            package-lock.json; do
+            test -f "${release}/${required}"
+          done
+          cmp --silent filter.txt "${release}/filter.txt" || {
+            echo "A DOM promotion attempted to change immutable gate-v1 bytes." >&2
+            exit 1
+          }
+          install -m 0644 "${release}/filter.txt" filter.txt
+          install -m 0644 "${release}/filter-static.txt" filter-static.txt
+          install -m 0644 "${release}/hotdeal-focus.user.js" hotdeal-focus.user.js
+          install -m 0644 "${release}/config/sites.json" config/sites.json
+          install -m 0644 "${release}/release-manifest.json" release-manifest.json
+          install -m 0644 "${release}/package.json" package.json
+          install -m 0644 "${release}/package-lock.json" package-lock.json
+          mkdir -p state
+          install -m 0644 \
+            "${release}/state/approved-variants.json" \
+            state/approved-variants.json
+          git config user.name "hotdeal-focus-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- \
+            filter.txt \
+            filter-static.txt \
+            hotdeal-focus.user.js \
+            config/sites.json \
+            release-manifest.json \
+            package.json \
+            package-lock.json \
+            state/approved-variants.json
+          git commit -m "feat(release): promote verified DOM variant / 검증된 DOM 변형 승격 / 検証済みDOM更新 / 提升已验证DOM变体"
+          echo "commit_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
+
+      - name: Install locked dependencies and Chromium
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Audit the exact candidate profiles and passing sibling baseline
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "${{ steps.materialize.outputs.commit_sha }}"
+          npm run check:node
+          npm test
+          npm run build:check
+          npm run integrity
+          timeout --kill-after=5s 60s npm run test:tamper
+          timeout --kill-after=10s 15m npm run test:behavior
+          timeout --kill-after=15s 180m npm run audit:dom -- \
+            --require-algumon-discovery \
+            --promotion-scope .promotion-package/proof/promotion-ready.json \
+            --baseline-report .promotion-package/proof/base-audit-report.json
+          git diff --exit-code -- .
+
+      - name: Fast-forward push only if the remote is still the audited base
+        id: push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ needs.audit.outputs.base_sha }}
+          COMMIT_SHA: ${{ steps.materialize.outputs.commit_sha }}
+        shell: bash
+        run: |
+          authenticated="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          remote_sha="$(git ls-remote "${authenticated}" "refs/heads/${DEFAULT_BRANCH}" | cut -f1)"
+          if [[ "${remote_sha}" != "${BASE_SHA}" ]]; then
+            echo "Remote head changed; promotion and Pages deployment are cancelled." >&2
+            exit 1
+          fi
+          git push "${authenticated}" "${COMMIT_SHA}:refs/heads/${DEFAULT_BRANCH}"
+          echo "commit_sha=${COMMIT_SHA}" >> "${GITHUB_OUTPUT}"
+
+  report-failure:
+    needs: audit
+    if: >-
+      always() &&
+      (needs.audit.result != 'success' ||
+       needs.audit.outputs.failed == 'true')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or update one drift issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          title="[DOM drift] AdGuard Hotdeal Focus gate failed"
+          gh label create dom-drift \
+            --repo "${GITHUB_REPOSITORY}" \
+            --color D73A4A \
+            --description "Live hot-deal DOM contract changed" \
+            --force
+          existing="$(gh issue list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --state open \
+            --label dom-drift \
+            --json number,title \
+            --jq '.[] | select(.title == "[DOM drift] AdGuard Hotdeal Focus gate failed") | .number' \
+            | head -n 1)"
+          printf '%s\n\n%s\n\n%s\n' \
+            "The six-hour GitHub-hosted DOM gate failed." \
+            "Evidence (screenshots, proof JSON, and hashes): ${RUN_URL}" \
+            "The issue stays open until a later full cloud audit is clean. A proven single-site promotion may be followed immediately by another serialized audit for remaining drift." \
+            > issue-body.md
+          if [[ -n "${existing}" ]]; then
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body-file issue-body.md
+          else
+            gh issue create \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${title}" \
+              --label dom-drift \
+              --body-file issue-body.md
+          fi
+          exit 1
+
+  report-recovery:
+    needs: [audit, promote]
+    if: >-
+      always() &&
+      needs.audit.result == 'success' &&
+      needs.audit.outputs.failed == 'false'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Close an open drift issue after a clean cloud audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          existing="$(gh issue list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --state open \
+            --label dom-drift \
+            --json number,title \
+            --jq '.[] | select(.title == "[DOM drift] AdGuard Hotdeal Focus gate failed") | .number' \
+            | head -n 1)"
+          if [[ -n "${existing}" ]]; then
+            gh issue comment "${existing}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --body "Recovered on an exact GitHub-hosted release audit: ${RUN_URL}"
+            gh issue close "${existing}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --reason completed
+          fi
+
+  scheduler-heartbeat:
+    needs: [audit, promote, deploy-pages]
+    if: >-
+      always() &&
+      vars.ENABLE_STATE_COMMITS == 'true' &&
+      needs.promote.result != 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the current default branch without stored credentials
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Write an attempt heartbeat at most once every 30 days
+        id: heartbeat
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          AUDIT_FAILED: ${{ needs.audit.outputs.failed }}
+        shell: bash
+        run: |
+          node <<'NODE'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const statePath = path.join('state', 'scheduler-heartbeat.json');
+          let previous = null;
+          try { previous = JSON.parse(fs.readFileSync(statePath, 'utf8')); } catch {}
+          const now = new Date();
+          const previousTime = Date.parse(previous?.last_attempt_at ?? '');
+          const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+          if (Number.isFinite(previousTime) && now.getTime() - previousTime < thirtyDaysMs) {
+            fs.appendFileSync(process.env.GITHUB_OUTPUT, 'changed=false\n');
+            process.exit(0);
+          }
+          const payload = {
+            schema_version: 1,
+            last_attempt_at: now.toISOString(),
+            outcome: process.env.AUDIT_FAILED === 'false' ? 'success' : 'failure',
+            release_authority: false,
+            workflow_run: process.env.RUN_URL,
+          };
+          fs.mkdirSync(path.dirname(statePath), { recursive: true });
+          fs.writeFileSync(statePath, `${JSON.stringify(payload, null, 2)}\n`, 'utf8');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'changed=true\n');
+          NODE
+
+      - name: Commit only if the remote head is unchanged
+        if: steps.heartbeat.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          base_sha="$(git rev-parse HEAD)"
+          git config user.name "hotdeal-focus-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -- state/scheduler-heartbeat.json
+          git commit -m "chore(monitor): record scheduler attempt / 스케줄 실행 기록 / 定期監査の記録 / 记录定时审计"
+          authenticated="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          remote_sha="$(git ls-remote "${authenticated}" "refs/heads/${DEFAULT_BRANCH}" | cut -f1)"
+          if [[ "${remote_sha}" != "${base_sha}" ]]; then
+            echo "Heartbeat lost an optimistic race; leaving the remote unchanged."
+            exit 0
+          fi
+          git push "${authenticated}" "HEAD:refs/heads/${DEFAULT_BRANCH}"
+
+  deploy-pages:
+    needs: [audit, promote]
+    if: >-
+      always() &&
+      vars.ENABLE_PAGES_PUBLISH == 'true' &&
+      (needs.promote.result == 'success' ||
+       (needs.audit.result == 'success' && needs.audit.outputs.failed == 'false'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    concurrency:
+      group: hotdeal-focus-pages-deployment
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    steps:
+      - name: Check out the exact healthy audited release
+        if: needs.promote.result != 'success'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.audit.outputs.base_sha }}
+          persist-credentials: false
+
+      - name: Check out the exact promoted source
+        if: needs.promote.result == 'success'
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.promote.outputs.commit_sha }}
+          persist-credentials: false
+
+      - name: Download the exact promoted release
+        if: needs.promote.result == 'success'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: promotion-${{ github.run_id }}
+          path: .promotion-package
+
+      - name: Refuse to publish a release older than the current branch head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          AUDITED_SHA: ${{ needs.audit.outputs.base_sha }}
+          PROMOTED_SHA: ${{ needs.promote.outputs.commit_sha }}
+        shell: bash
+        run: |
+          expected_sha="${AUDITED_SHA}"
+          if [[ "${{ needs.promote.result }}" == "success" ]]; then
+            expected_sha="${PROMOTED_SHA}"
+          fi
+          authenticated="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          remote_sha="$(git ls-remote "${authenticated}" "refs/heads/${DEFAULT_BRANCH}" | cut -f1)"
+          if [[ -z "${expected_sha}" || "${remote_sha}" != "${expected_sha}" ]]; then
+            echo "The branch changed after verification; Pages publication is deferred." >&2
+            exit 1
+          fi
+
+      - name: Require the exact immutable gate release before Pages publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python scripts/hotdeal_focus_cli.py gate-release verify \
+            --repo "${GITHUB_REPOSITORY}" \
+            --json > .gate-release-verification.json
+
+      - name: Stage only public manifest-matched files
+        shell: bash
+        run: |
+          if [[ "${{ needs.promote.result }}" == "success" ]]; then
+            release=.promotion-package/release
+          else
+            release=.
+          fi
+          RELEASE_ROOT="${release}" node <<'NODE'
+          const crypto = require('node:crypto');
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const root = process.env.RELEASE_ROOT;
+          const manifest = JSON.parse(
+            fs.readFileSync(path.join(root, 'release-manifest.json'), 'utf8'),
+          );
+          const expected = ['filter.txt', 'hotdeal-focus.user.js'];
+          const actual = Object.keys(manifest.artifacts ?? {}).sort();
+          if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+            throw new Error(`unexpected public artifacts: ${actual.join(', ')}`);
+          }
+          for (const name of expected) {
+            const bytes = fs.readFileSync(path.join(root, name));
+            const digest = crypto.createHash('sha256').update(bytes).digest('hex');
+            if (manifest.artifacts[name]?.sha256 !== digest) {
+              throw new Error(`${name} does not match release-manifest.json`);
+            }
+          }
+          NODE
+          mkdir -p .pages
+          install -m 0644 "${release}/filter.txt" .pages/filter.txt
+          install -m 0644 \
+            "${release}/hotdeal-focus.user.js" \
+            .pages/hotdeal-focus.user.js
+          install -m 0644 \
+            "${release}/release-manifest.json" \
+            .pages/release-manifest.json
+          actual_files="$(find .pages -maxdepth 1 -type f -printf '%f\n' | sort)"
+          expected_files="$(printf '%s\n' filter.txt hotdeal-focus.user.js release-manifest.json | sort)"
+          if [[ "${actual_files}" != "${expected_files}" ]]; then
+            echo "Pages stage contains a non-public fourth file" >&2
+            exit 1
+          fi
+
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: .pages
+
+      - name: Deploy the exact verified bytes
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+
+  continue-drift-chain:
+    needs: [audit, promote]
+    if: >-
+      always() &&
+      needs.audit.outputs.failed == 'true' &&
+      needs.promote.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Dispatch one serialized follow-up audit from the updated default branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          gh workflow run watch-dom.yml \
+            --repo "${GITHUB_REPOSITORY}" \
+            --ref "${DEFAULT_BRANCH}"
+
+  report-pages-failure:
+    needs: [audit, promote, deploy-pages]
+    if: >-
+      always() &&
+      vars.ENABLE_PAGES_PUBLISH == 'true' &&
+      needs.deploy-pages.result == 'failure'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or update one Pages deployment issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          title="[Pages drift] verified release deployment failed"
+          gh label create pages-deploy \
+            --repo "${GITHUB_REPOSITORY}" \
+            --color B60205 \
+            --description "Verified Pages release failed to deploy" \
+            --force
+          existing="$(gh issue list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --state open \
+            --label pages-deploy \
+            --json number,title \
+            --jq '.[] | select(.title == "[Pages drift] verified release deployment failed") | .number' \
+            | head -n 1)"
+          printf '%s\n\n%s\n' \
+            "A manifest-matched release passed its audit but GitHub Pages deployment failed." \
+            "The next healthy six-hour audit will retry the exact current release: ${RUN_URL}" \
+            > pages-issue-body.md
+          if [[ -n "${existing}" ]]; then
+            gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body-file pages-issue-body.md
+          else
+            gh issue create \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${title}" \
+              --label pages-deploy \
+              --body-file pages-issue-body.md
+          fi
+
+  report-pages-recovery:
+    needs: deploy-pages
+    if: >-
+      always() &&
+      needs.deploy-pages.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Close an open Pages deployment issue after retry succeeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        shell: bash
+        run: |
+          existing="$(gh issue list \
+            --repo "${GITHUB_REPOSITORY}" \
+            --state open \
+            --label pages-deploy \
+            --json number,title \
+            --jq '.[] | select(.title == "[Pages drift] verified release deployment failed") | .number' \
+            | head -n 1)"
+          if [[ -n "${existing}" ]]; then
+            gh issue comment "${existing}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --body "Recovered by an idempotent verified-release retry: ${RUN_URL}"
+            gh issue close "${existing}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --reason completed
+          fi

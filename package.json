@@ -1,0 +1,25 @@
+{
+  "name": "adguard-hotdeal-focus",
+  "version": "0.3.6",
+  "private": true,
+  "description": "Fail-closed AdGuard hot-deal reader gate and cloud DOM monitor",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "python scripts/build_release.py",
+    "build:check": "python scripts/build_release.py --check",
+    "test": "python -m unittest discover -s tests -v",
+    "check:node": "node --check scripts/audit_pages.mjs && node --check hotdeal-focus.user.js",
+    "integrity": "node scripts/audit_pages.mjs --integrity-only",
+    "test:behavior": "node scripts/audit_pages.mjs --fixture-only --no-discover-algumon",
+    "test:tamper": "node scripts/audit_pages.mjs --tamper-fixture-only --timeout-ms 8000",
+    "verify": "npm run check:node && npm test && npm run build:check && npm run integrity",
+    "audit:dom": "node scripts/audit_pages.mjs --discover-algumon"
+  },
+  "devDependencies": {
+    "playwright": "1.61.1"
+  }
+}

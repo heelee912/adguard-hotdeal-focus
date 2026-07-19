@@ -1,0 +1,663 @@
+{
+  "schema_version": 1,
+  "metadata": {
+    "title": "AdGuard Hotdeal Focus",
+    "description": "Shows only the hot-deal title, purchase information, article body, and comments.",
+    "version": "0.3.6",
+    "expires_hours": 12,
+    "license": "MIT",
+    "rollback_of": null
+  },
+  "sites": [
+    {
+      "id": "clien",
+      "name": "Clien",
+      "layouts": [
+        {
+          "id": "jirum",
+          "domain": "clien.net",
+          "path": "|/service/board/jirum/",
+          "applicable_profiles": [
+            "desktop",
+            "mobile"
+          ],
+          "page_root": ".content_view",
+          "sample_urls": [
+            "https://www.clien.net/service/board/jirum/19230509"
+          ],
+          "ancestor_markers": [
+            ".post_subject",
+            ".post_article",
+            ".post_comment",
+            ".post_comment > .comment"
+          ],
+          "preserve_deep": [
+            ".post_article",
+            ".post_comment > .comment"
+          ],
+          "preserve_shallow": [
+            ".post_subject",
+            ".post_comment"
+          ],
+          "required_roles": [
+            "title",
+            "body",
+            "comments"
+          ],
+          "required_groups": {
+            "title": [
+              ".post_subject"
+            ],
+            "body": [
+              ".post_article"
+            ],
+            "comments": [
+              ".post_comment"
+            ]
+          },
+          "role_projection": {
+            "title": { "mode": "seeded-shallow" },
+            "body": { "mode": "atomic-boundary", "ignored": [] },
+            "product": {
+              "mode": "absent",
+              "cardinality": "zero",
+              "selectors": [],
+              "ignored": []
+            },
+            "comments": { "mode": "classified-children" }
+          },
+          "comment_contract": {
+            "mount": [
+              ".post_comment"
+            ],
+            "items": [
+              ".post_comment > .comment .comment_row"
+            ],
+            "controls": [
+              ".post_comment > .comment_nav",
+              ".post_comment .comment_more",
+              ".post_comment .pagination",
+              ".post_comment [data-role='reply-toggle']"
+            ],
+            "ignored": [
+              ".post_comment > .comment_head",
+              ".post_comment > .comment_msg",
+              ".post_comment > #comment_write_div",
+              ".post_comment > .fr-overlay"
+            ],
+            "allow_empty": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "ppomppu",
+      "name": "Ppomppu",
+      "layouts": [
+        {
+          "id": "pc",
+          "domain": "ppomppu.co.kr",
+          "path": "|/zboard/view.php?id=ppomppu^",
+          "applicable_profiles": [
+            "desktop"
+          ],
+          "page_root": ".wrapper",
+          "sample_urls": [
+            "https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu&no=721171"
+          ],
+          "ancestor_markers": [
+            "#topTitle > h1",
+            ".subject_preface",
+            ".topTitle-link",
+            ".board-contents",
+            "#comment_list_area"
+          ],
+          "preserve_deep": [
+            ".subject_preface",
+            ".topTitle-link",
+            ".board-contents",
+            "#comment_list_area"
+          ],
+          "preserve_shallow": [
+            "#topTitle > h1"
+          ],
+          "required_roles": [
+            "title",
+            "product",
+            "body",
+            "comments"
+          ],
+          "required_groups": {
+            "title": [
+              "#topTitle > h1"
+            ],
+            "body": [
+              ".board-contents"
+            ],
+            "product": [
+              ".topTitle-link"
+            ],
+            "comments": [
+              "#comment_list_area"
+            ]
+          },
+          "role_projection": {
+            "title": { "mode": "seeded-shallow" },
+            "body": { "mode": "atomic-boundary", "ignored": [] },
+            "product": {
+              "mode": "atomic-boundary",
+              "cardinality": "required",
+              "selectors": [".topTitle-link"],
+              "ignored": []
+            },
+            "comments": { "mode": "classified-children" }
+          },
+          "comment_contract": {
+            "mount": [
+              "#comment_list_area"
+            ],
+            "items": [
+              "#comment_list_area > .comment_wrapper[id^='iC_']"
+            ],
+            "controls": [
+              "#comment_list_area .comment_more",
+              "#comment_list_area .pagination"
+            ],
+            "ignored": [],
+            "allow_empty": true
+          }
+        },
+        {
+          "id": "mobile",
+          "domain": "ppomppu.co.kr",
+          "path": "|/new/bbs_view.php?id=ppomppu^",
+          "applicable_profiles": [
+            "mobile"
+          ],
+          "page_root": ".bbs.view",
+          "sample_urls": [
+            "https://m.ppomppu.co.kr/new/bbs_view.php?id=ppomppu&no=721171"
+          ],
+          "ancestor_markers": [
+            ".bbs.view > h4",
+            ".subject_preface",
+            ".bbs.view > h4 .info a.noeffect",
+            "#KH_Content",
+            "#cmAr",
+            "#cmList",
+            "#cmAr > .cmt-more-btn"
+          ],
+          "preserve_deep": [
+            ".subject_preface",
+            ".bbs.view > h4 .info a.noeffect",
+            "#KH_Content",
+            "#cmList",
+            "#cmAr > .cmt-more-btn"
+          ],
+          "preserve_shallow": [
+            ".bbs.view > h4",
+            "#cmAr"
+          ],
+          "required_roles": [
+            "title",
+            "product",
+            "body",
+            "comments"
+          ],
+          "required_groups": {
+            "title": [
+              ".bbs.view > h4"
+            ],
+            "body": [
+              "#KH_Content"
+            ],
+            "product": [
+              ".bbs.view > h4 .info a.noeffect"
+            ],
+            "comments": [
+              "#cmAr"
+            ]
+          },
+          "role_projection": {
+            "title": { "mode": "seeded-shallow" },
+            "body": { "mode": "atomic-boundary", "ignored": [] },
+            "product": {
+              "mode": "atomic-boundary",
+              "cardinality": "required",
+              "selectors": [".bbs.view > h4 .info a.noeffect"],
+              "ignored": []
+            },
+            "comments": { "mode": "classified-children" }
+          },
+          "comment_contract": {
+            "mount": [
+              "#cmAr"
+            ],
+            "items": [
+              "#cmList > .sect-cmt[data-cno]"
+            ],
+            "controls": [
+              "#cmList > a[id]",
+              "#cmAr > .cmt-more-btn",
+              "#cmAr .cmt-reply-btn"
+            ],
+            "ignored": [
+              "#cmAr > #hot-comment-preview"
+            ],
+            "allow_empty": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "ruliweb",
+      "name": "Ruliweb",
+      "layouts": [
+        {
+          "id": "hotdeal",
+          "domain": "ruliweb.com",
+          "paths": [
+            "|/market/board/1020/read/",
+            "|/news/board/1020/read/"
+          ],
+          "applicable_profiles": [
+            "desktop",
+            "mobile"
+          ],
+          "page_root": "#board_read",
+          "sample_urls": [
+            "https://bbs.ruliweb.com/news/board/1020/read/105748"
+          ],
+          "ancestor_markers": [
+            ".category_text",
+            ".subject_inner_text",
+            ".source_url.box_line_with_shadow",
+            ".view_content",
+            ".comment_view.normal"
+          ],
+          "preserve_deep": [
+            ".source_url.box_line_with_shadow",
+            ".view_content",
+            ".comment_view.normal"
+          ],
+          "preserve_shallow": [
+            ".category_text",
+            ".subject_inner_text"
+          ],
+          "required_roles": [
+            "title",
+            "body",
+            "comments"
+          ],
+          "required_groups": {
+            "title": [
+              ".subject_inner_text"
+            ],
+            "body": [
+              ".view_content"
+            ],
+            "comments": [
+              ".comment_view.normal"
+            ]
+          },
+          "role_projection": {
+            "title": { "mode": "seeded-shallow" },
+            "body": { "mode": "atomic-boundary", "ignored": [] },
+            "product": {
+              "mode": "atomic-boundary",
+              "cardinality": "optional",
+              "selectors": [".source_url.box_line_with_shadow"],
+              "ignored": []
+            },
+            "comments": { "mode": "classified-children" }
+          },
+          "comment_contract": {
+            "mount": [
+              ".comment_view.normal"
+            ],
+            "items": [
+              ".comment_view.normal > .comment_element"
+            ],
+            "controls": [
+              ".comment_view.normal .comment_more",
+              ".comment_view.normal .pagination",
+              ".comment_view.normal .btn_reply"
+            ],
+            "ignored": [],
+            "allow_empty": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "quasarzone",
+      "name": "QuasarZone",
+      "layouts": [
+        {
+          "id": "market",
+          "domain": "quasarzone.com",
+          "path": "|/bbs/qb_*/views/",
+          "applicable_profiles": [
+            "desktop",
+            "mobile"
+          ],
+          "page_root": ".common-view-wrap",
+          "sample_urls": [
+            "https://quasarzone.com/bbs/qb_saleinfo/views/1971167"
+          ],
+          "ancestor_markers": [
+            ".market-info-view-wrap h1.title",
+            ".market-info-view-table",
+            ".view-content > .note-editor",
+            "#ajax-reply-list"
+          ],
+          "preserve_deep": [
+            ".market-info-view-table",
+            ".view-content > .note-editor",
+            "#ajax-reply-list"
+          ],
+          "preserve_shallow": [
+            ".market-info-view-wrap h1.title"
+          ],
+          "required_roles": [
+            "title",
+            "product",
+            "body",
+            "comments"
+          ],
+          "required_groups": {
+            "title": [
+              ".market-info-view-wrap h1.title"
+            ],
+            "body": [
+              ".view-content > .note-editor"
+            ],
+            "product": [
+              ".market-info-view-table"
+            ],
+            "comments": [
+              "#ajax-reply-list"
+            ]
+          },
+          "role_projection": {
+            "title": { "mode": "seeded-shallow" },
+            "body": { "mode": "atomic-boundary", "ignored": [] },
+            "product": {
+              "mode": "atomic-boundary",
+              "cardinality": "required",
+              "selectors": [".market-info-view-table"],
+              "ignored": []
+            },
+            "comments": { "mode": "classified-children" }
+          },
+          "comment_contract": {
+            "mount": [
+              "#ajax-reply-list"
+            ],
+            "items": [
+              "#ajax-reply-list > li"
+            ],
+            "controls": [
+              "#ajax-reply-list .more-btn",
+              "#ajax-reply-list .pagination",
+              "#ajax-reply-list .reply-toggle"
+            ],
+            "ignored": [
+              "#ajax-reply-list > .best-comment-wrap"
+            ],
+            "allow_empty": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "eomisae",
+      "name": "Eomisae",
+      "layouts": [
+        {
+          "id": "hotdeal",
+          "domain": "eomisae.co.kr",
+          "paths": [
+            "|/rt/",
+            "|/os/",
+            "|/fs/",
+            "|/index.php?document_srl="
+          ],
+          "applicable_profiles": [
+            "desktop",
+            "mobile"
+          ],
+          "page_root": "#bd",
+          "sample_urls": [
+            "https://eomisae.co.kr/rt/194871796"
+          ],
+          "ancestor_markers": [
+            "#D_ ._hd h2",
+            "#D_ .et_vars",
+            "#D_ article > .rhymix_content",
+            "#C_ > #comment",
+            "#C_ > ._bd"
+          ],
+          "preserve_deep": [
+            "#D_ .et_vars",
+            "#D_ article > .rhymix_content",
+            "#C_ > ._bd"
+          ],
+          "preserve_shallow": [
+            "#D_ ._hd h2",
+            "#C_ > #comment"
+          ],
+          "required_roles": [
+            "title",
+            "product",
+            "body",
+            "comments"
+          ],
+          "required_groups": {
+            "title": [
+              "#D_ ._hd h2"
+            ],
+            "body": [
+              "#D_ article > .rhymix_content"
+            ],
+            "product": [
+              "#D_ .et_vars"
+            ],
+            "comments": [
+              "#C_ > ._bd"
+            ]
+          },
+          "role_projection": {
+            "title": { "mode": "seeded-shallow" },
+            "body": { "mode": "atomic-boundary", "ignored": [] },
+            "product": {
+              "mode": "atomic-boundary",
+              "cardinality": "required",
+              "selectors": ["#D_ .et_vars"],
+              "ignored": []
+            },
+            "comments": { "mode": "classified-children" }
+          },
+          "comment_contract": {
+            "mount": [
+              "#C_ > ._bd"
+            ],
+            "items": [
+              "#C_ > ._bd > ._comment[id^='comment_']"
+            ],
+            "controls": [
+              "#C_ > ._bd .pagination",
+              "#C_ > ._bd .more",
+              "#C_ > ._bd .reply"
+            ],
+            "ignored": [],
+            "allow_empty": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "zod",
+      "name": "ZOD",
+      "layouts": [
+        {
+          "id": "deal",
+          "domain": "zod.kr",
+          "path": "|/deal/",
+          "applicable_profiles": [
+            "desktop",
+            "mobile"
+          ],
+          "page_root": "main",
+          "sample_urls": [
+            "https://zod.kr/deal/8452555"
+          ],
+          "ancestor_markers": [
+            ".app-board-article-head h1",
+            ".app-article-container > .app-board-extra-value",
+            ".app-article-container > .app-article-content",
+            "#app-board-comment-list"
+          ],
+          "preserve_deep": [
+            ".app-article-container > .app-board-extra-value",
+            ".app-article-container > .app-article-content",
+            "#app-board-comment-list"
+          ],
+          "preserve_shallow": [
+            ".app-board-article-head h1"
+          ],
+          "required_roles": [
+            "title",
+            "product",
+            "body",
+            "comments"
+          ],
+          "required_groups": {
+            "title": [
+              ".app-board-article-head h1"
+            ],
+            "body": [
+              ".app-article-container > .app-article-content"
+            ],
+            "product": [
+              ".app-article-container > .app-board-extra-value"
+            ],
+            "comments": [
+              "#app-board-comment-list"
+            ]
+          },
+          "role_projection": {
+            "title": { "mode": "seeded-shallow" },
+            "body": { "mode": "atomic-boundary", "ignored": [] },
+            "product": {
+              "mode": "atomic-boundary",
+              "cardinality": "required",
+              "selectors": [".app-article-container > .app-board-extra-value"],
+              "ignored": []
+            },
+            "comments": { "mode": "classified-children" }
+          },
+          "comment_contract": {
+            "mount": [
+              "#app-board-comment-list"
+            ],
+            "items": [
+              "#app-board-comment-list > li[id^='comment_'].app-comment-item"
+            ],
+            "controls": [
+              "#app-board-comment-list .pagination",
+              "#app-board-comment-list .more",
+              "#app-board-comment-list .reply-toggle"
+            ],
+            "ignored": [],
+            "allow_empty": true
+          }
+        }
+      ]
+    },
+    {
+      "id": "arcalive",
+      "name": "Arca Live",
+      "layouts": [
+        {
+          "id": "hotdeal",
+          "domain": "arca.live",
+          "path": "|/b/hotdeal/",
+          "applicable_profiles": [
+            "desktop",
+            "mobile"
+          ],
+          "page_root": "article.board-article",
+          "sample_urls": [
+            "https://arca.live/b/hotdeal/177371604"
+          ],
+          "ancestor_markers": [
+            ".article-view > .article-head",
+            ".article-head h1",
+            ".article-head h2",
+            ".article-head .title",
+            ".article-body",
+            ".article-content",
+            ".article-comment"
+          ],
+          "preserve_deep": [
+            ".article-head h1",
+            ".article-head h2",
+            ".article-head .title",
+            ".article-body",
+            ".article-content",
+            ".article-comment"
+          ],
+          "preserve_shallow": [
+            ".article-view > .article-head"
+          ],
+          "required_roles": [
+            "title",
+            "body",
+            "comments"
+          ],
+          "required_groups": {
+            "title": [
+              ".article-head h1",
+              ".article-head h2",
+              ".article-head .title"
+            ],
+            "body": [
+              ".article-body",
+              ".article-content"
+            ],
+            "comments": [
+              ".article-comment"
+            ]
+          },
+          "role_projection": {
+            "title": { "mode": "seeded-shallow" },
+            "body": { "mode": "atomic-boundary", "ignored": [] },
+            "product": {
+              "mode": "absent",
+              "cardinality": "zero",
+              "selectors": [],
+              "ignored": []
+            },
+            "comments": { "mode": "classified-children" }
+          },
+          "comment_contract": {
+            "mount": [
+              ".article-comment"
+            ],
+            "items": [
+              ".article-comment > .comment-item"
+            ],
+            "controls": [
+              ".article-comment .pagination",
+              ".article-comment .more",
+              ".article-comment .reply-toggle"
+            ],
+            "ignored": [],
+            "allow_empty": true
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,80 @@
+name: Publish immutable gate
+
+on:
+  workflow_dispatch:
+    inputs:
+      dispatch_nonce:
+        description: Machine correlation nonce
+        required: false
+        type: string
+
+run-name: hotdeal-focus-publish-gate-${{ inputs.dispatch_nonce || github.run_id }}
+
+permissions: {}
+
+concurrency:
+  group: hotdeal-focus-gate-v1
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the exact source commit
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install locked dependencies and Chromium
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          npx playwright install --with-deps chromium
+
+      - name: Verify the immutable gate source and complete release behavior
+        shell: bash
+        run: |
+          npm run check:node
+          npm test
+          npm run build
+          git diff --exit-code -- .
+          npm run integrity
+          timeout --kill-after=5s 60s npm run test:tamper
+          timeout --kill-after=10s 15m npm run test:behavior
+
+      - name: Publish or exactly verify gate-v1.0.0
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          python scripts/hotdeal_focus_cli.py gate-release publish \
+            --repo "${GITHUB_REPOSITORY}" \
+            --source-ref "${GITHUB_SHA}" \
+            --evidence-dir "outputs/gate-release-${GITHUB_RUN_ID}" \
+            --apply \
+            --json > "${RUNNER_TEMP}/gate-release-result.json"
+
+      - name: Upload bounded publication evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gate-release-evidence-${{ github.run_id }}
+          path: |
+            ${{ runner.temp }}/gate-release-result.json
+            outputs/gate-release-${{ github.run_id }}/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30
