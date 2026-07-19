@@ -1345,6 +1345,125 @@ class GateReleaseCommandTests(unittest.TestCase):
         self.assertTrue(result["immutableReleasesEnabled"])
         self.assertTrue(result["mutationApplied"])
 
+    def test_existing_immutable_gate_keeps_its_original_source_commit(self):
+        current_sha = "d" * 40
+        original_gate_sha = "a" * 40
+        manifest = {
+            "gateArtifactVersion": "1.0.0",
+            "filterSubscriptionUrl": (
+                "https://github.com/heelee912/adguard-hotdeal-focus/releases/download/"
+                "gate-v1.0.0/filter.txt"
+            ),
+        }
+        args = mock.Mock(
+            action="publish",
+            repo="heelee912/adguard-hotdeal-focus",
+            evidence_dir=None,
+            apply=True,
+            source_ref=current_sha,
+        )
+        existing = {"databaseId": 42, "isDraft": False, "isImmutable": True}
+        proof = {
+            "immutable": True,
+            "tag": "gate-v1.0.0",
+            "sourceCommit": original_gate_sha,
+        }
+        api_values = (
+            {"enabled": True},
+            {
+                "nameWithOwner": "heelee912/adguard-hotdeal-focus",
+                "visibility": "PUBLIC",
+                "defaultBranchRef": {"name": "main"},
+            },
+            {"sha": current_sha},
+        )
+        with mock.patch.object(
+            cli, "_command_exists", return_value=True
+        ), mock.patch.object(
+            cli, "_local_release_contract", return_value=(manifest, [])
+        ), mock.patch.object(
+            cli, "_git_source_binding", return_value=current_sha
+        ), mock.patch.object(
+            cli, "_gh_json", side_effect=api_values
+        ), mock.patch.object(
+            cli, "_gate_release_view", return_value=existing
+        ), mock.patch.object(
+            cli, "_verify_gate_release_with_retry", return_value=proof
+        ) as verify, mock.patch.object(
+            cli, "_require_remote_default_head"
+        ) as require_default_head, mock.patch.object(
+            cli, "_ensure_remote_gate_tag"
+        ) as ensure_tag, mock.patch.object(
+            cli, "_recover_exact_gate_draft"
+        ) as recover_draft, mock.patch.object(
+            cli, "_capture_command"
+        ) as mutation:
+            result = cli.command_gate_release(args)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["status"], "already-published")
+        self.assertFalse(result["mutationApplied"])
+        self.assertEqual(result["sourceSha"], current_sha)
+        self.assertEqual(result["gateRelease"]["sourceCommit"], original_gate_sha)
+        self.assertEqual(len(verify.call_args.args), 4)
+        self.assertEqual(verify.call_args.kwargs, {})
+        require_default_head.assert_not_called()
+        ensure_tag.assert_not_called()
+        recover_draft.assert_not_called()
+        mutation.assert_not_called()
+
+    def test_existing_draft_requires_current_default_head_before_recovery(self):
+        source_sha = "d" * 40
+        manifest = {
+            "gateArtifactVersion": "1.0.0",
+            "filterSubscriptionUrl": (
+                "https://github.com/heelee912/adguard-hotdeal-focus/releases/download/"
+                "gate-v1.0.0/filter.txt"
+            ),
+        }
+        args = mock.Mock(
+            action="publish",
+            repo="heelee912/adguard-hotdeal-focus",
+            evidence_dir=None,
+            apply=True,
+            source_ref=source_sha,
+        )
+        draft = {"databaseId": 42, "isDraft": True, "isImmutable": False}
+        api_values = (
+            {"enabled": True},
+            {
+                "nameWithOwner": "heelee912/adguard-hotdeal-focus",
+                "visibility": "PUBLIC",
+                "defaultBranchRef": {"name": "main"},
+            },
+            {"sha": source_sha},
+        )
+        with mock.patch.object(
+            cli, "_command_exists", return_value=True
+        ), mock.patch.object(
+            cli, "_local_release_contract", return_value=(manifest, [])
+        ), mock.patch.object(
+            cli, "_git_source_binding", return_value=source_sha
+        ), mock.patch.object(
+            cli, "_gh_json", side_effect=api_values
+        ), mock.patch.object(
+            cli, "_gate_release_view", return_value=draft
+        ), mock.patch.object(
+            cli, "_require_remote_default_head",
+            side_effect=cli.IntegrityFailure("not current default-branch head"),
+        ) as require_default_head, mock.patch.object(
+            cli, "_recover_exact_gate_draft"
+        ) as recover_draft:
+            with self.assertRaisesRegex(
+                cli.IntegrityFailure, "current default-branch head"
+            ):
+                cli.command_gate_release(args)
+
+        require_default_head.assert_called_once_with(
+            "heelee912/adguard-hotdeal-focus", "main", source_sha
+        )
+        recover_draft.assert_not_called()
+
     def test_publish_preserves_created_and_unknown_terminal_states(self):
         source_sha = "d" * 40
         manifest = {
@@ -1446,7 +1565,7 @@ class GateReleaseCommandTests(unittest.TestCase):
                 cli,
                 "_verify_gate_release_with_retry",
                 side_effect=verification_error,
-            ), mock.patch.object(
+            ) as verify, mock.patch.object(
                 cli, "_resume_gate_draft_after_ambiguous_create", return_value=None
             ):
                 result = cli.command_gate_release(args)
@@ -1464,6 +1583,8 @@ class GateReleaseCommandTests(unittest.TestCase):
             )
             self.assertIn("--verify-tag", release_argv)
             self.assertNotIn("--target", release_argv)
+            self.assertEqual(len(verify.call_args.args), 5)
+            self.assertEqual(verify.call_args.args[-1], source_sha)
 
     def test_publish_rejects_a_remote_commit_that_is_not_the_default_head(self):
         source_sha = "d" * 40
