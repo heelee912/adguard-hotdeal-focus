@@ -110,6 +110,8 @@ class ImmutableGateReleaseWorkflowTests(unittest.TestCase):
         self.assertNotIn("schedule:", trigger)
         self.assertNotIn("push:", trigger)
         self.assertIn("contents: write", PUBLISH_GATE_WORKFLOW)
+        self.assertIn("GH_TOKEN: ${{ github.token }}", PUBLISH_GATE_WORKFLOW)
+        self.assertNotIn("secrets.", PUBLISH_GATE_WORKFLOW)
         for command in (
             "npm test",
             "npm run build",

@@ -3051,9 +3051,6 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
     if not args.apply or not args.source_ref:
         raise UsageFailure("gate-release publish requires --source-ref and --apply")
     source_sha = _git_source_binding(args.source_ref)
-    policy = _immutable_release_policy(bound_repo)
-    if policy["enabled"] is not True:
-        raise IntegrityFailure("repository immutable releases are not enabled")
     repository = _gh_json(
         (
             "gh", "repo", "view", bound_repo, "--json",
@@ -3086,6 +3083,23 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
     if not isinstance(commit, dict) or str(commit.get("sha", "")).lower() != source_sha:
         raise IntegrityFailure("gate release source commit is not present in the repository")
     existing = _gate_release_view(bound_repo, tag, allow_missing=True)
+    if existing is not None and existing.get("isDraft") is not True:
+        proof = _verify_gate_release_with_retry(
+            bound_repo, tag, subscription_url, gate_bytes
+        )
+        result = _base_result(
+            "gate-release.publish",
+            ok=True,
+            status="already-published",
+            source_sha=source_sha,
+            artifacts=artifacts,
+            gateRelease=proof,
+            mutationApplied=False,
+        )
+        return _attach_command_evidence(result, args.evidence_dir)
+    policy = _immutable_release_policy(bound_repo)
+    if policy["enabled"] is not True:
+        raise IntegrityFailure("repository immutable releases are not enabled")
     if existing is not None and existing.get("isDraft") is True:
         _require_remote_default_head(bound_repo, default_branch, source_sha)
         recovery = _recover_exact_gate_draft(
@@ -3123,20 +3137,6 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
             mutationState=recovery["mutationState"],
         )
         return _attach_post_mutation_evidence(result, args.evidence_dir)
-    if existing is not None:
-        proof = _verify_gate_release_with_retry(
-            bound_repo, tag, subscription_url, gate_bytes
-        )
-        result = _base_result(
-            "gate-release.publish",
-            ok=True,
-            status="already-published",
-            source_sha=source_sha,
-            artifacts=artifacts,
-            gateRelease=proof,
-            mutationApplied=False,
-        )
-        return _attach_command_evidence(result, args.evidence_dir)
     _require_remote_default_head(bound_repo, default_branch, source_sha)
     tag_binding = _ensure_remote_gate_tag(bound_repo, tag, source_sha)
     if not tag_binding["verified"]:
