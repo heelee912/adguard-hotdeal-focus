@@ -78,6 +78,19 @@ class PublicRepositoryHygieneTests(unittest.TestCase):
             with self.subTest(workflow=name):
                 self.assertRegex(workflow, r"(?m)^permissions: \{\}\s*$")
 
+    def test_every_artifact_upload_includes_hidden_staging_files(self) -> None:
+        for name, workflow in (
+            ("verify", VERIFY_WORKFLOW),
+            ("watch-dom", WATCH_WORKFLOW),
+            ("publish-gate", PUBLISH_GATE_WORKFLOW),
+        ):
+            upload_steps = workflow.split("uses: actions/upload-artifact@")[1:]
+            self.assertGreater(len(upload_steps), 0, name)
+            for index, tail in enumerate(upload_steps):
+                step = tail.split("\n      - name:", 1)[0]
+                with self.subTest(workflow=name, upload=index):
+                    self.assertIn("include-hidden-files: true", step)
+
 
 class ImmutableGateReleaseWorkflowTests(unittest.TestCase):
     def test_manual_workflows_expose_nonce_bound_machine_run_names(self) -> None:
