@@ -3125,7 +3125,7 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
         return _attach_post_mutation_evidence(result, args.evidence_dir)
     if existing is not None:
         proof = _verify_gate_release_with_retry(
-            bound_repo, tag, subscription_url, gate_bytes, source_sha
+            bound_repo, tag, subscription_url, gate_bytes
         )
         result = _base_result(
             "gate-release.publish",
