@@ -1066,6 +1066,23 @@ function Assert-PublicHttpsUri {
     return $uri
 }
 
+function Assert-HttpsContentLengthWithinLimit {
+    param([Parameter()][AllowNull()][object] $ContentLength)
+
+    if ($null -eq $ContentLength) { return }
+    try {
+        $length = [System.Convert]::ToInt64(
+            $ContentLength, [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+    catch {
+        throw "HTTPS source content length is invalid"
+    }
+    if ($length -lt 0) { throw "HTTPS source content length is invalid" }
+    if ($length -gt $script:MaximumSourceBytes) {
+        throw "HTTPS source exceeds the maximum size"
+    }
+}
+
 function Read-HttpsBytes {
     param([Parameter(Mandatory = $true)][string] $Url)
 
@@ -1095,10 +1112,8 @@ function Read-HttpsBytes {
                 if (-not $response.IsSuccessStatusCode) {
                     throw "HTTPS source returned status $status"
                 }
-                if ($response.Content.Headers.ContentLength -and
-                    $response.Content.Headers.ContentLength.Value -gt $script:MaximumSourceBytes) {
-                    throw "HTTPS source exceeds the maximum size"
-                }
+                Assert-HttpsContentLengthWithinLimit `
+                    -ContentLength $response.Content.Headers.ContentLength
 
                 $inputStream = $response.Content.ReadAsStreamAsync().GetAwaiter().GetResult()
                 $outputStream = New-Object System.IO.MemoryStream

@@ -48,6 +48,19 @@ function Assert-ThrowsLike {
     }
 }
 
+# Windows PowerShell 5.1 exposes HttpContentHeaders.ContentLength as an unboxed
+# Int64, while newer runtimes may retain nullable metadata. The size guard must
+# accept either representation without dereferencing a non-existent .Value.
+Assert-HttpsContentLengthWithinLimit -ContentLength $null
+Assert-HttpsContentLengthWithinLimit -ContentLength ([long] 1024)
+Assert-HttpsContentLengthWithinLimit -ContentLength ([Nullable[long]] 2048)
+Assert-ThrowsLike -Action {
+    Assert-HttpsContentLengthWithinLimit -ContentLength ($script:MaximumSourceBytes + 1)
+} -Pattern '*exceeds the maximum size*'
+Assert-ThrowsLike -Action {
+    Assert-HttpsContentLengthWithinLimit -ContentLength 'not-a-number'
+} -Pattern '*content length is invalid*'
+
 function Copy-FilterState {
     param([Parameter(Mandatory = $true)] $State,
         [AllowNull()][Nullable[bool]] $Enabled,
@@ -513,5 +526,6 @@ finally {
         'disabled-filter-rule-rejection', 'inter-read-mutation-rejection',
         'prewrite-mutation-rejection', 'actual-release-source-contract',
         'backup-complete-state-hash', 'backup-raw-hash-tamper',
-        'durable-journal', 'legacy-all-crash-prefixes', 'idempotent-restore')
+        'https-content-length-runtime-shapes', 'durable-journal',
+        'legacy-all-crash-prefixes', 'idempotent-restore')
 } | ConvertTo-Json -Depth 3
