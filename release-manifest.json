@@ -8,12 +8,12 @@
     },
     "hotdeal-focus.user.js": {
       "bytes": 313912,
-      "canonicalTextSha256": "933e3ae50531bdcf2b5db52749ebfb633f5e4a196a1c62cdc4ba1d222dd0eb14",
-      "sha256": "87ab45918f70ce536a6c23f0afa2290ce54e19e5ad8f4ef409f59c837338578c",
-      "version": "0.5.5"
+      "canonicalTextSha256": "058937eb89e03e225de75e452880ebe185fab6a143265a9f95fcd9b7381cb3c7",
+      "sha256": "4c75c608c9e9d0ff7a489b8b4a5a03d4461e67e85073345ff35c4a2432d45d2c",
+      "version": "0.5.6"
     }
   },
-  "configSha256": "65915de2fcdb6ddbca34fe4f50c8de9a481211fa29c9b7a3554ab33b98512285",
+  "configSha256": "8886a76fa013a6de50b17fbf18eaaaf3fb8fd7137f0bacfb3ed80559207344b6",
   "coverage": {
     "approvedVariantCount": 0,
     "contractCount": 9,
@@ -220,10 +220,10 @@
   },
   "filterSubscriptionUrl": "https://github.com/heelee912/adguard-hotdeal-focus/releases/download/gate-v2.0.2/filter.txt",
   "gateArtifactVersion": "2.0.2",
-  "generatorVersion": "0.5.5",
+  "generatorVersion": "0.5.6",
   "promotion": null,
   "protocolVersion": 2,
-  "releaseVersion": "0.5.5",
+  "releaseVersion": "0.5.6",
   "rollback_of": null,
   "schemaVersion": 1,
   "sourceIntegrity": {
@@ -233,23 +233,23 @@
     },
     "config/sites.json": {
       "bytes": 22141,
-      "sha256": "65915de2fcdb6ddbca34fe4f50c8de9a481211fa29c9b7a3554ab33b98512285"
+      "sha256": "8886a76fa013a6de50b17fbf18eaaaf3fb8fd7137f0bacfb3ed80559207344b6"
     },
     "filter-static.txt": {
       "bytes": 7551,
-      "sha256": "730179cced93a0db5fb1b1928478247861bc830ebfefc43ff4431e9685a6d07c"
+      "sha256": "00daf918aa0a274e1ec8533091260717ab356d5e8da482a7373967cdb5c75da0"
     },
     "package-lock.json": {
       "bytes": 2258,
-      "sha256": "0595f4c5e0d6c0470883e4a1ef7f5199fb6d3c1d08f76864c11b36acc0cd35af"
+      "sha256": "470565c9926dc3d2e44c36aeb7727cec6f695af7e7cafcebff9ae5375705cd8f"
     },
     "package.json": {
       "bytes": 1944,
-      "sha256": "da27c2c36fbe47c186fef3e110d47728ce101b348e6bbab3f235d4ba251a8d8a"
+      "sha256": "e58e5508dfcbfcf268ab659c93a74e62771eddc12129d08b0e436a16cef13ad6"
     },
     "tests/fixtures/behavior-baseline.json": {
       "bytes": 2322,
-      "sha256": "1d179225face2ce548b24dd9583c181c8e20c8a800bd89021fd551f92479fd83"
+      "sha256": "f585e1c67326a857da3f2db93b53fb0ff6ed159f76eda38cb91b688dfa93c16f"
     },
     "tests/fixtures/dom-regressions.json": {
       "bytes": 25753,
