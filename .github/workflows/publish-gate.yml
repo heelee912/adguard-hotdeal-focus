@@ -70,17 +70,38 @@ jobs:
           timeout --kill-after=5s 60s npm run test:tamper
           timeout --kill-after=10s 15m npm run test:behavior
 
-  publish:
+  record-publisher-checkpoint:
     needs: verify-source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment:
+      name: hdf-release-publisher
+      deployment: false
+    permissions: {}
+    env:
+      HDF_PRIVILEGED_ENVIRONMENT: hdf-release-publisher
+    steps:
+      - name: Record the main-only publisher checkpoint for the verified source
+        env:
+          AUTHORIZED_SOURCE_SHA: ${{ inputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${HDF_PRIVILEGED_ENVIRONMENT}" == "hdf-release-publisher" ]]
+          [[ "${AUTHORIZED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${GITHUB_SHA}" == "${AUTHORIZED_SOURCE_SHA}" ]]
+
+  publish:
+    needs: record-publisher-checkpoint
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment:
-      name: hdf-release-publisher
+      name: hdf-main-automation
       deployment: false
     permissions:
       contents: write
     env:
-      HDF_PRIVILEGED_ENVIRONMENT: hdf-release-publisher
+      HDF_PRIVILEGED_ENVIRONMENT: hdf-main-automation
     steps:
       - name: Check out the exact independently verified source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -93,9 +114,203 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Prove every remote prerequisite before the immutable tag commit point
+        id: release_preflight
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/hotdeal_focus_cli.py gate-release prepare-publish \
+            --repo "${GITHUB_REPOSITORY}" \
+            --source-ref "${GITHUB_SHA}" \
+            --json > "${RUNNER_TEMP}/gate-release-preflight.json"
+          jq -e '
+            .ok == true and
+            (.releaseComplete | type == "boolean") and
+            (.tagPresent | type == "boolean") and
+            (if .tagPresent == true then
+               ((.tagSourceCommit | type) == "string" and
+                (.tagSourceCommit | test("^[0-9a-f]{40}$")))
+             else
+               .tagSourceCommit == null
+             end)
+          ' "${RUNNER_TEMP}/gate-release-preflight.json" >/dev/null
+          release_complete="$(jq -r '.releaseComplete' "${RUNNER_TEMP}/gate-release-preflight.json")"
+          tag_present="$(jq -r '.tagPresent' "${RUNNER_TEMP}/gate-release-preflight.json")"
+          tag_source_sha="$(jq -r '.tagSourceCommit // ""' "${RUNNER_TEMP}/gate-release-preflight.json")"
+          printf 'release_complete=%s\ntag_present=%s\ntag_source_sha=%s\n' \
+            "${release_complete}" "${tag_present}" "${tag_source_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Bind the immutable gate tag with the unique governed deploy key
+        id: create_gate_tag
+        if: >-
+          steps.release_preflight.outputs.release_complete != 'true' &&
+          steps.release_preflight.outputs.tag_present != 'true'
+        env:
+          AUTOMATION_PUSH_PRIVATE_KEY: ${{ secrets.HDF_AUTOMATION_PUSH_ED25519_PRIVATE_KEY }}
+          EXPECTED_AUTOMATION_PUSH_FINGERPRINT: ${{ vars.HDF_AUTOMATION_PUSH_KEY_FINGERPRINT }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${AUTOMATION_PUSH_PRIVATE_KEY:-}"
+          [[ "${EXPECTED_AUTOMATION_PUSH_FINGERPRINT:-}" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]
+          [[ "${GITHUB_REPOSITORY}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}$ ]]
+          [[ "${GITHUB_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          git check-ref-format "refs/heads/${DEFAULT_BRANCH}" >/dev/null
+          gate_tag_ref="refs/tags/gate-v2.0.2"
+          git check-ref-format "${gate_tag_ref}" >/dev/null
+          [[ "$(git rev-parse "${GITHUB_SHA}^{commit}")" == "${GITHUB_SHA}" ]]
+
+          key_path="${RUNNER_TEMP}/hdf-gate-publisher-ed25519"
+          known_hosts_path="${RUNNER_TEMP}/hdf-github-known-hosts"
+          ssh_config_path="${RUNNER_TEMP}/hdf-gate-publisher-ssh-config"
+          trap 'rm -f "${key_path}" "${known_hosts_path}" "${ssh_config_path}"' EXIT
+          umask 077
+          printf '%s\n' "${AUTOMATION_PUSH_PRIVATE_KEY}" > "${key_path}"
+          public_key="$(ssh-keygen -y -f "${key_path}")"
+          [[ "${public_key}" == ssh-ed25519\ * ]]
+          [[ "$(printf '%s\n' "${public_key}" | awk '{print NF}')" == "2" ]]
+          actual_fingerprint="$(
+            printf '%s\n' "${public_key}" |
+              ssh-keygen -lf - -E sha256 |
+              awk 'NR == 1 { print $2 }'
+          )"
+          [[ "${actual_fingerprint}" == "${EXPECTED_AUTOMATION_PUSH_FINGERPRINT}" ]]
+
+          printf '%s\n' \
+            'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' \
+            > "${known_hosts_path}"
+          [[ "$(wc -l < "${known_hosts_path}")" == "1" ]]
+          host_fingerprint="$(
+            ssh-keygen -lf "${known_hosts_path}" -E sha256 |
+              awk 'NR == 1 { print $2 }'
+          )"
+          [[ "${host_fingerprint}" == 'SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU' ]]
+          {
+            printf '%s\n' \
+              'Host github.com' \
+              '  HostName github.com' \
+              '  User git' \
+              '  HostKeyAlgorithms ssh-ed25519' \
+              "  IdentityFile ${key_path}" \
+              '  IdentitiesOnly yes' \
+              '  IdentityAgent none' \
+              '  BatchMode yes' \
+              '  StrictHostKeyChecking yes' \
+              "  UserKnownHostsFile ${known_hosts_path}" \
+              '  GlobalKnownHostsFile /dev/null' \
+              '  PasswordAuthentication no' \
+              '  KbdInteractiveAuthentication no'
+          } > "${ssh_config_path}"
+          chmod 600 "${key_path}" "${known_hosts_path}" "${ssh_config_path}"
+          unset SSH_AUTH_SOCK
+          export GIT_SSH_COMMAND="ssh -F ${ssh_config_path}"
+
+          remote="git@github.com:${GITHUB_REPOSITORY}.git"
+          main_listing="$(git ls-remote --heads "${remote}" "refs/heads/${DEFAULT_BRANCH}")"
+          [[ "$(printf '%s\n' "${main_listing}" | awk 'NF { count++ } END { print count + 0 }')" == "1" ]]
+          read -r main_sha main_ref main_extra <<< "${main_listing}"
+          [[ -z "${main_extra:-}" ]]
+          [[ "${main_ref}" == "refs/heads/${DEFAULT_BRANCH}" ]]
+          [[ "${main_sha}" == "${GITHUB_SHA}" ]]
+
+          tag_listing="$(git ls-remote --refs "${remote}" "${gate_tag_ref}")"
+          tag_count="$(printf '%s\n' "${tag_listing}" | awk 'NF { count++ } END { print count + 0 }')"
+          if [[ "${tag_count}" == "0" ]]; then
+            set +e
+            git -c core.hooksPath=/dev/null push --porcelain "${remote}" \
+              "${GITHUB_SHA}:${gate_tag_ref}"
+            push_status=$?
+            set -e
+          elif [[ "${tag_count}" == "1" ]]; then
+            read -r existing_tag_sha existing_tag_ref existing_tag_extra <<< "${tag_listing}"
+            [[ -z "${existing_tag_extra:-}" ]]
+            [[ "${existing_tag_ref}" == "${gate_tag_ref}" ]]
+            [[ "${existing_tag_sha}" == "${GITHUB_SHA}" ]]
+            push_status=1
+          else
+            echo "Immutable gate tag lookup was ambiguous." >&2
+            exit 1
+          fi
+
+          bound_tag_listing=""
+          bound_tag_status=1
+          for attempt in 1 2 3 4 5 6; do
+            set +e
+            bound_tag_listing="$(git ls-remote --refs "${remote}" "${gate_tag_ref}")"
+            bound_tag_status=$?
+            set -e
+            if [[ "${bound_tag_status}" -eq 0 ]] && [[ "$(printf '%s\n' "${bound_tag_listing}" | awk 'NF { count++ } END { print count + 0 }')" == "1" ]]; then
+              break
+            fi
+            if [[ "${bound_tag_status}" -ne 0 ]]; then bound_tag_listing=""; fi
+            if [[ "${attempt}" != "6" ]]; then sleep 5; fi
+          done
+          [[ "${bound_tag_status}" -eq 0 ]]
+          [[ "$(printf '%s\n' "${bound_tag_listing}" | awk 'NF { count++ } END { print count + 0 }')" == "1" ]]
+          read -r bound_tag_sha bound_tag_ref bound_tag_extra <<< "${bound_tag_listing}"
+          [[ -z "${bound_tag_extra:-}" ]]
+          [[ "${bound_tag_ref}" == "${gate_tag_ref}" ]]
+          [[ "${bound_tag_sha}" == "${GITHUB_SHA}" ]]
+          if [[ "${push_status}" == "0" ]]; then
+            echo 'creation_state=applied' >> "${GITHUB_OUTPUT}"
+          else
+            echo 'creation_state=observed-exact' >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: Reconcile the frozen tag without a write credential
+        id: frozen_tag
+        if: steps.release_preflight.outputs.release_complete != 'true'
+        env:
+          PREFLIGHT_TAG_PRESENT: ${{ steps.release_preflight.outputs.tag_present }}
+          PREFLIGHT_TAG_SOURCE_SHA: ${{ steps.release_preflight.outputs.tag_source_sha }}
+          CREATION_STATE: ${{ steps.create_gate_tag.outputs.creation_state }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gate_tag_ref="refs/tags/gate-v2.0.2"
+          if [[ "${PREFLIGHT_TAG_PRESENT}" == "true" ]]; then
+            expected_gate_source_sha="${PREFLIGHT_TAG_SOURCE_SHA}"
+            tag_created="false"
+          else
+            expected_gate_source_sha="${GITHUB_SHA}"
+            if [[ "${CREATION_STATE}" == "applied" ]]; then
+              tag_created="true"
+            else
+              tag_created="unknown"
+            fi
+          fi
+          [[ "${expected_gate_source_sha}" =~ ^[0-9a-f]{40}$ ]]
+          remote="https://github.com/${GITHUB_REPOSITORY}.git"
+          listing=""
+          listing_status=1
+          for attempt in 1 2 3 4 5 6; do
+            set +e
+            listing="$(git ls-remote --refs "${remote}" "${gate_tag_ref}")"
+            listing_status=$?
+            set -e
+            if [[ "${listing_status}" -eq 0 ]] && [[ "$(printf '%s\n' "${listing}" | awk 'NF { count++ } END { print count + 0 }')" == "1" ]]; then
+              break
+            fi
+            if [[ "${listing_status}" -ne 0 ]]; then listing=""; fi
+            if [[ "${attempt}" != "6" ]]; then sleep 5; fi
+          done
+          [[ "${listing_status}" -eq 0 ]]
+          [[ "$(printf '%s\n' "${listing}" | awk 'NF { count++ } END { print count + 0 }')" == "1" ]]
+          read -r observed_sha observed_ref observed_extra <<< "${listing}"
+          [[ -z "${observed_extra:-}" ]]
+          [[ "${observed_ref}" == "${gate_tag_ref}" ]]
+          [[ "${observed_sha}" == "${expected_gate_source_sha}" ]]
+          printf 'source_sha=%s\ntag_created=%s\n' \
+            "${observed_sha}" "${tag_created}" >> "${GITHUB_OUTPUT}"
+
       - name: Publish or exactly verify gate-v2.0.2
         env:
           GH_TOKEN: ${{ github.token }}
+          HDF_GATE_TAG_CREATED: ${{ steps.frozen_tag.outputs.tag_created || 'false' }}
+          HDF_GATE_TAG_SOURCE_SHA: ${{ steps.frozen_tag.outputs.source_sha || steps.release_preflight.outputs.tag_source_sha }}
         shell: bash
         run: |
           python scripts/hotdeal_focus_cli.py gate-release publish \
@@ -111,6 +326,7 @@ jobs:
         with:
           name: gate-release-evidence-${{ github.run_id }}
           path: |
+            ${{ runner.temp }}/gate-release-preflight.json
             ${{ runner.temp }}/gate-release-result.json
             outputs/gate-release-${{ github.run_id }}/
           include-hidden-files: true

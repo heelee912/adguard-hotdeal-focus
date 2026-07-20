@@ -20,7 +20,7 @@ from build_filter import (
 
 DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "dist" / "filter.txt"
 PROTOCOL_VERSION = "2"
-GENERATOR_VERSION = "0.5.5"
+GENERATOR_VERSION = "0.5.6"
 GATE_ARTIFACT_VERSION = "2.0.2"
 GATE_GENERATOR_VERSION = "2.0.2"
 READY_ATTRIBUTE = "data-hotdeal-focus-ready"

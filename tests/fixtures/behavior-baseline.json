@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "release_version": "0.5.5",
+  "release_version": "0.5.6",
   "protocol_major": 2,
   "note": "Immutable released behavior contract. Updating this file requires an explicitly reviewed release.",
   "fixtures": {

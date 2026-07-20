@@ -115,7 +115,7 @@ class ImmutableGateReleaseWorkflowTests(unittest.TestCase):
         self.assertNotIn("push:", trigger)
         self.assertIn("contents: write", PUBLISH_GATE_WORKFLOW)
         self.assertIn("GH_TOKEN: ${{ github.token }}", PUBLISH_GATE_WORKFLOW)
-        self.assertNotIn("secrets.", PUBLISH_GATE_WORKFLOW)
+        self.assertEqual(1, PUBLISH_GATE_WORKFLOW.count("secrets."))
         for command in (
             "npm test",
             "npm run build",
@@ -145,16 +145,67 @@ class ImmutableGateReleaseWorkflowTests(unittest.TestCase):
             '[[ "${GITHUB_SHA}" == "${AUTHORIZED_SOURCE_SHA}" ]]',
             PUBLISH_GATE_WORKFLOW,
         )
+        authorizer = PUBLISH_GATE_WORKFLOW.split("  record-publisher-checkpoint:\n", 1)[1].split(
+            "  publish:\n", 1
+        )[0]
         publisher = PUBLISH_GATE_WORKFLOW.split("  publish:\n", 1)[1].split(
             "  redispatch-verify:\n", 1
         )[0]
         verifier = PUBLISH_GATE_WORKFLOW.split("  verify-source:\n", 1)[1].split(
-            "  publish:\n", 1
+            "  record-publisher-checkpoint:\n", 1
         )[0]
-        self.assertIn("name: hdf-release-publisher", publisher)
+        self.assertIn("name: hdf-release-publisher", authorizer)
+        self.assertIn("deployment: false", authorizer)
+        self.assertNotIn("secrets.", authorizer)
+        self.assertIn("name: hdf-main-automation", publisher)
         self.assertIn("deployment: false", publisher)
         self.assertIn("contents: write", publisher)
+        self.assertIn("needs: record-publisher-checkpoint", publisher)
+        self.assertIn("gate-release prepare-publish", publisher)
+        self.assertLess(
+            publisher.index("gate-release prepare-publish"),
+            publisher.index("secrets.HDF_AUTOMATION_PUSH_ED25519_PRIVATE_KEY"),
+        )
+        self.assertIn(
+            "secrets.HDF_AUTOMATION_PUSH_ED25519_PRIVATE_KEY", publisher
+        )
+        self.assertIn("vars.HDF_AUTOMATION_PUSH_KEY_FINGERPRINT", publisher)
+        self.assertIn('gate_tag_ref="refs/tags/gate-v2.0.2"', publisher)
+        self.assertIn(
+            '"${GITHUB_SHA}:${gate_tag_ref}"', publisher
+        )
+        self.assertIn("git ls-remote --refs", publisher)
+        self.assertIn("set +e", publisher)
+        self.assertIn("Reconcile the frozen tag without a write credential", publisher)
+        secret_tag_step = publisher.split(
+            "      - name: Bind the immutable gate tag with the unique governed deploy key\n", 1
+        )[1].split(
+            "      - name: Reconcile the frozen tag without a write credential\n", 1
+        )[0]
+        public_reconcile_step = publisher.split(
+            "      - name: Reconcile the frozen tag without a write credential\n", 1
+        )[1].split(
+            "      - name: Publish or exactly verify gate-v2.0.2\n", 1
+        )[0]
+        for section, status_name in (
+            (secret_tag_step, "bound_tag_status"),
+            (public_reconcile_step, "listing_status"),
+        ):
+            with self.subTest(tag_retry_status=status_name):
+                retry_loop = section.split("for attempt in 1 2 3 4 5 6; do", 1)[1]
+                self.assertIn("set +e", retry_loop)
+                self.assertIn("git ls-remote --refs", retry_loop)
+                self.assertIn(f"{status_name}=$?", retry_loop)
+                self.assertIn("set -e", retry_loop)
+                self.assertIn(f'[[ "${{{status_name}}}" -eq 0 ]]', retry_loop)
+        self.assertIn("HDF_GATE_TAG_CREATED", publisher)
+        self.assertIn("HDF_GATE_TAG_SOURCE_SHA", publisher)
+        self.assertIn("HostKeyAlgorithms ssh-ed25519", publisher)
+        self.assertIn("IdentitiesOnly yes", publisher)
+        self.assertIn("IdentityAgent none", publisher)
+        self.assertIn("StrictHostKeyChecking yes", publisher)
         self.assertNotIn("contents: write", verifier)
+        self.assertNotIn("secrets.", verifier)
         redispatch = PUBLISH_GATE_WORKFLOW.split("  redispatch-verify:\n", 1)[1]
         self.assertIn("actions: write", redispatch)
         self.assertNotIn("contents: write", redispatch)

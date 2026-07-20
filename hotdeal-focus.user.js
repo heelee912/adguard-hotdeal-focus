@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.5.5
+// @version      0.5.6
 // @description  Fail-closed semantic reader gate for Algumon hot-deal destinations.
 // @match        https://www.algumon.com/*
 // @match        https://*.clien.net/*
@@ -36,7 +36,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.5.5";
+  const GENERATOR_VERSION = "0.5.6";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
