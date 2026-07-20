@@ -3,7 +3,7 @@
   "metadata": {
     "title": "AdGuard Hotdeal Focus",
     "description": "Shows only the hot-deal title, purchase information, article body, and comments.",
-    "version": "0.3.6",
+    "version": "0.5.5",
     "expires_hours": 12,
     "license": "MIT",
     "rollback_of": null
@@ -75,13 +75,16 @@
             ],
             "controls": [
               ".post_comment > .comment_nav",
+              ".post_comment > .comment-nav",
               ".post_comment .comment_more",
+              ".post_comment .comment-more",
               ".post_comment .pagination",
               ".post_comment [data-role='reply-toggle']"
             ],
             "ignored": [
               ".post_comment > .comment_head",
               ".post_comment > .comment_msg",
+              ".post_comment > .comment-msg",
               ".post_comment > #comment_write_div",
               ".post_comment > .fr-overlay"
             ],
@@ -147,8 +150,12 @@
             "product": {
               "mode": "atomic-boundary",
               "cardinality": "required",
+              "order": "before-body",
               "selectors": [".topTitle-link"],
-              "ignored": []
+              "ignored": [
+                ".topTitle-link > .affiliate-img",
+                ".topTitle-link > .affiliate-sign"
+              ]
             },
             "comments": { "mode": "classified-children" }
           },
@@ -224,6 +231,7 @@
             "product": {
               "mode": "atomic-boundary",
               "cardinality": "required",
+              "order": "before-body",
               "selectors": [".bbs.view > h4 .info a.noeffect"],
               "ignored": []
             },
@@ -306,6 +314,7 @@
             "product": {
               "mode": "atomic-boundary",
               "cardinality": "optional",
+              "order": "after-body",
               "selectors": [".source_url.box_line_with_shadow"],
               "ignored": []
             },
@@ -316,7 +325,7 @@
               ".comment_view.normal"
             ],
             "items": [
-              ".comment_view.normal > .comment_element"
+              ".comment_view.normal > table.comment_table > tbody > tr.comment_element"
             ],
             "controls": [
               ".comment_view.normal .comment_more",
@@ -338,15 +347,17 @@
           "domain": "quasarzone.com",
           "path": "|/bbs/qb_*/views/",
           "applicable_profiles": [
-            "desktop",
-            "mobile"
+            "desktop"
           ],
-          "page_root": ".common-view-wrap",
+          "page_root": ".left-con-wrap",
           "sample_urls": [
             "https://quasarzone.com/bbs/qb_saleinfo/views/1971167"
           ],
+          "resource_domains": [
+            "img2.quasarzone.com"
+          ],
           "ancestor_markers": [
-            ".market-info-view-wrap h1.title",
+            "h1.title",
             ".market-info-view-table",
             ".view-content > .note-editor",
             "#ajax-reply-list"
@@ -357,7 +368,7 @@
             "#ajax-reply-list"
           ],
           "preserve_shallow": [
-            ".market-info-view-wrap h1.title"
+            "h1.title"
           ],
           "required_roles": [
             "title",
@@ -367,7 +378,7 @@
           ],
           "required_groups": {
             "title": [
-              ".market-info-view-wrap h1.title"
+              "h1.title"
             ],
             "body": [
               ".view-content > .note-editor"
@@ -385,6 +396,7 @@
             "product": {
               "mode": "atomic-boundary",
               "cardinality": "required",
+              "order": "before-body",
               "selectors": [".market-info-view-table"],
               "ignored": []
             },
@@ -395,7 +407,85 @@
               "#ajax-reply-list"
             ],
             "items": [
-              "#ajax-reply-list > li"
+              "#ajax-reply-list > li[id^='comment']"
+            ],
+            "controls": [
+              "#ajax-reply-list .more-btn",
+              "#ajax-reply-list .pagination",
+              "#ajax-reply-list .reply-toggle"
+            ],
+            "ignored": [
+              "#ajax-reply-list > .best-comment-wrap"
+            ],
+            "allow_empty": true
+          }
+        },
+        {
+          "id": "market-mobile",
+          "domain": "quasarzone.com",
+          "path": "|/bbs/qb_*/views/",
+          "applicable_profiles": [
+            "mobile"
+          ],
+          "page_root": "#con-body",
+          "sample_urls": [
+            "https://quasarzone.com/bbs/qb_saleinfo/views/1971167"
+          ],
+          "resource_domains": [
+            "img2.quasarzone.com"
+          ],
+          "ancestor_markers": [
+            ".content.market-info-view-wrap .view-style01 .tit .ment > h1",
+            ".market-info-view-table",
+            ".view-content > .note-editor",
+            "#ajax-reply-list"
+          ],
+          "preserve_deep": [
+            ".market-info-view-table",
+            ".view-content > .note-editor",
+            "#ajax-reply-list"
+          ],
+          "preserve_shallow": [
+            ".content.market-info-view-wrap .view-style01 .tit .ment > h1"
+          ],
+          "required_roles": [
+            "title",
+            "product",
+            "body",
+            "comments"
+          ],
+          "required_groups": {
+            "title": [
+              ".content.market-info-view-wrap .view-style01 .tit .ment > h1"
+            ],
+            "body": [
+              ".view-content > .note-editor"
+            ],
+            "product": [
+              ".market-info-view-table"
+            ],
+            "comments": [
+              "#ajax-reply-list"
+            ]
+          },
+          "role_projection": {
+            "title": { "mode": "seeded-shallow" },
+            "body": { "mode": "atomic-boundary", "ignored": [] },
+            "product": {
+              "mode": "atomic-boundary",
+              "cardinality": "required",
+              "order": "before-body",
+              "selectors": [".market-info-view-table"],
+              "ignored": []
+            },
+            "comments": { "mode": "classified-children" }
+          },
+          "comment_contract": {
+            "mount": [
+              "#ajax-reply-list"
+            ],
+            "items": [
+              "#ajax-reply-list > .commnet-main[id^='comment']"
             ],
             "controls": [
               "#ajax-reply-list .more-btn",
@@ -435,17 +525,25 @@
             "#D_ ._hd h2",
             "#D_ .et_vars",
             "#D_ article > .rhymix_content",
+            "#C_",
             "#C_ > #comment",
-            "#C_ > ._bd"
+            "#C_ > ._bd > ._comment[id^='comment_']",
+            "#C_ > ._bd .pagination",
+            "#C_ > ._bd .more",
+            "#C_ > ._bd .reply"
           ],
           "preserve_deep": [
             "#D_ .et_vars",
             "#D_ article > .rhymix_content",
-            "#C_ > ._bd"
+            "#C_ > #comment",
+            "#C_ > ._bd > ._comment[id^='comment_']",
+            "#C_ > ._bd .pagination",
+            "#C_ > ._bd .more",
+            "#C_ > ._bd .reply"
           ],
           "preserve_shallow": [
             "#D_ ._hd h2",
-            "#C_ > #comment"
+            "#C_"
           ],
           "required_roles": [
             "title",
@@ -464,7 +562,7 @@
               "#D_ .et_vars"
             ],
             "comments": [
-              "#C_ > ._bd"
+              "#C_"
             ]
           },
           "role_projection": {
@@ -473,6 +571,7 @@
             "product": {
               "mode": "atomic-boundary",
               "cardinality": "required",
+              "order": "before-body",
               "selectors": ["#D_ .et_vars"],
               "ignored": []
             },
@@ -480,17 +579,22 @@
           },
           "comment_contract": {
             "mount": [
-              "#C_ > ._bd"
+              "#C_"
             ],
             "items": [
               "#C_ > ._bd > ._comment[id^='comment_']"
             ],
             "controls": [
+              "#C_ > #comment",
               "#C_ > ._bd .pagination",
               "#C_ > ._bd .more",
               "#C_ > ._bd .reply"
             ],
-            "ignored": [],
+            "ignored": [
+              "#C_ > ._hd._hdc",
+              "#C_ > center",
+              "#C_ > ._ft"
+            ],
             "allow_empty": true
           }
         }
@@ -552,6 +656,7 @@
             "product": {
               "mode": "atomic-boundary",
               "cardinality": "required",
+              "order": "before-body",
               "selectors": [".app-article-container > .app-board-extra-value"],
               "ignored": []
             },
@@ -597,7 +702,6 @@
             ".article-head h2",
             ".article-head .title",
             ".article-body",
-            ".article-content",
             ".article-comment"
           ],
           "preserve_deep": [
@@ -605,7 +709,6 @@
             ".article-head h2",
             ".article-head .title",
             ".article-body",
-            ".article-content",
             ".article-comment"
           ],
           "preserve_shallow": [
@@ -623,8 +726,7 @@
               ".article-head .title"
             ],
             "body": [
-              ".article-body",
-              ".article-content"
+              ".article-body"
             ],
             "comments": [
               ".article-comment"
@@ -632,7 +734,10 @@
           },
           "role_projection": {
             "title": { "mode": "seeded-shallow" },
-            "body": { "mode": "atomic-boundary", "ignored": [] },
+            "body": {
+              "mode": "atomic-boundary",
+              "ignored": [".article-body > .ad"]
+            },
             "product": {
               "mode": "absent",
               "cardinality": "zero",
@@ -646,14 +751,18 @@
               ".article-comment"
             ],
             "items": [
-              ".article-comment > .comment-item"
+              ".article-comment .comment-wrapper > .comment-item[id^='c_']"
             ],
             "controls": [
+              ".article-comment > .list-area > .newcomment-alert.fetch-comment",
               ".article-comment .pagination",
               ".article-comment .more",
               ".article-comment .reply-toggle"
             ],
-            "ignored": [],
+            "ignored": [
+              ".article-comment > .title",
+              ".article-comment > .alert.alert-info"
+            ],
             "allow_empty": true
           }
         }

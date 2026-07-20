@@ -132,8 +132,9 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
     def test_every_forward_mutation_substep_has_durable_intent(self) -> None:
         for event in (
             "intent-userscript-update-code",
-            "intent-userscript-update-gm",
             "intent-userscript-install",
+            "intent-userscript-reclassification-remove",
+            "intent-userscript-reclassification-restore-gm",
             "intent-userscript-enable",
             "intent-legacy-disable-rule",
             "intent-filter-install",
@@ -142,17 +143,198 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
         ):
             with self.subTest(event=event):
                 self.assertIn(event, self.source)
+        forward = self.source[
+            self.source.index("function Invoke-UserscriptMutation") :
+            self.source.index("function Restore-UserscriptSnapshot")
+        ]
+        self.assertIn("UpdateUserscriptGmProperties", forward)
+        self.assertIn("if ($replacementRequired)", forward)
+        self.assertNotIn("intent-userscript-update-gm", forward)
 
     def test_filter_and_userscript_verification_expose_all_state_hashes(self) -> None:
         for token in (
             "InstalledCodeSha256",
-            "InstalledGmSha256",
+            "InstalledGmPropertiesSha256",
+            "VisibilityObservationCount",
             "DisabledRuleCount",
             "DisabledRulesSha256",
             'throw "Installed custom filter contains disabled rules"',
         ):
             with self.subTest(token=token):
                 self.assertIn(token, self.source)
+
+    def test_adguard_cache_visibility_uses_bounded_exact_convergence(self) -> None:
+        for token in (
+            "$script:AdGuardStateVisibilityMaxObservations = 20",
+            "$script:AdGuardStateVisibilityDelayMilliseconds = 250",
+            "$script:AdGuardStateVisibilityRequiredConsecutiveReads = 2",
+            "stability_observation_count",
+            "Start-Sleep -Milliseconds $RetryDelayMilliseconds",
+            "userscript-install-accepted",
+            "AdGuard userscript installation receipt differs from the exact source",
+            "Assert-ReaderGateSnapshotOwnership",
+            "Assert-UserscriptAbsent",
+            "Assert-UserscriptSnapshotConverged",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, self.source)
+        stable = self.source[
+            self.source.index("function Get-StableCompleteTargetStateSnapshot") :
+            self.source.index("function Get-CspProbeInspectionReport")
+        ]
+        installed = self.source[
+            self.source.index("function Assert-UserscriptInstalled") :
+            self.source.index("function Prepare-FilterMetaSet")
+        ]
+        self.assertIn("$consecutiveReads -ge $RequiredConsecutiveReads", stable)
+        self.assertIn("$consecutiveReads -ge $RequiredConsecutiveReads", installed)
+        self.assertIn("$installedCodeHash -cne $desiredHash", installed)
+        self.assertIn("$installedGmPropertiesHash -cne", installed)
+        self.assertIn("$ExpectedPostState.GmPropertiesSha256", installed)
+        self.assertIn(
+            "[bool] $targets[0].IsCustom -ne $expectedIsCustom",
+            installed,
+        )
+
+    def test_userscript_classification_is_bound_to_authenticated_source_policy(self) -> None:
+        plan = self.source[
+            self.source.index("function Initialize-TransactionJournal") :
+            self.source.index("function Read-StrictJsonFile")
+        ]
+        backup = self.source[
+            self.source.index("function Assert-CspProbeBackupContract") :
+            self.source.index("function Test-UserscriptSnapshotExact")
+        ]
+        desired_backup = self.source[
+            self.source.index("function Assert-BackupUserscriptMatchesDesired") :
+            self.source.index("function Invoke-UserscriptMutation")
+        ]
+        receipt = self.source[
+            self.source.index("function Invoke-UserscriptMutation") :
+            self.source.index("function Restore-UserscriptSnapshot")
+        ]
+        self.assertIn("Get-ExpectedUserscriptPostState", plan)
+        self.assertIn("is_custom = [bool] $expectedPostState.IsCustom", plan)
+        self.assertIn("is_style = [bool] $expectedPostState.IsStyle", plan)
+        self.assertIn("gm_properties_sha256", plan)
+        userscript_plan = plan[: plan.index("$filterAfter = $null")]
+        self.assertNotIn("is_custom = $true", userscript_plan)
+        self.assertIn("$expectedPostState.IsCustom", backup)
+        self.assertIn("$Snapshot.Info.IsCustom", desired_backup)
+        self.assertIn("$Snapshot.Info.IsStyle", desired_backup)
+        self.assertIn("$installReceipt.Meta.IsCustom", receipt)
+        regular_source = self.source[
+            self.source.index("function Get-UserscriptSource") :
+            self.source.index("function Get-CspProbeUserscriptText")
+        ]
+        probe_source = self.source[
+            self.source.index("function Get-CspProbeUserscriptText") :
+            self.source.index("function Get-FilterSource")
+        ]
+        prepare = self.source[
+            self.source.index("function Prepare-UserscriptMeta") :
+            self.source.index("function Compare-Version")
+        ]
+        self.assertNotIn("InstallAsCustom", regular_source)
+        self.assertNotIn("InstallAsCustom", probe_source)
+        self.assertIn("$Source.Meta.IsCustom = $true", prepare)
+        self.assertIn("differs from the authenticated source", prepare)
+        self.assertLess(
+            prepare.index("differs from the authenticated source"),
+            prepare.index("$Source.Meta.IsCustom = $true"),
+        )
+        self.assertIn("-not [bool] $Source.Meta.IsCustom", prepare)
+
+    def test_source_metadata_and_gm_value_store_are_separate_domains(self) -> None:
+        source_parser = self.source[
+            self.source.index("function Get-UserscriptSource") :
+            self.source.index("function Get-CspProbeUserscriptText")
+        ]
+        forward = self.source[
+            self.source.index("function Invoke-UserscriptMutation") :
+            self.source.index("function Restore-UserscriptSnapshot")
+        ]
+        restore = self.source[
+            self.source.index("function Restore-UserscriptSnapshot") :
+            self.source.index("function Assert-UserscriptInstalled")
+        ]
+        self.assertIn("MetadataBlock = $metadata", source_parser)
+        self.assertIn("FreshInstallGmProperties", source_parser)
+        self.assertIn("intent-userscript-reclassification-restore-gm", forward)
+        self.assertIn("UpdateUserscriptGmProperties", forward)
+        self.assertIn("UpdateUserscriptGmProperties", restore)
+
+    def test_classification_replacement_and_rollback_are_exactly_resumable(self) -> None:
+        preconditions = self.source[
+            self.source.index("function Assert-UserscriptRestorePreconditions") :
+            self.source.index("function Test-FilterStateExact")
+        ]
+        mutation = self.source[
+            self.source.index("function Invoke-UserscriptMutation") :
+            self.source.index("function Restore-UserscriptSnapshot")
+        ]
+        restore = self.source[
+            self.source.index("function Restore-UserscriptSnapshot") :
+            self.source.index("function Assert-UserscriptInstalled")
+        ]
+        for token in (
+            "replacement_required",
+            "fresh_install_gm_properties_sha256",
+            "Current userscript is not an enumerated rollback-prefix state",
+            "if ($replacementRequired) { return $true }",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, preconditions)
+        self.assertLess(
+            mutation.index("RemoveUserscript"),
+            mutation.index("Assert-UserscriptAbsent"),
+        )
+        self.assertLess(
+            mutation.index("Assert-UserscriptAbsent"),
+            mutation.index("InstallUserscriptFromMeta"),
+        )
+        self.assertLess(
+            mutation.index("InstallUserscriptFromMeta"),
+            mutation.index("UpdateUserscriptGmProperties"),
+        )
+        self.assertLess(
+            mutation.index("UpdateUserscriptGmProperties"),
+            mutation.index("SetUserscriptStatus"),
+        )
+        for intent, write in (
+            ("intent-userscript-reclassification-remove", "RemoveUserscript"),
+            ("intent-userscript-install", "InstallUserscriptFromMeta"),
+            (
+                "intent-userscript-reclassification-restore-gm",
+                "UpdateUserscriptGmProperties",
+            ),
+            ("intent-userscript-enable", "SetUserscriptStatus"),
+        ):
+            with self.subTest(intent=intent):
+                self.assertLess(mutation.index(intent), mutation.index(write))
+        for token in (
+            "Get-UserscriptMetaForSnapshotRestore",
+            "intent-rollback-userscript-reclassification-remove",
+            "intent-rollback-userscript-reclassification-install",
+            "Assert-UserscriptInstallReceipt",
+            "Assert-UserscriptSnapshotConverged",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, restore)
+        for intent, write in (
+            (
+                "intent-rollback-userscript-reclassification-remove",
+                "RemoveUserscript",
+            ),
+            (
+                "intent-rollback-userscript-reclassification-install",
+                "InstallUserscriptFromMeta",
+            ),
+            ("intent-rollback-userscript-gm", "UpdateUserscriptGmProperties"),
+            ("intent-rollback-userscript-status", "SetUserscriptStatus"),
+        ):
+            with self.subTest(intent=intent):
+                self.assertLess(restore.index(intent), restore.index(write))
 
     def test_mixed_target_rules_block_verified_deployment(self) -> None:
         self.assertIn("has_enabled_conflict = $enabledTargetAll.Count -gt 0", self.source)

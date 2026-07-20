@@ -1,6 +1,6 @@
 {
   "name": "adguard-hotdeal-focus",
-  "version": "0.3.6",
+  "version": "0.5.5",
   "private": true,
   "description": "Fail-closed AdGuard hot-deal reader gate and cloud DOM monitor",
   "type": "module",
@@ -12,14 +12,21 @@
     "build": "python scripts/build_release.py",
     "build:check": "python scripts/build_release.py --check",
     "test": "python -m unittest discover -s tests -v",
-    "check:node": "node --check scripts/audit_pages.mjs && node --check hotdeal-focus.user.js",
+    "check:node": "node --check scripts/audit_pages.mjs && node --check scripts/probe_adguard_csp.mjs && node --check scripts/csp-probe.user.js && node --check hotdeal-focus.user.js && node --check tests/test_projection_tuple_oracle.mjs && node --check tests/test_extended_css.mjs && node --check tests/test_gate_v2.mjs && node --check tests/test_network_fidelity.mjs && node --check tests/test_comment_control_audit.mjs && node --check tests/test_policy_promotion.mjs",
     "integrity": "node scripts/audit_pages.mjs --integrity-only",
     "test:behavior": "node scripts/audit_pages.mjs --fixture-only --no-discover-algumon",
+    "test:oracle": "node tests/test_projection_tuple_oracle.mjs && npm run test:extended-css && npm run test:gate-v2 && npm run test:comment-controls && npm run test:policy-promotion",
+    "test:extended-css": "node tests/test_extended_css.mjs",
+    "test:gate-v2": "node tests/test_gate_v2.mjs",
+    "test:comment-controls": "node tests/test_comment_control_audit.mjs",
+    "test:policy-promotion": "node tests/test_policy_promotion.mjs",
+    "test:network": "node tests/test_network_fidelity.mjs",
     "test:tamper": "node scripts/audit_pages.mjs --tamper-fixture-only --timeout-ms 8000",
-    "verify": "npm run check:node && npm test && npm run build:check && npm run integrity",
+    "verify": "npm run check:node && npm test && npm run test:network && npm run build:check && npm run integrity && npm run test:oracle",
     "audit:dom": "node scripts/audit_pages.mjs --discover-algumon"
   },
   "devDependencies": {
+    "@adguard/extended-css": "2.0.52",
     "playwright": "1.61.1"
   }
 }

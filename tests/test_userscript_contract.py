@@ -47,6 +47,18 @@ from build_release import (  # noqa: E402
 
 USERSCRIPT_PATH = PROJECT_ROOT / "hotdeal-focus.user.js"
 CONFIG_PATH = PROJECT_ROOT / "config" / "sites.json"
+BASE_RELEASE_VERSION = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))["metadata"][
+    "version"
+]
+
+
+def next_patch_version(version: str, increment: int = 1) -> str:
+    major, minor, patch = (int(part) for part in version.split("."))
+    return f"{major}.{minor}.{patch + increment}"
+
+
+FIRST_CANDIDATE_VERSION = next_patch_version(BASE_RELEASE_VERSION)
+SECOND_CANDIDATE_VERSION = next_patch_version(BASE_RELEASE_VERSION, 2)
 CONTRACT_PATTERN = re.compile(
     r"/\* HOTDEAL_FOCUS_CONTRACTS_START \*/\s*(\[.*?\])\s*"
     r"/\* HOTDEAL_FOCUS_CONTRACTS_END \*/",
@@ -147,13 +159,47 @@ process.stdout.write(JSON.stringify(cases.map((item) =>
     return json.loads(completed.stdout)
 
 
+def evaluate_navigation_identities(cases: list[dict]) -> list[dict]:
+    encoded = base64.b64encode(
+        json.dumps(cases, ensure_ascii=False).encode("utf-8")
+    ).decode("ascii")
+    javascript = r"""
+const fs = require("fs");
+const vm = require("vm");
+const moduleRecord = { exports: {} };
+const sandbox = {
+  module: moduleRecord, URL, Set, Map, Object, Array, String, Number, RegExp,
+  JSON, Date, Math, encodeURIComponent, decodeURIComponent, escape, unescape,
+  Uint32Array,
+};
+vm.runInNewContext(fs.readFileSync("hotdeal-focus.user.js", "utf8"), sandbox);
+const api = moduleRecord.exports;
+const cases = JSON.parse(Buffer.from(process.argv[1], "base64").toString("utf8"));
+const results = cases.map((item) => ({
+  sourceIdentity: api.articleIdentity(item.source, item.siteId),
+  destinationIdentity: api.articleIdentity(item.destination, item.siteId),
+  same: api.sameArticleNavigation(item.source, item.destination, item.siteId),
+}));
+process.stdout.write(JSON.stringify(results));
+"""
+    completed = subprocess.run(
+        ["node", "-e", javascript, encoded],
+        cwd=PROJECT_ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    return json.loads(completed.stdout)
+
+
 class UserscriptMetadataTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = userscript_text()
 
     def test_document_start_metadata_and_update_placeholders(self) -> None:
-        self.assertEqual(["none"], metadata_values(self.source, "grant"))
+        self.assertEqual(["GM_addElement"], metadata_values(self.source, "grant"))
         self.assertEqual(["document-start"], metadata_values(self.source, "run-at"))
         self.assertEqual(
             ["https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js"],
@@ -214,6 +260,7 @@ class UserscriptMetadataTests(unittest.TestCase):
         ):
             self.assertIn(token, self.source)
         self.assertIn("protocolVersion: Number(PROTOCOL_VERSION)", self.source)
+        self.assertIn('const PROTOCOL_VERSION = "2"', self.source)
         diagnostics_function = self.source[
             self.source.index("function publishDiagnostics"):
             self.source.index("function resolveApprovedLayout")
@@ -302,12 +349,98 @@ class SemanticContractTests(unittest.TestCase):
         self.assertIn("bodyCandidates.length !== 1", resolver)
         self.assertIn("commentCandidates.length !== 1", resolver)
         self.assertIn("projectionClasses.length !== 1", resolver)
+        self.assertIn(
+            "containsSemanticNoise(bodyNode, structuralNoiseCache, bodyIgnored)",
+            resolver,
+        )
+        self.assertIn(
+            "containsSemanticNoise(productNode, structuralNoiseCache, productIgnored)",
+            resolver,
+        )
+        self.assertIn("!isRendered(commentMount)", resolver)
+        self.assertIn("hiddenInitialItem", resolver)
+        self.assertIn("commentDormantControls", resolver)
+        self.assertIn('configuredProductCardinality !== "zero"', resolver)
+        self.assertIn("configuredProductOrder", resolver)
         self.assertNotIn("selectTitle(document", resolver)
         self.assertNotIn("selectBody(document", resolver)
         self.assertNotIn("decideCandidate", resolver)
         self.assertNotIn("item-fingerprint", resolver)
         self.assertIn('"selector-hint"', self.source)
         self.assertIn("minIndependentSignals: 2", self.source)
+
+    def test_ci_semantic_oracle_enumerates_unique_complete_projection_tuples(self) -> None:
+        oracle = self.source[
+            self.source.index("function titleProofFingerprint"):
+            self.source.index("function lowestCommonAncestor")
+        ]
+        for required_contract in (
+            "collapseProvenTitleWrappers",
+            "MAX_PROJECTION_ROLE_CANDIDATES",
+            "MAX_PROJECTION_TUPLES",
+            "MAX_COMMENT_EVIDENCE",
+            "validateProjectionTuple",
+            "commentsAreExhaustive",
+            "precomputeCommentEvidence",
+            "semanticProductCardinality",
+            "semanticProductOrder",
+            '"ambiguous-disconnected-projections"',
+            '"ambiguous-projection-tuples"',
+            '"no-complete-projection-tuple"',
+        ):
+            self.assertIn(required_contract, oracle)
+        self.assertIn("left.node.contains(right.node)", oracle)
+        self.assertIn("leftProof === titleProofFingerprint(right)", oracle)
+        self.assertIn("new Set(roleNodes).size !== roleNodes.length", oracle)
+        self.assertIn("root === document.documentElement", oracle)
+        self.assertIn("const observedProductCardinality", oracle)
+        self.assertIn("function containsSemanticNoise", self.source)
+        self.assertIn("MAX_PROJECTION_CANDIDATE_EVALUATIONS = 800", self.source)
+        self.assertIn("collectBoundedCandidateElements", self.source)
+        self.assertIn("const inferredCommentEvidenceCache = new WeakMap()", oracle)
+        self.assertNotIn("commentPool.flatMap", oracle)
+        self.assertNotIn("evidenceApproved.length !== 1", oracle)
+
+    def test_semantic_product_observation_and_policy_proposal_are_independent(self) -> None:
+        oracle = self.source[
+            self.source.index("function discoverSemanticContract"):
+            self.source.index("function lowestCommonAncestor")
+        ]
+        proposal = self.source[
+            self.source.index("function buildPolicyProposal"):
+            self.source.index("function failedSemanticContract")
+        ]
+        self.assertIn("selectProduct(document, layouts, title.node, body.node)", oracle)
+        self.assertIn("const productChoices = [null].concat(productPool)", oracle)
+        self.assertIn("observedProductCardinality", oracle)
+        self.assertIn("existingProductPolicyCompatible", oracle)
+        self.assertIn('source: "independent-projection-tuple"', proposal)
+        self.assertIn('requiredProfilesSource: "auditor-layout-contract"', proposal)
+        self.assertNotIn('requiredProfiles: Object.freeze(["desktop", "mobile"])', proposal)
+
+    def test_exact_empty_comment_proof_and_control_diagnostics_are_self_contained(self) -> None:
+        resolver = self.source[
+            self.source.index("function resolveApprovedLayoutWithPublisherStyles"):
+            self.source.index("function resolveProjectionClasses")
+        ]
+        diagnostics = self.source[
+            self.source.index("function orderedCommentControls"):
+            self.source.index("function applyRoleMarkers")
+        ]
+        self.assertIn('provenCommentCountSource = "exact-dom-zero"', resolver)
+        self.assertIn("documentCommentEvidence.elements.length === 0", resolver)
+        for field in (
+            "selectors",
+            "selectorDigest",
+            "initiallyVisibleCount",
+            "initiallyDormantCount",
+            "projectionEpoch",
+            "currentVisibleCount",
+            "currentDormantApprovedCount",
+            "currentShapeFingerprint",
+            "currentProjectionValid",
+        ):
+            self.assertIn(field, diagnostics)
 
     def test_comment_mount_and_items_are_separate_and_empty_is_allowed(self) -> None:
         for site in self.config["sites"]:
@@ -332,6 +465,199 @@ class SemanticContractTests(unittest.TestCase):
         self.assertNotIn(
             "commentItems.length === 0 &&\n      hasUnclassifiedCommentContent",
             resolver,
+        )
+
+    def test_comment_rendering_is_a_live_fail_closed_invariant(self) -> None:
+        verifier = self.source[
+            self.source.index("function verifyOwnedState"):
+            self.source.index("function publishDiagnostics")
+        ]
+        observer = self.source[
+            self.source.index("function installIntegrityObserver"):
+            self.source.index("function installNavigationRevalidation")
+        ]
+        self.assertIn("!isRendered(state.roles.comments)", verifier)
+        self.assertIn("!isRendered(item)", verifier)
+        self.assertIn("!isRendered(control)", verifier)
+        self.assertIn("withPublisherVisibilityMeasurement(", observer)
+        self.assertIn('if (!isRendered(added)) return "hidden-comment-addition"', observer)
+        self.assertIn("if (additionFailure)", observer)
+        self.assertIn("failureReason = additionFailure", observer)
+
+    def test_known_comment_total_requires_all_individual_items_loaded(self) -> None:
+        resolver = self.source[
+            self.source.index("function resolveApprovedLayoutWithPublisherStyles"):
+            self.source.index("function resolveProjectionClasses")
+        ]
+        verifier = self.source[
+            self.source.index("function verifyOwnedStateWithPublisherStyles"):
+            self.source.index("function paintLockSelectors")
+        ]
+        self.assertIn("commentItems.length < provenCommentCount", resolver)
+        self.assertIn('reason: "partial-comment-set"', resolver)
+        self.assertIn(
+            "currentCommentItems.length !== state.acceptedCommentCount",
+            verifier,
+        )
+        self.assertIn(
+            "currentCommentItems.length < state.projectionPolicy.provenCommentCount",
+            verifier,
+        )
+        self.assertIn("commitAuthorizedCommentCountIncrease", self.source)
+        self.assertIn('failureReason = "comment-removal"', self.source)
+        self.assertIn('failureReason = "comment-count"', self.source)
+        self.assertNotIn("COMMENT_CONTINUATION_PATTERN", self.source)
+        self.assertNotIn("isCommentContinuationControl", self.source)
+
+    def test_projection_noise_metadata_is_bounded_and_canonicalized(self) -> None:
+        noise = self.source[
+            self.source.index("function normalizeProjectionTokenText"):
+            self.source.index("function collectJsonLd")
+        ]
+        self.assertIn("MAX_PROJECTION_METADATA_ATTRIBUTES = 64", self.source)
+        self.assertIn("replace(/([a-z\\d])([A-Z])/g", noise)
+        self.assertIn('name.startsWith("aria-")', noise)
+        self.assertIn('name.startsWith("data-")', noise)
+        self.assertIn("element.matches(interactiveSelector)", noise)
+        self.assertIn("AD_NETWORK_RESOURCE_PATTERN", noise)
+        self.assertIn("STRONG_NOISE_TOKEN_PATTERN", noise)
+
+    def test_shadow_and_top_layer_guards_register_and_unsubscribe_native_events(self) -> None:
+        native = self.source[
+            self.source.index("const NATIVE = Object.freeze"):
+            self.source.index("const CSSOM_MUTATION_LISTENERS")
+        ]
+        observer = self.source[
+            self.source.index("function installIntegrityObserver"):
+            self.source.index("function createReaderRuntime")
+        ]
+        stop = self.source[
+            self.source.index("runtime.stop = function stopRuntime"):
+            self.source.index("installBootstrapGuard", self.source.index("runtime.stop = function stopRuntime"))
+        ]
+        self.assertIn("EventTarget?.prototype?.addEventListener", native)
+        self.assertIn("EventTarget?.prototype?.removeEventListener", native)
+        self.assertIn('subscribe(document, "beforetoggle"', observer)
+        self.assertIn('subscribe(document, "toggle"', observer)
+        self.assertIn('subscribe(document, "fullscreenchange"', observer)
+        self.assertIn('target?.matches?.("[popover]")', observer)
+        self.assertIn("NATIVE.removeEventListener", observer)
+        self.assertIn("runtime.unsubscribeProjectionEvents", stop)
+        self.assertIn("initializeShadowTracker", self.source)
+        self.assertIn("containsUnprovenShadowBoundary", self.source)
+
+    def test_publisher_visibility_measurement_keeps_the_root_no_paint(self) -> None:
+        measurement = self.source[
+            self.source.index("function withPublisherVisibilityMeasurement"):
+            self.source.index("function semanticTokenText")
+        ]
+        self.assertIn('html.style.setProperty("opacity", "0", "important")', measurement)
+        self.assertIn('html.style.setProperty("transition", "none", "important")', measurement)
+        self.assertIn('html.style.setProperty("animation", "none", "important")', measurement)
+        self.assertIn('html.style.setProperty("visibility", "hidden", "important")', measurement)
+        self.assertIn("BOOTSTRAP_PUBLISHER_INLINE.get(html)?.visibility", measurement)
+        self.assertIn("applyInlinePropertySnapshot(html, publisherVisibility)", measurement)
+        self.assertIn("bootstrapEngineLockActive", measurement)
+        self.assertIn("publisherInlineVisibilityHidden", measurement)
+        self.assertIn('publisherRootStyle.visibility !== "visible"', measurement)
+        self.assertIn(
+            'html.style.setProperty("content-visibility", "hidden", "important")',
+            measurement,
+        )
+        self.assertIn(
+            'html.style.setProperty("clip-path", "inset(50%)", "important")',
+            measurement,
+        )
+        self.assertIn("gateStyles[0].sheet.disabled", measurement)
+        self.assertIn('rootStyle.clipPath !== "inset(50%)"', measurement)
+        self.assertIn('rootStyle.transitionDuration !== "0s"', measurement)
+        self.assertIn('rootStyle.animationName !== "none"', measurement)
+        self.assertIn("gateSheet.disabled = true", measurement)
+        self.assertIn("gateSheet.disabled = previouslyDisabled", measurement)
+        self.assertIn(
+            'current === element && /^(?:hidden|collapse)$/.test(style.visibility)',
+            self.source,
+        )
+        self.assertIn("html.removeAttribute(ATTR.measure)", measurement)
+        self.assertLess(
+            measurement.index(
+                'html.style.setProperty("content-visibility", "hidden", "important")'
+            ),
+            measurement.index("html.setAttribute(ATTR.measure, \"1\")"),
+        )
+        self.assertLess(
+            measurement.index("html.setAttribute(ATTR.measure, \"1\")"),
+            measurement.index("gateSheet.disabled = true"),
+        )
+        finally_start = measurement.index("} finally {")
+        self.assertLess(
+            measurement.index("gateSheet.disabled = previouslyDisabled", finally_start),
+            measurement.index("html.removeAttribute(ATTR.measure)", finally_start),
+        )
+
+        stable_empty = self.source[
+            self.source.index("function isStableZeroAreaCommentMount"):
+            self.source.index("function withPublisherVisibilityMeasurement")
+        ]
+        self.assertIn("current === documentElement", stable_empty)
+        self.assertIn("current.getAttribute(ATTR.measure) === \"1\"", stable_empty)
+        self.assertIn("!measurementOpacity", stable_empty)
+
+    def test_eomisae_reply_control_survives_both_static_projection_layers(self) -> None:
+        eomisae = next(
+            site for site in self.raw_config["sites"] if site["id"] == "eomisae"
+        )
+        layout = next(item for item in eomisae["layouts"] if item["id"] == "hotdeal")
+        reply_selector = "#C_ > ._bd .reply"
+        self.assertIn(reply_selector, layout["comment_contract"]["controls"])
+        self.assertIn(reply_selector, layout["ancestor_markers"])
+        self.assertIn(reply_selector, layout["preserve_deep"])
+
+    def test_live_profile_specific_comment_contracts_are_exact(self) -> None:
+        sites = {site["id"]: site for site in self.raw_config["sites"]}
+
+        clien_comments = sites["clien"]["layouts"][0]["comment_contract"]
+        self.assertIn(".post_comment > .comment-nav", clien_comments["controls"])
+        self.assertIn(".post_comment .comment-more", clien_comments["controls"])
+        self.assertIn(".post_comment > .comment-msg", clien_comments["ignored"])
+
+        ruli = sites["ruliweb"]["layouts"][0]["comment_contract"]["items"]
+        self.assertEqual(
+            [".comment_view.normal > table.comment_table > tbody > tr.comment_element"],
+            ruli,
+        )
+
+        quasar = {
+            layout["id"]: layout for layout in sites["quasarzone"]["layouts"]
+        }
+        self.assertEqual(["desktop"], quasar["market"]["applicable_profiles"])
+        self.assertEqual(".left-con-wrap", quasar["market"]["page_root"])
+        self.assertEqual(
+            ["#ajax-reply-list > li[id^='comment']"],
+            quasar["market"]["comment_contract"]["items"],
+        )
+        self.assertEqual(["mobile"], quasar["market-mobile"]["applicable_profiles"])
+        self.assertEqual("#con-body", quasar["market-mobile"]["page_root"])
+        self.assertEqual(
+            ["#ajax-reply-list > .commnet-main[id^='comment']"],
+            quasar["market-mobile"]["comment_contract"]["items"],
+        )
+
+        arca_comments = sites["arcalive"]["layouts"][0]["comment_contract"]
+        self.assertEqual(
+            [".article-comment .comment-wrapper > .comment-item[id^='c_']"],
+            arca_comments["items"],
+        )
+        self.assertIn(
+            ".article-comment > .list-area > .newcomment-alert.fetch-comment",
+            arca_comments["controls"],
+        )
+        self.assertEqual(
+            {
+                ".article-comment > .title",
+                ".article-comment > .alert.alert-info",
+            },
+            set(arca_comments["ignored"]),
         )
 
     def test_runtime_path_scope_is_start_anchored_and_separator_aware(self) -> None:
@@ -375,6 +701,240 @@ class SemanticContractTests(unittest.TestCase):
         self.assertNotIn('"data-comment-count"', extractor)
         self.assertNotIn("countMatch", extractor)
         self.assertNotIn("cardText.match", extractor)
+
+    def test_navigation_identity_normalizes_only_proven_approved_article_aliases(
+        self,
+    ) -> None:
+        positive_cases = [
+            {
+                "id": "clien-www-to-mobile",
+                "siteId": "clien",
+                "source": "https://www.clien.net/service/board/jirum/19230509",
+                "destination": "https://m.clien.net/service/board/jirum/19230509",
+            },
+            {
+                "id": "ppomppu-desktop-to-mobile-route",
+                "siteId": "ppomppu",
+                "source": (
+                    "https://www.ppomppu.co.kr/zboard/view.php?"
+                    "id=ppomppu&no=554433"
+                ),
+                "destination": (
+                    "https://m.ppomppu.co.kr/new/bbs_view.php?"
+                    "id=ppomppu&no=554433"
+                ),
+            },
+            {
+                "id": "ruliweb-bbs-to-mobile",
+                "siteId": "ruliweb",
+                "source": "https://bbs.ruliweb.com/news/board/1020/read/105748",
+                "destination": "https://m.ruliweb.com/news/board/1020/read/105748",
+            },
+            {
+                "id": "clien-same-article-query-and-hash",
+                "siteId": "clien",
+                "source": "https://www.clien.net/service/board/jirum/19230509",
+                "destination": (
+                    "https://www.clien.net/service/board/jirum/19230509"
+                    "?view=compact#comments"
+                ),
+            },
+        ]
+        for board in ("rt", "os", "fs"):
+            positive_cases.append(
+                {
+                    "id": f"eomisae-index-to-{board}",
+                    "siteId": "eomisae",
+                    "source": (
+                        "https://eomisae.co.kr/index.php?"
+                        f"document_srl=778899&mid={board}"
+                    ),
+                    "destination": f"https://eomisae.co.kr/{board}/778899",
+                }
+            )
+        positive_cases.append(
+            {
+                "id": "eomisae-unscoped-index-to-os",
+                "siteId": "eomisae",
+                "source": (
+                    "https://eomisae.co.kr/index.php?document_srl=778899"
+                ),
+                "destination": "https://eomisae.co.kr/os/778899",
+            }
+        )
+
+        for case, result in zip(
+            positive_cases,
+            evaluate_navigation_identities(positive_cases),
+            strict=True,
+        ):
+            with self.subTest(case=case["id"]):
+                self.assertTrue(result["sourceIdentity"], result)
+                self.assertEqual(
+                    result["sourceIdentity"], result["destinationIdentity"], result
+                )
+                self.assertTrue(result["same"], result)
+
+    def test_navigation_identity_rejects_ambiguous_or_unapproved_urls(self) -> None:
+        approved = "https://www.clien.net/service/board/jirum/19230509"
+        negative_cases = [
+            ("different-article", "clien", approved,
+             "https://m.clien.net/service/board/jirum/19230510"),
+            ("different-board", "clien", approved,
+             "https://m.clien.net/service/board/news/19230509"),
+            ("different-site", "clien", approved,
+             "https://example.com/service/board/jirum/19230509"),
+            ("http-scheme", "clien", approved,
+             "http://www.clien.net/service/board/jirum/19230509"),
+            ("credentials", "clien", approved,
+             "https://user@www.clien.net/service/board/jirum/19230509"),
+            ("port", "clien", approved,
+             "https://www.clien.net:8443/service/board/jirum/19230509"),
+            ("unapproved-route", "clien", approved,
+             "https://www.clien.net/service/recommend/19230509"),
+            (
+                "duplicate-article-id",
+                "ppomppu",
+                "https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu&no=554433",
+                (
+                    "https://m.ppomppu.co.kr/new/bbs_view.php?"
+                    "id=ppomppu&no=554433&no=554434"
+                ),
+            ),
+            (
+                "eomisae-conflicting-document-id",
+                "eomisae",
+                "https://eomisae.co.kr/index.php?document_srl=778899&mid=rt",
+                "https://eomisae.co.kr/rt/778899?document_srl=778900",
+            ),
+            (
+                "eomisae-wrong-article-id",
+                "eomisae",
+                "https://eomisae.co.kr/rt/778899",
+                "https://eomisae.co.kr/index.php?document_srl=778900",
+            ),
+            (
+                "eomisae-duplicate-document-id",
+                "eomisae",
+                "https://eomisae.co.kr/rt/778899",
+                (
+                    "https://eomisae.co.kr/index.php?"
+                    "document_srl=778899&document_srl=778900"
+                ),
+            ),
+            (
+                "ruliweb-different-board",
+                "ruliweb",
+                "https://bbs.ruliweb.com/news/board/1020/read/105748",
+                "https://m.ruliweb.com/news/board/1021/read/105748",
+            ),
+        ]
+        cases = [
+            {
+                "id": case_id,
+                "siteId": site_id,
+                "source": source,
+                "destination": destination,
+            }
+            for case_id, site_id, source, destination in negative_cases
+        ]
+        for case, result in zip(
+            cases, evaluate_navigation_identities(cases), strict=True
+        ):
+            with self.subTest(case=case["id"]):
+                self.assertFalse(result["same"], result)
+
+    def test_cascade_release_coalesces_pre_ready_mutations_without_weakening_budgets(
+        self,
+    ) -> None:
+        cascade = self.source[
+            self.source.index("function installCascadeGuard"):
+            self.source.index("function installIntegrityObserver")
+        ]
+        self.assertIn("let fullScanRequired = true", cascade)
+        pre_ready = cascade[
+            cascade.index("const queueElement"):
+            cascade.index("const exposesUnowned")
+        ]
+        self.assertLess(
+            pre_ready.index('if (runtime.releasePhase !== "released")'),
+            pre_ready.index("pendingElements.add(element)"),
+        )
+        self.assertIn("pendingElements.clear()", pre_ready)
+        self.assertIn("fullScanRequired = true", pre_ready)
+        self.assertIn("MAX_PENDING_ROOTS = 256", cascade)
+        self.assertIn("pendingElements.size > MAX_PENDING_ROOTS", cascade)
+        self.assertIn('runtime.enterTerminal("cascade-mutation-budget")', cascade)
+        self.assertIn("MAX_BOUNDED_ELEMENTS = 20_000", cascade)
+        self.assertIn("candidates.length > MAX_BOUNDED_ELEMENTS", cascade)
+        self.assertIn('runtime.enterTerminal("cascade-scan-budget")', cascade)
+        self.assertIn("runtime.prepareCascadeRelease", cascade)
+        self.assertIn("runtime.verifyCascadeRelease", cascade)
+        release_verification = cascade[
+            cascade.index("runtime.verifyCascadeRelease"):
+            cascade.index("const verifyCascade")
+        ]
+        self.assertIn("if (fullScanRequired)", release_verification)
+        self.assertIn("releaseCandidates = collectBoundedFullScan()", release_verification)
+        self.assertIn("exposesUnowned(releaseCandidates)", release_verification)
+
+        attempt = self.source[
+            self.source.index("function attemptResolution"):
+            self.source.index("function scheduleAttempt")
+        ]
+        prepare = attempt.index("runtime.prepareCascadeRelease()")
+        authorize = attempt.index("runtime.authorizedReady = true")
+        unlock = attempt.index("removeAttribute(ATTR.lock)")
+        ready = attempt.index('setAttribute(ATTR.ready, "1")')
+        ready_class = attempt.index("classList.add(CLASS.ready)")
+        proof = attempt.index("return proveExtendedCssRelease(")
+        release_callback = attempt.index("function releaseProvedProjection()")
+        phase_released = attempt.index('runtime.releasePhase = "released"')
+        self.assertLess(prepare, authorize)
+        self.assertLess(authorize, ready)
+        self.assertLess(ready, ready_class)
+        self.assertLess(ready_class, proof)
+        self.assertLess(proof, release_callback)
+        self.assertLess(release_callback, phase_released)
+        self.assertLess(phase_released, unlock)
+
+        release_proof = self.source[
+            self.source.index("function proveExtendedCssRelease"):
+            self.source.index("function installIntegrityObserver")
+        ]
+        self.assertIn("RELEASE_PROOF_FRAMES = 2", self.source)
+        self.assertIn("runtime.verifyCascadeRelease(cascadeSnapshot)", release_proof)
+        self.assertIn('probe.style.getPropertyValue("display") === "none"', release_proof)
+        self.assertIn('probe.style.getPropertyPriority("display") === "important"', release_proof)
+
+        activation = self.source[
+            self.source.index("function activateCurrentLocation"):
+            self.source.index("activateCurrentLocation();")
+        ]
+        same_identity_return = activation.index("if (!isInitialActivation)")
+        runtime_stop = activation.index("activeRuntime.stop()")
+        self.assertLess(same_identity_return, runtime_stop)
+        self.assertIn('terminalNavigationBlock("navigation-identity")', activation)
+
+    def test_first_terminal_navigation_reason_is_immutable(self) -> None:
+        start = self.source[
+            self.source.index("function start(browserRoot)"):
+            self.source.index('return { mode: "reader-gate"')
+        ]
+        terminal = start[
+            start.index("function terminalNavigationBlock"):
+            start.index("function activateCurrentLocation")
+        ]
+        self.assertIn("let navigationTerminalReason = null", start)
+        self.assertIn("if (navigationTerminallyBlocked)", terminal)
+        self.assertIn("return false", terminal)
+        self.assertIn('navigationTerminalReason = reason || "blocked"', terminal)
+        activation_prefix = start[
+            start.index("function activateCurrentLocation"):
+            start.index("if (activeRuntime && activeRuntime.terminallyBlocked)")
+        ]
+        self.assertIn("if (navigationTerminallyBlocked)", activation_prefix)
+        self.assertNotIn("terminalNavigationBlock", activation_prefix)
 
     def test_projection_cardinality_truth_table_is_fail_closed(self) -> None:
         cases = [
@@ -526,6 +1086,80 @@ class SemanticContractTests(unittest.TestCase):
                 "core_ok": True,
                 "evidence_ok": True,
             },
+            {
+                "id": "quasar-publisher-payment-expansion",
+                "algumon": "사파이어 9060 XT PULSE 16GB 외 9070XT NITRO+ 등 이엠텍 기획전",
+                "visible": "[SSG] 사파이어 9060 XT PULSE 16GB 외 9070XT NITRO+ 등 이엠텍 기획전 (비씨)",
+                "metadata": {
+                    "og": ["[SSG] 사파이어 9060 XT PULSE 16GB 외 9070XT NITRO+ 등 이엠텍 기획전 (비씨)"]
+                },
+                "core_ok": True,
+                "evidence_ok": True,
+            },
+            {
+                "id": "clien-bounded-quantity-price-expansion",
+                "algumon": "할리스 시그니처 아메리카노 550ml",
+                "visible": "선착순) 할리스 시그니처 아메리카노 550ml 12개 8000원",
+                "metadata": {
+                    "og": ["선착순) 할리스 시그니처 아메리카노 550ml 12개 8000원"]
+                },
+                "core_ok": True,
+                "evidence_ok": True,
+            },
+            {
+                "id": "ruliweb-composite-console-model-expansion",
+                "algumon": "PS5 타츠진 익스트림 예약 판매",
+                "visible": "겜우리 PS5NS2 타츠진 익스트림 예약 판매 49500원",
+                "metadata": {
+                    "og": ["겜우리 PS5NS2 타츠진 익스트림 예약 판매 49500원"]
+                },
+                "core_ok": True,
+                "evidence_ok": True,
+            },
+            {
+                "id": "eomisae-korean-number-boundary-expansion",
+                "algumon": "배달의민족 2만원권",
+                "visible": "배달의민족2만원권 18,400원",
+                "metadata": {"og": ["배달의민족2만원권 18,400원 - 기타정보 - 어미새"]},
+                "core_ok": True,
+                "evidence_ok": True,
+            },
+            {
+                "id": "ruliweb-model-delimiter-metadata-equivalence",
+                "algumon": "PS5 타츠진 익스트림 예약 판매",
+                "visible": "[겜우리] PS5/NS2 타츠진 익스트림 예약 판매 / 49,500원",
+                "metadata": {
+                    "og": ["겜우리 PS5NS2 타츠진 익스트림 예약 판매 49500원"],
+                    "twitter": ["겜우리 PS5NS2 타츠진 익스트림 예약 판매 49500원"],
+                    "schema": ["[겜우리] PS5/NS2 타츠진 익스트림 예약 판매 / 49,500원"],
+                },
+                "core_ok": True,
+                "evidence_ok": True,
+            },
+            {
+                "id": "ruliweb-bounded-store-token-reorder",
+                "algumon": "GS25 보먹돼 1Kg 우리카드 할인",
+                "visible": "[우리동네GS] 보먹돼 GS25 픽업 1Kg 우리카드 할인 (9,900/0)",
+                "metadata": {
+                    "og": ["우리동네GS 보먹돼 GS25 픽업 1Kg 우리카드 할인 99000"],
+                    "twitter": ["우리동네GS 보먹돼 GS25 픽업 1Kg 우리카드 할인 99000"],
+                    "schema": ["[우리동네GS] 보먹돼 GS25 픽업 1Kg 우리카드 할인 (9,900/0)"],
+                },
+                "core_ok": True,
+                "evidence_ok": True,
+            },
+            {
+                "id": "eomisae-bounded-unit-price-expansion",
+                "algumon": "더바디샵 바디 미스트, 핑크 그레이프 프룻",
+                "visible": "국내 더바디샵 바디 미스트, 핑크 그레이프 프룻, 100ml, 11,760원",
+                "metadata": {
+                    "og": ["더바디샵 바디 미스트, 핑크 그레이프 프룻, 100ml, 11,760원 - 기타정보 - 어미새"],
+                    "twitter": ["더바디샵 바디 미스트, 핑크 그레이프 프룻, 100ml, 11,760원 - 기타정보 - 어미새"],
+                    "schema": ["더바디샵 바디 미스트, 핑크 그레이프 프룻, 100ml, 11,760원"],
+                },
+                "core_ok": True,
+                "evidence_ok": True,
+            },
         ]
         results = evaluate_title_cases(live_cases)
         for case, result in zip(live_cases, results, strict=True):
@@ -550,6 +1184,23 @@ class SemanticContractTests(unittest.TestCase):
             ("천홍 천도복숭아 로얄과 2kg", "천홍 천도복숭아 농장 광고 2kg"),
             ("메가커피 메뉴", "메가커피 쿠폰"),
             ("Apple AirPods Pro 2", "Pineapple AirPods Pro 2"),
+            (
+                "사파이어 9060 XT PULSE 16GB 외 9070XT NITRO+ 등 이엠텍 기획전",
+                "[SSG] 사파이어 9600 XT PULSE 16GB 외 9070XT NITRO+ 등 이엠텍 기획전 (비씨)",
+            ),
+            (
+                "할리스 시그니처 아메리카노 550ml",
+                "선착순) 할리스 시그니처 아메리카노 500ml 12개 8000원",
+            ),
+            (
+                "PS5 타츠진 익스트림 예약 판매",
+                "겜우리 PS4NS2 타츠진 익스트림 예약 판매 49500원",
+            ),
+            ("배달의민족 2만원권", "배달의민족3만원권 18,400원"),
+            (
+                "GS25 보먹돼 1Kg 우리카드 할인",
+                "[우리동네GS] 보먹돼 GS25 픽업 2Kg 우리카드 할인 (9,900/0)",
+            ),
         ]
         cases = [
             {
@@ -571,9 +1222,62 @@ class SemanticContractTests(unittest.TestCase):
                 },
             }
         )
+        cases.append(
+            {
+                "algumon": "PS5 타츠진 익스트림 예약 판매",
+                "visible": "[겜우리] PS5/NS2 타츠진 익스트림 예약 판매 / 49,500원",
+                "metadata": {
+                    "og": ["겜우리 PS4NS2 타츠진 익스트림 예약 판매 49500원"],
+                    "schema": ["[겜우리] PS5/NS2 타츠진 익스트림 예약 판매 / 49,500원"],
+                },
+            }
+        )
         for index, result in enumerate(evaluate_title_cases(cases)):
             with self.subTest(case=index):
                 self.assertFalse(result["evidence"]["ok"])
+
+    def test_seed_validation_preserves_protected_title_punctuation(self) -> None:
+        javascript = r"""
+const fs = require("fs");
+const vm = require("vm");
+const moduleRecord = { exports: {} };
+const sandbox = {
+  module: moduleRecord, URL, Set, Map, Object, Array, String, Number, RegExp,
+  JSON, Date, Math, encodeURIComponent, decodeURIComponent, escape, unescape,
+  Uint32Array,
+};
+vm.runInNewContext(fs.readFileSync("hotdeal-focus.user.js", "utf8"), sandbox);
+const api = moduleRecord.exports;
+const now = 1784532000000;
+const rawTitle = "Synthetic PS5/NS2 marker-style-tamper";
+const seed = api.validateSeed({
+  v: 1,
+  siteType: "clien",
+  dealId: "99999000",
+  title: rawTitle,
+  commentCount: null,
+  ts: now,
+  relayV: "0".repeat(32),
+  relayT: String(now),
+  navigationNonce: `hdf-${"a".repeat(28)}`,
+  destinationUrl: "https://www.clien.net/service/board/jirum/99999000",
+}, now, true);
+process.stdout.write(JSON.stringify({
+  title: seed?.title ?? null,
+  evidence: seed ? api.titleConsistency(seed.title, rawTitle) : null,
+}));
+"""
+        completed = subprocess.run(
+            ["node", "-e", javascript],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual("Synthetic PS5/NS2 marker-style-tamper", result["title"])
+        self.assertTrue(result["evidence"]["ok"], result)
 
     def test_tamper_and_spa_revalidation_contracts_exist(self) -> None:
         for token in (
@@ -596,8 +1300,9 @@ class SemanticContractTests(unittest.TestCase):
         ]
         self.assertIn("let terminallyBlocked = false", bootstrap)
         self.assertIn("runtime.enterTerminal", bootstrap)
-        self.assertIn("runtimeGateStyleIntact", bootstrap)
-        self.assertIn("runtime.authorizedReady", bootstrap)
+        self.assertIn("runtimeGateStyleFailure", bootstrap)
+        self.assertIn("runtime.releasePhase", bootstrap)
+        self.assertIn("rootShapeIntact", bootstrap)
         self.assertIn("canonicalRuntimeCssRules", self.source)
         self.assertIn("installPersistentTerminalGuardian", self.source)
         navigation_start = self.source.index("function activateCurrentLocation")
@@ -609,28 +1314,60 @@ class SemanticContractTests(unittest.TestCase):
         self.assertIn('setAttribute(ATTR.status, "terminal-tamper")', navigation)
         self.assertIn("event.persisted === true", self.source)
 
+        terminal_guardian = self.source[
+            self.source.index("function installPersistentTerminalGuardian"):
+            self.source.index("function publishDiagnostics")
+        ]
+        self.assertIn(
+            'html.style.getPropertyValue("opacity") !== "0"',
+            terminal_guardian,
+        )
+        self.assertIn(
+            'html.style.getPropertyValue("pointer-events") !== "none"',
+            terminal_guardian,
+        )
+        self.assertIn("styleElement?.sheet?.disabled", terminal_guardian)
+        self.assertIn("styleElement.sheet.disabled = false", terminal_guardian)
+        self.assertIn("html.removeAttribute(ATTR.measure)", terminal_guardian)
+        for exact_terminal_lock in (
+            'html.style.getPropertyValue("transition") !== "none"',
+            'html.style.getPropertyValue("animation") !== "none"',
+            'html.style.getPropertyValue("content-visibility") !== "hidden"',
+            'html.style.getPropertyValue("clip-path") !== "inset(50%)"',
+            'html.style.getPropertyValue("caret-color") !== "transparent"',
+        ):
+            self.assertIn(exact_terminal_lock, terminal_guardian)
+
     def test_runtime_projection_is_nonce_bound_and_ready_is_committed_last(self) -> None:
         style = self.source[
             self.source.index("function paintLockSelectors"):
             self.source.index("function installRuntimeGateStyle")
         ]
-        self.assertIn('const owned = `[${ATTR.keep}="${nonce}"]`', style)
-        self.assertIn('const shell = `[${ATTR.shell}="${nonce}"]`', style)
+        self.assertIn(
+            'const owned = `.${CLASS.keep}[${ATTR.keep}="${nonce}"]`', style
+        )
+        self.assertIn(
+            'const shell = `.${CLASS.shell}[${ATTR.shell}="${nonce}"]`', style
+        )
         self.assertNotIn(":not([${ATTR.keep}])", style)
         for paint_lock in (
             "transition: none !important",
             "animation: none !important",
-            "content-visibility: hidden !important",
             "visibility: hidden !important",
+            "content-visibility: hidden !important",
             "opacity: 0 !important",
-            "pointer-events: none !important",
             "clip-path: inset(50%) !important",
+            "pointer-events: none !important",
             "dialog::backdrop",
             "[popover]::backdrop",
             ":fullscreen::backdrop",
         ):
             self.assertIn(paint_lock, style)
-        self.assertNotIn("display: none !important", style.split("if (!nonce)", 1)[0])
+        lock_rule = style.split("if (!nonce)", 1)[0]
+        for geometry_breaker in (
+            "display: none !important",
+        ):
+            self.assertNotIn(geometry_breaker, lock_rule)
         attempt = self.source[
             self.source.index("function attemptResolution"):
             self.source.index("function scheduleAttempt")
@@ -639,6 +1376,106 @@ class SemanticContractTests(unittest.TestCase):
             attempt.index("writeRuntimeGateStyle(styleElement, nonce, runtime)"),
             attempt.index('setAttribute(ATTR.ready, "1")'),
         )
+        self.assertLess(
+            attempt.index('setAttribute(ATTR.ready, "1")'),
+            attempt.index("classList.add(CLASS.ready)"),
+        )
+        self.assertLess(
+            attempt.index("classList.add(CLASS.ready)"),
+            attempt.index("proveExtendedCssRelease("),
+        )
+
+    def test_reader_gate_v2_uses_only_exact_gm_style_authority(self) -> None:
+        self.assertEqual(["GM_addElement"], metadata_values(self.source, "grant"))
+        self.assertEqual(1, self.source.count('GM_addElement(parent, "style", {'))
+        install = self.source[
+            self.source.index("function installRuntimeGateStyle"):
+            self.source.index("function canonicalRuntimeCssRules")
+        ]
+        self.assertIn('"data-hotdeal-focus-runtime-style": "2"', install)
+        self.assertNotIn("createElement", install)
+        self.assertNotIn('"nonce"', install)
+        self.assertNotIn('"data-source"', install)
+
+        integrity = self.source[
+            self.source.index("function runtimeGateStyleIntact"):
+            self.source.index("function installPersistentTerminalGuardian")
+        ]
+        proof = self.source[
+            self.source.index("function proveExtendedCssRelease"):
+            self.source.index("function installIntegrityObserver")
+        ]
+        for section in (integrity, proof):
+            self.assertNotRegex(
+                section,
+                r'getAttribute\(["\'](?:nonce|data-source)["\']\)',
+            )
+        self.assertIn('styleElement.hasAttribute("nonce")', proof)
+        self.assertIn('styleElement.hasAttribute("data-source")', proof)
+
+        audit_source = (SCRIPTS_DIR / "audit_pages.mjs").read_text(encoding="utf-8")
+        control_source = (SCRIPTS_DIR / "preauthorized_adguard_control.mjs").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("bypassCSP", audit_source)
+        self.assertIn('CONTROL_KIND = "preauthorized-nonce-control"', control_source)
+        self.assertRegex(
+            control_source,
+            r"not evidence that\s+\* AdGuard injected the style",
+        )
+        self.assertIn(
+            'data-hdf-v2-release-probe="unowned-inline-important"',
+            control_source,
+        )
+        self.assertNotIn('document.body?.querySelectorAll("*")', control_source)
+
+    def test_reader_gate_v2_bootstrap_and_release_order_are_fail_closed(self) -> None:
+        bootstrap = self.source[
+            self.source.index("function claimBootstrapLock"):
+            self.source.index("function orderedCommentControls")
+        ]
+        strip = bootstrap.index("removePublisherHdfMarkers(document)")
+        lock_class = bootstrap.index("html.classList.add(CLASS.lock)")
+        lock_attribute = bootstrap.index('html.setAttribute(ATTR.lock, "1")')
+        self.assertLess(strip, lock_class)
+        self.assertLess(lock_class, lock_attribute)
+        self.assertIn("HDF_ATTRIBUTE_PREFIX", self.source)
+        self.assertIn("HDF_CLASS_PATTERN", self.source)
+        self.assertIn('["clip-path", BOOTSTRAP_INLINE_LOCK.clipPath]', bootstrap)
+        self.assertIn(
+            '["content-visibility", BOOTSTRAP_INLINE_LOCK.contentVisibility]',
+            bootstrap,
+        )
+        self.assertIn('["visibility", BOOTSTRAP_INLINE_LOCK.visibility]', bootstrap)
+
+        attempt = self.source[
+            self.source.index("function attemptResolution"):
+            self.source.index("function scheduleAttempt")
+        ]
+        marker = attempt.index("applyRoleMarkers(")
+        ready_protocol = attempt.index("setAttribute(ATTR.protocol, PROTOCOL_VERSION)")
+        ready_class = attempt.index("classList.add(CLASS.ready)")
+        remove_lock_attribute = attempt.index("removeAttribute(ATTR.lock)")
+        remove_lock_class = attempt.index("classList.remove(CLASS.lock)")
+        self.assertLess(marker, ready_protocol)
+        self.assertLess(ready_protocol, ready_class)
+        self.assertLess(ready_class, remove_lock_attribute)
+        self.assertLess(remove_lock_attribute, remove_lock_class)
+        self.assertEqual(
+            remove_lock_class,
+            attempt.rindex("classList.remove(CLASS.lock)"),
+        )
+
+    def test_release_probe_is_cleaned_on_terminal_stop_and_spa_revalidation(self) -> None:
+        self.assertIn("releaseProbe: null", self.source)
+        cleanup = "if (runtime.releaseProbe?.isConnected) runtime.releaseProbe.remove();"
+        self.assertGreaterEqual(self.source.count(cleanup), 2)
+        navigation = self.source[
+            self.source.index("function activateCurrentLocation"):
+            self.source.index("installNavigationRevalidation", self.source.index("function activateCurrentLocation"))
+        ]
+        self.assertIn("activeRuntime.stop()", navigation)
+        self.assertIn("html.classList.remove(CLASS.ready)", navigation)
 
     def test_path_drift_probe_requires_initial_algumon_navigation_evidence(self) -> None:
         start = self.source[
@@ -696,7 +1533,15 @@ class CandidatePromotionContractTests(unittest.TestCase):
         captured_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         observations = []
         for profile in ("desktop", "mobile"):
-            for url in payload["sampleUrls"]:
+            for url_index, url in enumerate(payload["sampleUrls"]):
+                product_projection = payload["roleProjection"]["product"]
+                configured_cardinality = product_projection["cardinality"]
+                observed_cardinality = (
+                    "required"
+                    if configured_cardinality == "required"
+                    or (configured_cardinality == "optional" and url_index < 2)
+                    else "zero"
+                )
                 observation = {
                     "url": url,
                     "profile": profile,
@@ -711,6 +1556,20 @@ class CandidatePromotionContractTests(unittest.TestCase):
                         for role in payload["requiredRoles"]
                     },
                     "roleProjection": payload["roleProjection"],
+                    "productObservation": {
+                        "cardinality": observed_cardinality,
+                        "selector": (
+                            product_projection["selectors"][0]
+                            if observed_cardinality == "required"
+                            else None
+                        ),
+                        "count": 1 if observed_cardinality == "required" else 0,
+                        "order": (
+                            product_projection["order"]
+                            if observed_cardinality == "required"
+                            else None
+                        ),
+                    },
                     "commentStructure": {
                         "mountSelector": payload["roles"]["comments"][0],
                         "mountCount": 1,
@@ -795,7 +1654,7 @@ class CandidatePromotionContractTests(unittest.TestCase):
         return {
             "schemaVersion": 1,
             "status": "draft",
-            "protocolVersion": 1,
+            "protocolVersion": 2,
             "baseConfigSha256": hashlib.sha256(CONFIG_PATH.read_bytes()).hexdigest(),
             "releaseVersion": release_version,
             "discovery": {
@@ -869,6 +1728,50 @@ class CandidatePromotionContractTests(unittest.TestCase):
             }
         )
 
+    def configure_product_cardinality(self, draft: dict, cardinality: str) -> None:
+        payload = draft["candidate"]
+        if cardinality == "required":
+            payload["requiredRoles"] = sorted(
+                set(payload["requiredRoles"]) | {"product"}
+            )
+            payload["roles"]["product"] = [".product_v2"]
+            product_projection = {
+                "mode": "atomic-boundary",
+                "cardinality": "required",
+                "order": "before-body",
+                "selectors": [".product_v2"],
+                "ignored": [],
+            }
+        elif cardinality == "optional":
+            payload["requiredRoles"] = [
+                role for role in payload["requiredRoles"] if role != "product"
+            ]
+            payload["roles"].pop("product", None)
+            product_projection = {
+                "mode": "atomic-boundary",
+                "cardinality": "optional",
+                "order": "before-body",
+                "selectors": [".product_v2"],
+                "ignored": [],
+            }
+        elif cardinality == "zero":
+            payload["requiredRoles"] = [
+                role for role in payload["requiredRoles"] if role != "product"
+            ]
+            payload["roles"].pop("product", None)
+            product_projection = {
+                "mode": "absent",
+                "cardinality": "zero",
+                "selectors": [],
+                "ignored": [],
+            }
+        else:
+            raise AssertionError(f"unsupported test cardinality: {cardinality}")
+        payload["roleProjection"]["product"] = product_projection
+        payload["variantId"] = self.automatic_variant_id(payload)
+        draft["discovery"]["observations"] = self.observations(payload, final=False)
+        self.refresh_draft_hashes(draft)
+
     def proven_envelope(self, draft: dict, artifact_set_sha256: str) -> dict:
         payload = draft["candidate"]
         observations = self.observations(payload, final=True)
@@ -925,11 +1828,95 @@ class CandidatePromotionContractTests(unittest.TestCase):
             proven_envelope,
         )
 
+    def test_independent_product_observations_derive_candidate_cardinality(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            for offset, cardinality in enumerate(("zero", "required", "optional"), start=1):
+                draft = self.draft_envelope(
+                    f"product-{cardinality}",
+                    next_patch_version(BASE_RELEASE_VERSION, 20 + offset),
+                )
+                self.configure_product_cardinality(draft, cardinality)
+                path = temporary_root / f"{cardinality}.json"
+                self.write_envelope(path, draft)
+                build_candidate_draft_bundle(path)
+
+            mismatched = self.draft_envelope(
+                "product-mismatched",
+                next_patch_version(BASE_RELEASE_VERSION, 30),
+            )
+            self.configure_product_cardinality(mismatched, "optional")
+            for observation in mismatched["discovery"]["observations"]:
+                observation["productObservation"] = {
+                    "cardinality": "required",
+                    "selector": ".product_v2",
+                    "count": 1,
+                    "order": "before-body",
+                }
+            self.refresh_draft_hashes(mismatched)
+            mismatched_path = temporary_root / "mismatched.json"
+            self.write_envelope(mismatched_path, mismatched)
+            with self.assertRaisesRegex(
+                ConfigError,
+                "product cardinality must equal the independent product observations",
+            ):
+                build_candidate_draft_bundle(mismatched_path)
+
+            malformed_zero = self.draft_envelope(
+                "product-malformed-zero",
+                next_patch_version(BASE_RELEASE_VERSION, 31),
+            )
+            first_observation = malformed_zero["discovery"]["observations"][0]
+            first_observation["productObservation"]["selector"] = ".forged-product"
+            self.refresh_draft_hashes(malformed_zero)
+            malformed_path = temporary_root / "malformed-zero.json"
+            self.write_envelope(malformed_path, malformed_zero)
+            with self.assertRaisesRegex(
+                ConfigError,
+                "selector must be null for zero cardinality",
+            ):
+                build_candidate_draft_bundle(malformed_path)
+
+    def test_candidate_protocol_v1_cannot_enter_the_v2_reader_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            draft = self.draft_envelope(
+                "legacy-protocol",
+                next_patch_version(BASE_RELEASE_VERSION, 32),
+            )
+            draft["protocolVersion"] = 1
+            path = temporary_root / "legacy-protocol.json"
+            self.write_envelope(path, draft)
+            with self.assertRaisesRegex(
+                ConfigError,
+                "candidate protocolVersion does not match the reader gate",
+            ):
+                build_candidate_draft_bundle(path)
+
+    def test_comparable_comment_lower_bound_requires_exact_consistency(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            temporary_root = Path(temporary_directory)
+            draft = self.draft_envelope(
+                "fractional-comment-consistency",
+                next_patch_version(BASE_RELEASE_VERSION, 33),
+            )
+            for observation in draft["discovery"]["observations"]:
+                observation["algumon"]["countComparable"] = True
+                observation["algumon"]["countConsistency"] = 0.96
+            self.refresh_draft_hashes(draft)
+            path = temporary_root / "fractional-comment-consistency.json"
+            self.write_envelope(path, draft)
+            with self.assertRaisesRegex(
+                ConfigError,
+                "countConsistency must be exactly 1",
+            ):
+                build_candidate_draft_bundle(path)
+
     def test_two_stage_candidate_is_byte_identical_and_release_ready(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             draft_bundle, bundle, proven = self.build_pair(
-                temporary_root, "jirum-v2", "0.3.7"
+                temporary_root, "jirum-v2", FIRST_CANDIDATE_VERSION
             )
             self.assertEqual("draft-non-promotable", json.loads(
                 draft_bundle["draft-manifest.json"]
@@ -953,7 +1940,10 @@ class CandidatePromotionContractTests(unittest.TestCase):
                 "config/sites.json", "package.json", "package-lock.json",
             ):
                 self.assertEqual(draft_bundle[core_path], bundle[core_path])
-            self.assertIn(b"@version      0.3.7", bundle["hotdeal-focus.user.js"])
+            self.assertIn(
+                f"@version      {FIRST_CANDIDATE_VERSION}".encode(),
+                bundle["hotdeal-focus.user.js"],
+            )
             overlay = json.loads(bundle["config/sites.json"])
             clien_layout = overlay["sites"][0]["layouts"][0]
             self.assertEqual("jirum", clien_layout["id"])
@@ -987,9 +1977,24 @@ class CandidatePromotionContractTests(unittest.TestCase):
                 approved_state_bytes=bundle["state/approved-variants.json"],
             )
             self.assertEqual(bundle["release-manifest.json"], rebuilt_manifest)
-            self.assertEqual(9, release_manifest["coverage"]["contractCount"])
-            self.assertEqual(9, release_manifest["coverage"]["layoutFamilyCount"] + 1)
-            self.assertEqual(13, release_manifest["coverage"]["routeCount"])
+            self.assertEqual(
+                release_manifest["coverage"]["layoutFamilyCount"]
+                + manifest["approvedVariantCount"],
+                release_manifest["coverage"]["contractCount"],
+            )
+            expected_route_count = sum(
+                len(raw_layout_paths(layout))
+                + sum(
+                    len(raw_layout_paths(variant))
+                    for variant in layout.get("variants", [])
+                )
+                for site in normalized_overlay["sites"]
+                for layout in site["layouts"]
+            )
+            self.assertEqual(
+                expected_route_count,
+                release_manifest["coverage"]["routeCount"],
+            )
             same_route_rules = [
                 line
                 for line in bundle["filter-static.txt"].decode("utf-8").splitlines()
@@ -1041,12 +2046,12 @@ class CandidatePromotionContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
             _draft, first_bundle, first_proof = self.build_pair(
-                temporary_root, "jirum-v2", "0.3.7"
+                temporary_root, "jirum-v2", FIRST_CANDIDATE_VERSION
             )
             state_path = temporary_root / "approved-variants.json"
             state_path.write_bytes(first_bundle["state/approved-variants.json"])
             second_draft = self.add_new_route(
-                self.draft_envelope("jirum-v3", "0.3.8"),
+                self.draft_envelope("jirum-v3", SECOND_CANDIDATE_VERSION),
                 route_name="appenddeal",
                 article_ids=(5001, 5002, 5003),
             )
@@ -1061,7 +2066,10 @@ class CandidatePromotionContractTests(unittest.TestCase):
                 second_proof["candidate"]["variantId"],
             }
             self.assertEqual(expected_ids, {item["variantId"] for item in state["variants"]})
-            self.assertEqual({"0.3.7", "0.3.8"}, {item["releaseVersion"] for item in state["variants"]})
+            self.assertEqual(
+                {FIRST_CANDIDATE_VERSION, SECOND_CANDIDATE_VERSION},
+                {item["releaseVersion"] for item in state["variants"]},
+            )
             second_config = json.loads(second_bundle["config/sites.json"])
             second_clien = next(
                 site for site in second_config["sites"] if site["id"] == "clien"
@@ -1103,7 +2111,7 @@ class CandidatePromotionContractTests(unittest.TestCase):
             self.assertEqual(expected_ids, {item["variantId"] for item in next_run_records})
 
             stale_draft = self.add_new_route(
-                self.draft_envelope("jirum-v4", "0.3.8"),
+                self.draft_envelope("jirum-v4", SECOND_CANDIDATE_VERSION),
                 route_name="staleroute",
                 article_ids=(6001, 6002, 6003),
             )
@@ -1117,12 +2125,17 @@ class CandidatePromotionContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            draft = self.add_new_route(self.draft_envelope("jirum-route-v2", "0.3.7"))
+            draft = self.add_new_route(
+                self.draft_envelope("jirum-route-v2", FIRST_CANDIDATE_VERSION)
+            )
             draft_path = root / "route-draft.json"
             self.write_envelope(draft_path, draft)
             draft_bundle = build_candidate_draft_bundle(draft_path)
             rendered_gate = draft_bundle["filter.txt"].decode("utf-8")
-            self.assertEqual(2, rendered_gate.count("[$domain=clien.net]"))
+            self.assertEqual(
+                render_gate_filter(load_config(CONFIG_PATH)),
+                rendered_gate,
+            )
             overlay = json.loads(draft_bundle["config/sites.json"])
             clien_layout = overlay["sites"][0]["layouts"][0]
             self.assertEqual(["|/service/board/jirum/"], raw_layout_paths(clien_layout))
@@ -1192,7 +2205,7 @@ class CandidatePromotionContractTests(unittest.TestCase):
         base_bytes = (
             json.dumps(base_config, ensure_ascii=False, indent=2) + "\n"
         ).encode("utf-8")
-        envelope = self.draft_envelope("jirum-multipath-v2", "0.3.6")
+        envelope = self.draft_envelope("jirum-multipath-v2", BASE_RELEASE_VERSION)
         envelope["baseConfigSha256"] = hashlib.sha256(base_bytes).hexdigest()
         envelope["candidate"]["paths"] = sorted(clien_layout["paths"])
         with self.assertRaisesRegex(ConfigError, "exactly one proven route"):
@@ -1200,13 +2213,13 @@ class CandidatePromotionContractTests(unittest.TestCase):
                 envelope,
                 base_config,
                 base_bytes,
-                "0.3.5",
+                "0.0.0",
             )
 
     def test_candidate_rejects_noncanonical_variant_identity(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            draft = self.draft_envelope("forged-id", "0.3.7")
+            draft = self.draft_envelope("forged-id", FIRST_CANDIDATE_VERSION)
             draft["candidate"]["variantId"] = "forged-manual-identity"
             path = root / "forged-id.json"
             self.write_envelope(path, draft)
@@ -1225,7 +2238,7 @@ class CandidatePromotionContractTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             first = self.add_new_route(
-                self.draft_envelope("temporary-first", "0.3.7"),
+                self.draft_envelope("temporary-first", FIRST_CANDIDATE_VERSION),
                 route_name="newhotdeal",
                 article_ids=(3001, 3002, 3003),
             )
@@ -1238,7 +2251,7 @@ class CandidatePromotionContractTests(unittest.TestCase):
             state_path.write_bytes(first_bundle["state/approved-variants.json"])
 
             second = self.add_new_route(
-                self.draft_envelope("temporary-second", "0.3.8"),
+                self.draft_envelope("temporary-second", SECOND_CANDIDATE_VERSION),
                 route_name="flashdeal",
                 article_ids=(4001, 4002, 4003),
             )
@@ -1287,7 +2300,9 @@ class CandidatePromotionContractTests(unittest.TestCase):
     def test_profile_specific_mobile_variant_does_not_require_desktop_proof(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            draft = self.draft_envelope("jirum-mobile-v2", "0.3.7")
+            draft = self.draft_envelope(
+                "jirum-mobile-v2", FIRST_CANDIDATE_VERSION
+            )
             draft["candidate"]["proofProfiles"] = ["mobile"]
             observations = [
                 item for item in draft["discovery"]["observations"]
@@ -1314,7 +2329,9 @@ class CandidatePromotionContractTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            base = self.draft_envelope("jirum-structure-v2", "0.3.7")
+            base = self.draft_envelope(
+                "jirum-structure-v2", FIRST_CANDIDATE_VERSION
+            )
 
             exact_empty = copy.deepcopy(base)
             for observation in exact_empty["discovery"]["observations"]:
@@ -1369,7 +2386,7 @@ class CandidatePromotionContractTests(unittest.TestCase):
     def test_missing_or_forged_proof_dimensions_are_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            draft = self.draft_envelope("jirum-v2", "0.3.7")
+            draft = self.draft_envelope("jirum-v2", FIRST_CANDIDATE_VERSION)
             draft_path = root / "draft.json"
             self.write_envelope(draft_path, draft)
             draft_bundle = build_candidate_draft_bundle(draft_path)
@@ -1425,16 +2442,18 @@ class FilterAndReleaseContractTests(unittest.TestCase):
         rendered = render_gate_filter(self.config)
         rules = [
             line for line in rendered.splitlines()
-            if "#?#" in line or "#$#" in line
+            if "#$?#" in line or "#$#" in line
         ]
         domain_count = len({
             layout["domain"]
             for site in self.config["sites"]
             for layout in site["layouts"]
         })
-        self.assertEqual(domain_count * 2, len(rules))
+        self.assertEqual(domain_count * 13, len(rules))
+        self.assertEqual(domain_count * 7, sum("#$#" in rule for rule in rules))
+        self.assertEqual(domain_count * 6, sum("#$?#" in rule for rule in rules))
         for rule in rules:
-            self.assertRegex(rule, r"^\[\$domain=[^,]+\]#(?:\?#|\$#)")
+            self.assertRegex(rule, r"^\[\$domain=[^,]+\](?:#\$#|#\$\?#)")
             self.assertNotIn(",path=", rule)
             self.assertNotIn("$path=", rule)
             self.assertNotRegex(
@@ -1446,11 +2465,11 @@ class FilterAndReleaseContractTests(unittest.TestCase):
         self.assertIn("visibility: hidden !important", rendered)
         self.assertIn("transition: none !important", rendered)
         self.assertIn("animation: none !important", rendered)
-        self.assertIn("content-visibility: hidden !important", rendered)
         self.assertIn("opacity: 0 !important", rendered)
-        self.assertIn("pointer-events: none !important", rendered)
         self.assertIn("clip-path: inset(50%) !important", rendered)
-        self.assertIn('html[data-hotdeal-focus-lock="1"]', rendered)
+        self.assertIn("pointer-events: none !important", rendered)
+        self.assertIn("caret-color: transparent !important", rendered)
+        self.assertIn("html.hdf-v2-lock", rendered)
         self.assertIn("dialog::backdrop", rendered)
         self.assertIn("[popover]::backdrop", rendered)
         self.assertIn(":fullscreen::backdrop", rendered)
@@ -1459,6 +2478,26 @@ class FilterAndReleaseContractTests(unittest.TestCase):
             rendered.splitlines()[0],
         )
         self.assertNotIn("�", rendered.splitlines()[0])
+
+    def test_auditor_binds_every_marker_to_the_exact_gate_v2_lock(self) -> None:
+        auditor = (SCRIPTS_DIR / "audit_pages.mjs").read_text(encoding="utf-8")
+        for token in (
+            'const READER_GATE_ARTIFACT_VERSION = "2.0.2"',
+            '"gate-v2.0.2/filter.txt"',
+            "const gateArtifactLockContract",
+            "const gateArtifactLockMatchesRelease",
+            'gateLockEntry.path === "filter.txt"',
+            "gateLockEntry.bytes === markerFilter.bytes",
+            "gateLockEntry.sha256 === markerFilter.sha256",
+            "installedFilterRulesSha256(markerFilter.content)",
+            "releaseGateEntry?.installedRulesSha256 === gateLockEntry.installedRulesSha256",
+        ):
+            self.assertIn(token, auditor)
+        self.assertIn(
+            '/data-hotdeal-focus-protocol=["\']([^"\']+)["\']/gu',
+            auditor,
+        )
+        self.assertIn("rule.selector.matchAll", auditor)
 
     def test_gate_artifact_is_independent_from_semantic_release_versions(self) -> None:
         import copy
@@ -1517,7 +2556,12 @@ class FilterAndReleaseContractTests(unittest.TestCase):
             for line in gate_bytes.decode("utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("!")
         ]
-        self.assertEqual(14, len(installed_rule_lines))
+        domain_count = len({
+            layout["domain"]
+            for site in self.config["sites"]
+            for layout in site["layouts"]
+        })
+        self.assertEqual(domain_count * 13, len(installed_rule_lines))
         self.assertEqual(
             {
                 "filter-static.txt",
@@ -1531,7 +2575,10 @@ class FilterAndReleaseContractTests(unittest.TestCase):
             set(manifest["sourceIntegrity"]),
         )
         self.assertEqual(7, manifest["coverage"]["siteCount"])
-        self.assertEqual(8, manifest["coverage"]["layoutCount"])
+        self.assertEqual(
+            sum(len(site["layouts"]) for site in self.config["sites"]),
+            manifest["coverage"]["layoutCount"],
+        )
         self.assertGreaterEqual(manifest["coverage"]["routeCount"], 11)
 
     def test_build_check_rejects_tampered_expected_output(self) -> None:

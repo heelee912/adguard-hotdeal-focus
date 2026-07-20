@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the stable marker-only AdGuard gate consumed by the userscript."""
+"""Build the class-triggered AdGuard gate consumed by the userscript."""
 
 from __future__ import annotations
 
@@ -19,52 +19,241 @@ from build_filter import (
 
 
 DEFAULT_OUTPUT_PATH = PROJECT_ROOT / "dist" / "filter.txt"
-PROTOCOL_VERSION = "1"
-GENERATOR_VERSION = "0.3.6"
-GATE_ARTIFACT_VERSION = "1.0.0"
-GATE_GENERATOR_VERSION = "1.0.0"
+PROTOCOL_VERSION = "2"
+GENERATOR_VERSION = "0.5.5"
+GATE_ARTIFACT_VERSION = "2.0.2"
+GATE_GENERATOR_VERSION = "2.0.2"
 READY_ATTRIBUTE = "data-hotdeal-focus-ready"
 KEEP_ATTRIBUTE = "data-hotdeal-focus-keep"
-LOCK_ATTRIBUTE = "data-hotdeal-focus-lock"
 PROTOCOL_ATTRIBUTE = "data-hotdeal-focus-protocol"
 STATE_ATTRIBUTE = "data-hotdeal-focus-state"
+STATUS_ATTRIBUTE = "data-hotdeal-focus-status"
+SHELL_ATTRIBUTE = "data-hotdeal-focus-shell"
+DEEP_ATTRIBUTE = "data-hotdeal-focus-deep"
+ROLE_ATTRIBUTE = "data-hotdeal-focus-role"
+
+READY_CLASS = "hdf-v2-ready"
+LOCK_CLASS = "hdf-v2-lock"
+KEEP_CLASS = "hdf-v2-keep"
+SHELL_CLASS = "hdf-v2-shell"
+DEEP_CLASS = "hdf-v2-deep"
+ROLE_CLASS_PREFIX = "hdf-v2-role-"
+VISIBLE_ROLES = (
+    "title",
+    "title-text",
+    "body",
+    "product",
+    "comment-item",
+    "comment-control",
+)
 TOP_LAYER_PAINT_TARGETS = ("dialog", "[popover]", ":fullscreen")
-PAINT_LOCK_DECLARATIONS = (
+ROOT_LOCK_DECLARATIONS = (
     "transition: none !important; "
     "animation: none !important; "
+    "visibility: hidden !important; "
     "content-visibility: hidden !important; "
+    "opacity: 0 !important; "
+    "clip-path: inset(50%) !important; "
+    "pointer-events: none !important; "
+    "caret-color: transparent !important;"
+)
+TOP_LAYER_LOCK_DECLARATIONS = (
+    "transition: none !important; "
+    "animation: none !important; "
+    "display: none !important; "
     "visibility: hidden !important; "
     "opacity: 0 !important; "
-    "pointer-events: none !important; "
-    "clip-path: inset(50%) !important;"
+    "pointer-events: none !important;"
+)
+PROJECTION_HIDE_DECLARATIONS = (
+    "transition: none !important; "
+    "animation: none !important; "
+    "display: none !important; "
+    "visibility: hidden !important; "
+    "opacity: 0 !important; "
+    "pointer-events: none !important;"
+)
+SHELL_HIDE_DECLARATIONS = "visibility: hidden !important;"
+PROJECTION_REVEAL_DECLARATIONS = "visibility: visible !important;"
+SURFACE_CLEANUP_DECLARATIONS = (
+    "background-image: none !important; box-shadow: none !important;"
+)
+PSEUDO_CLEANUP_DECLARATIONS = (
+    "content: none !important; "
+    "display: none !important; "
+    "background: none !important; "
+    "transition: none !important; "
+    "animation: none !important;"
 )
 
 
-def paint_lock_selectors(root_selector: str) -> tuple[str, ...]:
-    selectors = [root_selector]
-    for target in TOP_LAYER_PAINT_TARGETS:
-        selectors.append(f"{root_selector} {target}")
-        selectors.append(f"{root_selector} {target}::backdrop")
-    return tuple(selectors)
-
-
-def build_gate_rules(domain: str) -> tuple[str, str]:
-    scope = f"[$domain={domain}]"
-    protocol_ready = (
+def protocol_ready_compound() -> str:
+    return (
+        f'.{READY_CLASS}'
         f'[{READY_ATTRIBUTE}="1"]'
         f'[{PROTOCOL_ATTRIBUTE}="{PROTOCOL_VERSION}"]'
         f'[{STATE_ATTRIBUTE}="ready"]'
+        f'[{STATUS_ATTRIBUTE}="ready"]'
     )
-    unready_root = f"html:not({protocol_ready})"
-    runtime_locked_root = f'html[{LOCK_ATTRIBUTE}="1"]'
-    lock_selectors = paint_lock_selectors(unready_root) + paint_lock_selectors(
-        runtime_locked_root
+
+
+def ready_root_selector() -> str:
+    return f"html{protocol_ready_compound()}"
+
+
+def locked_root_selectors() -> tuple[str, str]:
+    return (
+        f"html:not({protocol_ready_compound()})",
+        f"html.{LOCK_CLASS}",
     )
-    lock_rule = f"{scope}#$#{', '.join(lock_selectors)} {{ {PAINT_LOCK_DECLARATIONS} }}"
-    projection_rule = (
-        f"{scope}#?#html{protocol_ready} body *:not([{KEEP_ATTRIBUTE}])"
+
+
+def top_layer_selectors(
+    root_selectors: Sequence[str], *, include_backdrops: bool
+) -> tuple[str, ...]:
+    selectors: list[str] = []
+    for root_selector in root_selectors:
+        for target in TOP_LAYER_PAINT_TARGETS:
+            selectors.append(f"{root_selector} {target}")
+            if include_backdrops:
+                selectors.append(f"{root_selector} {target}::backdrop")
+    return tuple(selectors)
+
+
+def cosmetic_rule(
+    scope: str,
+    marker: str,
+    selectors: Sequence[str],
+    declarations: str,
+) -> str:
+    return f"{scope}{marker}{', '.join(selectors)} {{ {declarations} }}"
+
+
+def owned_selector() -> str:
+    return f".{KEEP_CLASS}[{KEEP_ATTRIBUTE}]"
+
+
+def shell_selector() -> str:
+    return (
+        f".{KEEP_CLASS}.{SHELL_CLASS}"
+        f"[{KEEP_ATTRIBUTE}][{SHELL_ATTRIBUTE}]"
     )
-    return lock_rule, projection_rule
+
+
+def deep_selector() -> str:
+    return (
+        f".{KEEP_CLASS}.{DEEP_CLASS}"
+        f"[{KEEP_ATTRIBUTE}][{DEEP_ATTRIBUTE}]"
+    )
+
+
+def role_selector(role: str) -> str:
+    return (
+        f".{KEEP_CLASS}.{ROLE_CLASS_PREFIX}{role}"
+        f'[{KEEP_ATTRIBUTE}][{ROLE_ATTRIBUTE}="{role}"]'
+    )
+
+
+def build_gate_rules(domain: str) -> tuple[str, ...]:
+    scope = f"[$domain={domain}]"
+    ready_root = ready_root_selector()
+    locked_roots = locked_root_selectors()
+    top_layer_elements = top_layer_selectors(
+        locked_roots, include_backdrops=False
+    )
+    top_layer_paint = top_layer_selectors(locked_roots, include_backdrops=True)
+    owned = owned_selector()
+    shell = shell_selector()
+    reveal_selectors = (deep_selector(),) + tuple(
+        role_selector(role) for role in VISIBLE_ROLES
+    )
+    projection_selector = f"{ready_root} body *:not({owned})"
+    shell_projection_selector = f"{ready_root} {shell}"
+    reveal_projection_selectors = tuple(
+        f"{ready_root} {selector}" for selector in reveal_selectors
+    )
+    shell_pseudo_selectors = (
+        f"{ready_root} {shell}::before",
+        f"{ready_root} {shell}::after",
+    )
+    pseudo_selectors = (
+        f"{ready_root}::before",
+        f"{ready_root}::after",
+        f"{ready_root} body::before",
+        f"{ready_root} body::after",
+    ) + shell_pseudo_selectors
+
+    standard_rules = (
+        cosmetic_rule(
+            scope, "#$#", locked_roots, ROOT_LOCK_DECLARATIONS
+        ),
+        cosmetic_rule(
+            scope, "#$#", top_layer_paint, TOP_LAYER_LOCK_DECLARATIONS
+        ),
+        cosmetic_rule(
+            scope, "#$#", (projection_selector,), PROJECTION_HIDE_DECLARATIONS
+        ),
+        cosmetic_rule(
+            scope,
+            "#$#",
+            (shell_projection_selector,),
+            SHELL_HIDE_DECLARATIONS,
+        ),
+        cosmetic_rule(
+            scope,
+            "#$#",
+            reveal_projection_selectors,
+            PROJECTION_REVEAL_DECLARATIONS,
+        ),
+        cosmetic_rule(
+            scope,
+            "#$#",
+            (ready_root, f"{ready_root} body"),
+            SURFACE_CLEANUP_DECLARATIONS,
+        ),
+        cosmetic_rule(
+            scope, "#$#", pseudo_selectors, PSEUDO_CLEANUP_DECLARATIONS
+        ),
+    )
+    extended_rules = (
+        cosmetic_rule(
+            scope, "#$?#", locked_roots, ROOT_LOCK_DECLARATIONS
+        ),
+        cosmetic_rule(
+            scope,
+            "#$?#",
+            top_layer_elements,
+            TOP_LAYER_LOCK_DECLARATIONS,
+        ),
+        cosmetic_rule(
+            scope,
+            "#$?#",
+            (projection_selector,),
+            PROJECTION_HIDE_DECLARATIONS,
+        ),
+        cosmetic_rule(
+            scope,
+            "#$?#",
+            (shell_projection_selector,),
+            SHELL_HIDE_DECLARATIONS,
+        ),
+        cosmetic_rule(
+            scope,
+            "#$?#",
+            reveal_projection_selectors,
+            PROJECTION_REVEAL_DECLARATIONS,
+        ),
+        # Do not keep html selected by another ExtendedCSS rule after unlock.
+        # ExtendedCSS 2.0.52 otherwise retains the root lock rule in its
+        # affected-element rule list instead of restoring the original style.
+        cosmetic_rule(
+            scope,
+            "#$?#",
+            (f"{ready_root} body",),
+            SURFACE_CLEANUP_DECLARATIONS,
+        ),
+    )
+    return standard_rules + extended_rules
 
 
 def iter_gate_rules(
@@ -73,16 +262,15 @@ def iter_gate_rules(
     for site in sorted(config["sites"], key=lambda item: item["id"]):
         domains = sorted({layout["domain"] for layout in site["layouts"]})
         for domain in domains:
-            lock_rule, projection_rule = build_gate_rules(domain)
-            yield site["name"], "domain-gate", domain, lock_rule
-            yield site["name"], "domain-gate", domain, projection_rule
+            for rule in build_gate_rules(domain):
+                yield site["name"], "domain-gate-v2", domain, rule
 
 
 def render_gate_filter(config: Mapping[str, Any]) -> str:
     metadata = config["metadata"]
     lines = [
         f"! Title: {metadata['title']} Marker Gate",
-        "! Description: Fail-closed protocol gate for the Hotdeal Focus userscript.",
+        "! Description: Class-triggered fail-closed protocol gate for the Hotdeal Focus userscript.",
         f"! Version: {GATE_ARTIFACT_VERSION}",
         f"! Expires: {metadata['expires_hours']} hours",
         f"! License: {metadata['license']}",
@@ -107,7 +295,7 @@ def render_gate_filter(config: Mapping[str, Any]) -> str:
 
 def parse_arguments(arguments: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build the marker-only AdGuard Hotdeal Focus gate filter."
+        description="Build the class-triggered AdGuard Hotdeal Focus gate filter."
     )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT_PATH)
@@ -125,7 +313,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
         print(f"configuration error: {error}", file=sys.stderr)
         return 2
     if options.stdout:
-        sys.stdout.write(rendered)
+        # Text-mode stdout rewrites LF to CRLF on Windows, which made the
+        # supposedly deterministic gate bytes depend on the runner OS.  Emit
+        # the canonical UTF-8/LF artifact bytes directly instead.
+        sys.stdout.buffer.write(rendered.encode("utf-8"))
         return 0
     if options.check:
         if check_filter(options.output, rendered):

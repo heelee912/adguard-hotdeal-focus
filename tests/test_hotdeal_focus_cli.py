@@ -25,24 +25,67 @@ SPEC.loader.exec_module(cli)
 
 
 def release_bundle(
-    filter_bytes: bytes = b"! Version: 1.0.0\nexample.com##body\n",
+    filter_bytes: bytes = (
+        b"! Title: AdGuard Hotdeal Focus Marker Gate\n"
+        b"! Version: 2.0.2\n"
+        b"! Hotdeal-Focus-Protocol: 2\n"
+        b"example.com##html.hdf-v2-lock:not(.hdf-v2-ready"
+        b"[data-hotdeal-focus-ready=\"1\"]"
+        b"[data-hotdeal-focus-protocol=\"2\"]"
+        b"[data-hotdeal-focus-state=\"ready\"]"
+        b"[data-hotdeal-focus-status=\"ready\"]) .hdf-v2-keep\n"
+        b"example.com##[data-hotdeal-focus-ready][data-hotdeal-focus-keep]"
+        b"[data-hotdeal-focus-shell][data-hotdeal-focus-deep]"
+        b"[data-hotdeal-focus-role=\"body\"]"
+        b".hdf-v2-shell.hdf-v2-deep.hdf-v2-role-body\n"
+    ),
 ):
-    userscript = (
-        b"// ==UserScript==\n// @version 1.2.3\n// ==/UserScript==\n"
-    )
+    userscript = b"""// ==UserScript==
+// @name         AdGuard Hotdeal Focus Reader Gate
+// @version      1.2.3
+// @match        https://www.algumon.com/*
+// @match        https://*.clien.net/*
+// @match        https://*.ppomppu.co.kr/*
+// @match        https://*.ruliweb.com/*
+// @match        https://*.quasarzone.com/*
+// @match        https://*.eomisae.co.kr/*
+// @match        https://*.zod.kr/*
+// @match        https://*.arca.live/*
+// @run-at       document-start
+// @grant        GM_addElement
+// @noframes
+// ==/UserScript==
+const PROTOCOL_VERSION = "2";
+const ATTR = {
+  lock: "data-hotdeal-focus-lock",
+  ready: "data-hotdeal-focus-ready",
+  keep: "data-hotdeal-focus-keep",
+  protocol: "data-hotdeal-focus-protocol",
+  shell: "data-hotdeal-focus-shell",
+  deep: "data-hotdeal-focus-deep",
+  role: "data-hotdeal-focus-role",
+  state: "data-hotdeal-focus-state",
+  status: "data-hotdeal-focus-status",
+};
+const CLASSES = "hdf-v2-lock hdf-v2-ready hdf-v2-keep hdf-v2-shell hdf-v2-deep hdf-v2-role-";
+const runtimeStyleSelector = `style[data-hotdeal-focus-runtime-style="${PROTOCOL_VERSION}"]`;
+const diagnostics = { protocolVersion: Number(PROTOCOL_VERSION) };
+document.documentElement.setAttribute(ATTR.protocol, PROTOCOL_VERSION);
+GM_addElement(document.documentElement, "style", {
+  textContent: "html.hdf-v2-lock{display:none!important}",
+  "data-hotdeal-focus-runtime-style": PROTOCOL_VERSION,
+});
+"""
     manifest = {
         "schemaVersion": 1,
         "status": "release-ready",
         "releaseVersion": "1.2.3",
-        "protocolVersion": 1,
-        "gateArtifactVersion": "1.0.0",
-        "filterSubscriptionUrl": (
-            "https://github.com/heelee912/adguard-hotdeal-focus/releases/download/"
-            "gate-v1.0.0/filter.txt"
-        ),
+        "protocolVersion": 2,
+        "gateArtifactVersion": "2.0.2",
+        "filterSubscriptionUrl": cli.GATE_LOCK_SUBSCRIPTION_URL,
         "artifacts": {
             "filter.txt": {
-                "version": "1.0.0",
+                "version": "2.0.2",
                 "bytes": len(filter_bytes),
                 "sha256": hashlib.sha256(filter_bytes).hexdigest(),
                 "installedRulesSha256": cli.installed_filter_rules_sha256(filter_bytes),
@@ -190,10 +233,13 @@ class SubprocessContractTests(unittest.TestCase):
         self.assertEqual(
             labels,
             [
-                "syntax-auditor", "syntax-userscript", "unit", "build-check",
-                "integrity", "tamper", "behavior",
+                "syntax-auditor", "syntax-userscript", "unit", "network",
+                "build-check", "integrity", "oracle", "tamper", "behavior",
             ],
         )
+        commands = {label: argv for label, argv, _timeout in cli.RELEASE_STEPS}
+        self.assertEqual(commands["network"], ("npm", "run", "test:network"))
+        self.assertEqual(commands["oracle"], ("npm", "run", "test:oracle"))
         live = cli._verification_steps("live")
         self.assertEqual(
             live[-1][1], (
@@ -294,8 +340,8 @@ class ReleaseIntegrityTests(unittest.TestCase):
         rules_sha = cli.installed_filter_rules_sha256(gate_bytes)
         lock = {
             "schemaVersion": 1,
-            "protocolVersion": 1,
-            "gateArtifactVersion": "1.0.0",
+            "protocolVersion": 2,
+            "gateArtifactVersion": "2.0.2",
             "filterSubscriptionUrl": manifest["filterSubscriptionUrl"],
             "artifact": {
                 "path": "filter.txt",
@@ -306,13 +352,13 @@ class ReleaseIntegrityTests(unittest.TestCase):
         }
         with mock.patch.multiple(
             cli,
-            GATE_LOCK_PROTOCOL_VERSION=1,
-            GATE_LOCK_ARTIFACT_VERSION="1.0.0",
+            GATE_LOCK_PROTOCOL_VERSION=2,
+            GATE_LOCK_ARTIFACT_VERSION="2.0.2",
             GATE_LOCK_SUBSCRIPTION_URL=manifest["filterSubscriptionUrl"],
             GATE_LOCK_BYTES=len(gate_bytes),
             GATE_LOCK_SHA256=raw_sha,
             GATE_LOCK_INSTALLED_RULES_SHA256=rules_sha,
-            GATE_LOCK_RULE_COUNT=1,
+            GATE_LOCK_RULE_COUNT=2,
         ):
             actual = cli._validate_gate_artifact_lock(
                 manifest, gate_bytes, json.dumps(lock).encode()
@@ -450,6 +496,39 @@ class PagesSourceContractTests(unittest.TestCase):
 
 
 class CloudContractTests(unittest.TestCase):
+    def setUp(self):
+        self.head_lease = mock.patch.object(
+            cli,
+            "_require_cloud_head_lease",
+            side_effect=lambda repo, branch, source, phase: {
+                "phase": phase,
+                "branch": branch,
+                "expectedSha": source,
+                "observedSha": source,
+                "exact": True,
+            },
+        )
+        self.head_lease.start()
+        self.addCleanup(self.head_lease.stop)
+
+    @staticmethod
+    def _source_authority():
+        source_sha = "a" * 40
+        return {
+            "sourceSha": source_sha,
+            "defaultBranch": "main",
+            "workflows": [],
+            "verify": {"exact": True},
+            "headLeases": [{
+                "phase": "initial-authority",
+                "branch": "main",
+                "expectedSha": source_sha,
+                "observedSha": source_sha,
+                "exact": True,
+            }],
+            "exact": True,
+        }
+
     @staticmethod
     def _workflow_states(*states):
         values = states or (("active",) * len(cli.WORKFLOW_FILES))
@@ -471,6 +550,8 @@ class CloudContractTests(unittest.TestCase):
         pages_workflow=True,
         actions=None,
         workflow_states=None,
+        automation_push_identity=None,
+        branch_governance=None,
     ):
         secure_actions = {
             "enabled": True,
@@ -484,6 +565,44 @@ class CloudContractTests(unittest.TestCase):
             "defaultWorkflowPermissions": "read",
             "canApprovePullRequestReviews": False,
         }
+        secure_identity = {
+            "scopeRepository": "owner/repo",
+            "environmentName": cli.MAIN_AUTOMATION_ENVIRONMENT,
+            "secretName": cli.AUTOMATION_PUSH_SECRET_NAME,
+            "environmentSecretPresent": True,
+            "repositorySecretPresent": False,
+            "fingerprintVariableName": cli.AUTOMATION_PUSH_FINGERPRINT_VARIABLE,
+            "configuredFingerprint": "SHA256:" + ("A" * 43),
+            "deployKeyTitle": cli.AUTOMATION_PUSH_DEPLOY_KEY_TITLE,
+            "deployKeys": [],
+            "writeKeyCount": 1,
+            "reservedTitleKeyCount": 1,
+            "keyExact": True,
+            "exact": True,
+        }
+        secure_governance = {
+            "target": "~DEFAULT_BRANCH",
+            "namedRulesets": {},
+            "repositoryRulesetCount": 3,
+            "extraRulesets": [],
+            "unprovenApplicableRulesets": [],
+            "classicBranchProtection": {"present": False, "compatible": True},
+            "exact": True,
+        }
+        secure_environments = {
+            environment: {
+                "name": environment,
+                "present": True,
+                "customBranchPolicy": True,
+                "branchPolicies": [{"id": index + 1, "name": "main", "type": "branch"}],
+                "exact": True,
+            }
+            for index, environment in enumerate((
+                cli.RELEASE_PUBLISHER_ENVIRONMENT,
+                cli.MAIN_AUTOMATION_ENVIRONMENT,
+                cli.PAGES_ENVIRONMENT,
+            ))
+        }
         return {
             "enableStateCommits": state_commits,
             "enablePagesPublish": pages_publish,
@@ -494,6 +613,11 @@ class CloudContractTests(unittest.TestCase):
                 "exists": pages_workflow,
                 "buildType": "workflow" if pages_workflow else None,
             },
+            "privilegedEnvironments": secure_environments,
+            "automationPushIdentity": (
+                automation_push_identity or secure_identity
+            ),
+            "branchGovernance": branch_governance or secure_governance,
         }
 
     def test_cloud_usage_errors_precede_remote_preflight(self):
@@ -583,7 +707,9 @@ class CloudContractTests(unittest.TestCase):
         ), mock.patch.object(
             cli, "_capture_command", return_value=accepted
         ) as mutation, mock.patch.object(cli, "_try_source_sha", return_value="a" * 40):
-            applied = cli._configure_cloud("owner/repo", True, None)
+            applied = cli._configure_cloud(
+                "owner/repo", True, None, source_authority=self._source_authority()
+            )
         self.assertEqual(applied["status"], "configured")
         self.assertTrue(applied["mutationApplied"])
         self.assertTrue(cli._cloud_configuration_is_exact(applied["configuration"]))
@@ -606,7 +732,9 @@ class CloudContractTests(unittest.TestCase):
         ), mock.patch.object(cli, "_capture_command") as mutation, mock.patch.object(
             cli, "_try_source_sha", return_value="a" * 40
         ):
-            result = cli._configure_cloud("owner/repo", True, None)
+            result = cli._configure_cloud(
+                "owner/repo", True, None, source_authority=self._source_authority()
+            )
         self.assertEqual(result["status"], "already-configured")
         self.assertFalse(result["mutationApplied"])
         self.assertEqual(result["repository"], repository)
@@ -642,7 +770,10 @@ class CloudContractTests(unittest.TestCase):
                 return_value=self._cloud_state(actions=actions),
             ), mock.patch.object(cli, "_capture_command") as mutation:
                 with self.assertRaisesRegex(cli.IntegrityFailure, "cannot be broadened"):
-                    cli._configure_cloud("owner/repo", True, None)
+                    cli._configure_cloud(
+                        "owner/repo", True, None,
+                        source_authority=self._source_authority(),
+                    )
             mutation.assert_not_called()
 
     def test_actions_and_workflow_state_parsers_reject_malformed_remote_state(self):
@@ -706,6 +837,767 @@ class CloudContractTests(unittest.TestCase):
         self.assertEqual(observed["payload"], cli.canonical_json_bytes(payload) + b"\n")
         self.assertIn(cli.GITHUB_API_VERSION_HEADER, observed["argv"])
 
+    def test_ed25519_public_key_parser_derives_the_official_sha256_fingerprint(self):
+        public_key = (
+            "ssh-ed25519 "
+            "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+        )
+        record = cli._openssh_public_key_record(public_key)
+        self.assertEqual(record["keyType"], "ssh-ed25519")
+        self.assertTrue(record["ed25519Exact"])
+        self.assertEqual(
+            record["fingerprint"],
+            "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU",
+        )
+        with self.assertRaises(cli.IntegrityFailure):
+            cli._openssh_public_key_record(public_key.replace("ssh-ed25519", "ssh-rsa"))
+
+    def test_deploy_key_read_uses_pinned_api_and_never_returns_raw_key(self):
+        public_key = (
+            "ssh-ed25519 "
+            "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+        )
+        with mock.patch.object(
+            cli,
+            "_gh_json",
+            return_value=[{
+                "id": 7,
+                "title": cli.AUTOMATION_PUSH_DEPLOY_KEY_TITLE,
+                "read_only": False,
+                "verified": True,
+                "key": public_key,
+            }],
+        ) as github:
+            records = cli._github_deploy_keys_state("owner/repo")
+        argv = github.call_args.args[0]
+        self.assertIn(cli.GITHUB_JSON_ACCEPT_HEADER, argv)
+        self.assertIn(cli.GITHUB_API_VERSION_HEADER, argv)
+        self.assertNotIn("key", records[0])
+        self.assertNotIn(public_key, json.dumps(records))
+
+    def test_automation_identity_requires_one_bound_verified_write_key_and_secret(self):
+        fingerprint = "SHA256:" + ("A" * 43)
+        key = {
+            "id": 41,
+            "title": cli.AUTOMATION_PUSH_DEPLOY_KEY_TITLE,
+            "readOnly": False,
+            "verified": True,
+            "keyType": "ssh-ed25519",
+            "fingerprint": fingerprint,
+            "ed25519Exact": True,
+        }
+        variables = {cli.AUTOMATION_PUSH_FINGERPRINT_VARIABLE: fingerprint}
+        with mock.patch.object(
+            cli, "_repository_secret_names",
+            return_value=frozenset(),
+        ), mock.patch.object(
+            cli, "_environment_secret_names",
+            return_value=frozenset({cli.AUTOMATION_PUSH_SECRET_NAME}),
+        ), mock.patch.object(cli, "_github_deploy_keys_state", return_value=[key]):
+            state = cli._automation_push_identity_state("owner/repo", variables)
+        self.assertTrue(state["exact"])
+        self.assertNotIn("publicKey", state)
+        self.assertNotIn("key", state["deployKeys"][0])
+
+        with mock.patch.object(
+            cli, "_repository_secret_names", return_value=frozenset()
+        ), mock.patch.object(
+            cli, "_environment_secret_names", return_value=frozenset()
+        ), mock.patch.object(cli, "_github_deploy_keys_state", return_value=[key]):
+            missing_secret = cli._automation_push_identity_state("owner/repo", variables)
+        self.assertFalse(missing_secret["exact"])
+
+        with mock.patch.object(
+            cli, "_repository_secret_names", return_value=frozenset()
+        ), mock.patch.object(
+            cli, "_environment_secret_names"
+        ) as environment_secrets, mock.patch.object(
+            cli, "_github_deploy_keys_state", return_value=[]
+        ):
+            absent_environment = cli._automation_push_identity_state(
+                "owner/repo", variables, environment_exists=False
+            )
+        environment_secrets.assert_not_called()
+        self.assertFalse(absent_environment["environmentSecretPresent"])
+        self.assertFalse(absent_environment["exact"])
+
+        with mock.patch.object(
+            cli, "_repository_secret_names",
+            return_value=frozenset({cli.AUTOMATION_PUSH_SECRET_NAME}),
+        ), mock.patch.object(
+            cli, "_environment_secret_names",
+            return_value=frozenset({cli.AUTOMATION_PUSH_SECRET_NAME}),
+        ), mock.patch.object(cli, "_github_deploy_keys_state", return_value=[key]):
+            duplicate_scope = cli._automation_push_identity_state(
+                "owner/repo", variables
+            )
+        self.assertTrue(duplicate_scope["keyExact"])
+        self.assertTrue(duplicate_scope["repositorySecretPresent"])
+        self.assertFalse(duplicate_scope["exact"])
+
+    def test_privileged_environment_requires_one_exact_default_branch_policy(self):
+        environment = cli.MAIN_AUTOMATION_ENVIRONMENT
+        value = {
+            "name": environment,
+            "protection_rules": [],
+            "can_admins_bypass": True,
+            "deployment_branch_policy": {
+                "protected_branches": False,
+                "custom_branch_policies": True,
+            },
+        }
+        policies = {
+            "total_count": 1,
+            "branch_policies": [{"id": 4, "name": "main", "type": "branch"}],
+        }
+        with mock.patch.object(cli, "_gh_included_json", return_value=(200, value)), \
+                mock.patch.object(cli, "_gh_json", return_value=policies):
+            state = cli._github_environment_state("owner/repo", environment, "main")
+        self.assertTrue(state["exact"])
+
+        policies["branch_policies"][0]["type"] = "tag"
+        with mock.patch.object(cli, "_gh_included_json", return_value=(200, value)), \
+                mock.patch.object(cli, "_gh_json", return_value=policies):
+            wrong_type = cli._github_environment_state(
+                "owner/repo", environment, "main"
+            )
+        self.assertFalse(wrong_type["exact"])
+
+    def test_ruleset_contract_layers_deploy_key_bypass_below_unbypassable_history(self):
+        contracts = cli._required_branch_ruleset_contracts()
+        pr = contracts["prAndVerifiedCi"]
+        history = contracts["immutableFastForwardHistory"]
+        for contract in (pr, history):
+            self.assertEqual(contract["target"], "branch")
+            self.assertEqual(contract["enforcement"], "active")
+            self.assertEqual(
+                contract["conditions"],
+                {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}},
+            )
+        self.assertEqual(
+            pr["bypass_actors"],
+            [{"actor_id": None, "actor_type": "DeployKey", "bypass_mode": "always"}],
+        )
+        self.assertEqual(history["bypass_actors"], [])
+        self.assertEqual(
+            [rule["type"] for rule in history["rules"]],
+            ["deletion", "non_fast_forward", "required_linear_history"],
+        )
+        pull_request = pr["rules"][0]
+        self.assertEqual(pull_request["type"], "pull_request")
+        self.assertEqual(
+            pull_request["parameters"]["required_approving_review_count"], 0
+        )
+        self.assertTrue(
+            pull_request["parameters"]["required_review_thread_resolution"]
+        )
+        self.assertEqual(
+            pull_request["parameters"]["allowed_merge_methods"],
+            ["squash", "rebase"],
+        )
+        status_parameters = pr["rules"][1]["parameters"]
+        self.assertTrue(status_parameters["strict_required_status_checks_policy"])
+        self.assertFalse(status_parameters["do_not_enforce_on_create"])
+        status = status_parameters["required_status_checks"]
+        self.assertEqual(
+            status,
+            [{"context": "verify", "integration_id": 15368}],
+        )
+        mutation_payload = cli._ruleset_mutation_payload(pr)
+        self.assertNotIn(
+            "required_reviewers", mutation_payload["rules"][0]["parameters"]
+        )
+        gate_tag = contracts["immutableGateTag"]
+        self.assertEqual(gate_tag["target"], "tag")
+        self.assertEqual(
+            gate_tag["conditions"],
+            {"ref_name": {"include": ["refs/tags/gate-v2.0.2"], "exclude": []}},
+        )
+        self.assertEqual(
+            gate_tag["bypass_actors"],
+            [{"actor_id": 15368, "actor_type": "Integration", "bypass_mode": "always"}],
+        )
+        self.assertEqual(
+            gate_tag["rules"],
+            [
+                {"type": "creation"},
+                {"type": "update", "parameters": {"update_allows_fetch_and_merge": False}},
+                {"type": "deletion"},
+            ],
+        )
+
+    def test_only_literal_unrelated_branch_or_tag_rulesets_are_proven_irrelevant(self):
+        unrelated_branch = {
+            "target": "branch",
+            "conditions": {"ref_name": {"include": ["refs/heads/archive"], "exclude": []}},
+        }
+        unrelated_tag = {
+            "target": "tag",
+            "conditions": {"ref_name": {"include": ["refs/tags/legacy"], "exclude": []}},
+        }
+        self.assertFalse(cli._ruleset_ref_scope(unrelated_branch, "main")["relevant"])
+        self.assertFalse(cli._ruleset_ref_scope(unrelated_tag, "main")["relevant"])
+        for target in ("push", "repository"):
+            with self.subTest(target=target):
+                self.assertTrue(cli._ruleset_ref_scope(
+                    {"target": target, "conditions": {}}, "main"
+                )["relevant"])
+
+    def test_unproven_extra_or_classic_governance_refuses_every_mutation(self):
+        cases = (
+            {
+                "unprovenApplicableRulesets": [{"id": 44, "target": "push"}],
+                "classicBranchProtection": {"present": False, "compatible": True},
+            },
+            {
+                "unprovenApplicableRulesets": [],
+                "classicBranchProtection": {"present": True, "compatible": False},
+            },
+        )
+        for governance_override in cases:
+            with self.subTest(state=governance_override):
+                state = self._cloud_state()
+                state["branchGovernance"] = {
+                    **state["branchGovernance"],
+                    **governance_override,
+                    "exact": False,
+                }
+                with mock.patch.object(cli, "_gate_policy_repository"), \
+                        mock.patch.object(cli, "_cloud_operating_state", return_value=state), \
+                        mock.patch.object(cli, "_github_api_mutation") as api_mutation, \
+                        mock.patch.object(cli, "_capture_command") as command_mutation:
+                    with self.assertRaises(cli.IntegrityFailure):
+                        cli._configure_cloud(
+                            "owner/repo", True, None,
+                            source_authority=self._source_authority(),
+                        )
+                api_mutation.assert_not_called()
+                command_mutation.assert_not_called()
+
+    def test_first_remote_mutation_is_preceded_by_a_fresh_source_head_lease(self):
+        before = self._cloud_state(actions={
+            **self._cloud_state()["actions"],
+            "shaPinningRequired": False,
+        })
+        after = self._cloud_state()
+        events = []
+        accepted = cli.ExecutionCapture("accepted", ("gh",), 0, b"", b"")
+
+        def lease(_repo, _branch, source, phase):
+            events.append(f"lease:{phase}")
+            return {
+                "phase": phase, "branch": "main", "expectedSha": source,
+                "observedSha": source, "exact": True,
+            }
+
+        def mutation(_endpoint, label, **_kwargs):
+            events.append(f"mutation:{label}")
+            return accepted
+
+        with mock.patch.object(cli, "_require_cloud_head_lease", side_effect=lease), \
+                mock.patch.object(cli, "_gate_policy_repository", return_value={}), \
+                mock.patch.object(cli, "_cloud_operating_state", side_effect=(before, after)), \
+                mock.patch.object(cli, "_github_api_mutation", side_effect=mutation), \
+                mock.patch.object(cli, "_capture_command", return_value=accepted), \
+                mock.patch.object(cli, "_github_actions_permissions_state", return_value=after["actions"]):
+            result = cli._configure_cloud(
+                "owner/repo", True, None, source_authority=self._source_authority()
+            )
+        self.assertTrue(result["ok"])
+        self.assertLess(
+            events.index("lease:immediately-before-first-mutation"),
+            events.index("mutation:narrow-github-actions-policy"),
+        )
+
+    def test_verify_job_authority_allows_only_pages_to_fail(self):
+        source_sha = "a" * 40
+        run = {"id": 77, "conclusion": "failure", "event": "push"}
+        verify_job = {
+            "id": 88,
+            "name": "verify",
+            "status": "completed",
+            "conclusion": "success",
+            "check_run_url": "https://api.github.com/repos/owner/repo/check-runs/99",
+        }
+        pages_job = {
+            "id": 89, "name": "publish-pages", "status": "completed",
+            "conclusion": "failure",
+        }
+        check = {
+            "id": 99,
+            "name": "verify",
+            "status": "completed",
+            "conclusion": "success",
+            "app": {"id": 15368},
+            "details_url": "https://github.com/owner/repo/actions/runs/77/job/88",
+            "head_sha": source_sha,
+        }
+        with mock.patch.object(
+            cli, "_gh_json",
+            return_value={"total_count": 2, "jobs": [verify_job, pages_job]},
+        ):
+            authority = cli._verify_run_jobs_authority("owner/repo", run, [check])
+        self.assertTrue(authority["exact"])
+        self.assertEqual(authority["allowedFailedJobs"], ["publish-pages"])
+
+        bad_job = {**pages_job, "name": "unexpected-failure"}
+        with mock.patch.object(
+            cli, "_gh_json",
+            return_value={"total_count": 2, "jobs": [verify_job, bad_job]},
+        ):
+            self.assertIsNone(cli._verify_run_jobs_authority("owner/repo", run, [check]))
+
+    def test_source_authority_accepts_a_red_workflow_only_for_pages_failure(self):
+        source_sha = "a" * 40
+        run = {
+            "id": 77,
+            "path": ".github/workflows/verify.yml",
+            "head_sha": source_sha,
+            "head_branch": "main",
+            "event": "push",
+            "status": "completed",
+            "conclusion": "failure",
+        }
+        jobs = {
+            "total_count": 2,
+            "jobs": [
+                {
+                    "id": 88, "name": "verify", "status": "completed",
+                    "conclusion": "success",
+                    "check_run_url": "https://api.github.com/repos/owner/repo/check-runs/99",
+                },
+                {
+                    "id": 89, "name": "publish-pages", "status": "completed",
+                    "conclusion": "failure",
+                },
+            ],
+        }
+        check = {
+            "id": 99, "name": "verify", "status": "completed",
+            "conclusion": "success", "app": {"id": 15368},
+            "details_url": "https://github.com/owner/repo/actions/runs/77/job/88",
+        }
+        responses = (
+            {"total_count": 1, "workflow_runs": [run]},
+            {"total_count": 1, "check_runs": [check]},
+            jobs,
+        )
+        with mock.patch.object(cli, "_gh_json", side_effect=responses):
+            authority = cli._verify_check_authority("owner/repo", "main", source_sha)
+        self.assertTrue(authority["exact"])
+        self.assertEqual(authority["runConclusion"], "failure")
+        self.assertEqual(authority["allowedFailedJobs"], ["publish-pages"])
+
+        wrong_app = {**check, "app": {"id": 1}}
+        responses = (
+            {"total_count": 1, "workflow_runs": [run]},
+            {"total_count": 1, "check_runs": [wrong_app]},
+            jobs,
+        )
+        with mock.patch.object(cli, "_gh_json", side_effect=responses):
+            with self.assertRaisesRegex(cli.IntegrityFailure, "no exact"):
+                cli._verify_check_authority("owner/repo", "main", source_sha)
+
+    def test_workflow_blob_authority_rejects_local_remote_byte_drift(self):
+        local = cli.ExecutionCapture("local", ("git",), 0, b"local\n", b"")
+        remote = {
+            "type": "file",
+            "path": ".github/workflows/verify.yml",
+            "encoding": "base64",
+            "size": len(b"remote\n"),
+            "content": "cmVtb3RlCg==",
+        }
+        with mock.patch.object(cli, "_capture_command", return_value=local), \
+                mock.patch.object(cli, "_gh_json", return_value=remote):
+            with self.assertRaisesRegex(cli.IntegrityFailure, "differs"):
+                cli._workflow_blob_authority("owner/repo", "verify.yml", "a" * 40)
+
+    def test_duplicate_reserved_ruleset_name_is_rejected_before_any_mutation(self):
+        listing = [
+            {
+                "id": identifier,
+                "name": cli.BRANCH_GOVERNANCE_PR_RULESET_NAME,
+                "source_type": "Repository",
+                "source": "owner/repo",
+            }
+            for identifier in (10, 11)
+        ]
+        with mock.patch.object(cli, "_gh_json", return_value=listing) as github:
+            with self.assertRaisesRegex(cli.IntegrityFailure, "ambiguous"):
+                cli._github_branch_governance_state("owner/repo")
+        argv = github.call_args.args[0]
+        self.assertIn(cli.GITHUB_JSON_ACCEPT_HEADER, argv)
+        self.assertIn(cli.GITHUB_API_VERSION_HEADER, argv)
+
+    def test_unknown_write_deploy_key_rejects_configuration_before_mutation(self):
+        unbound = {
+            "scopeRepository": "owner/repo",
+            "secretPresent": False,
+            "configuredFingerprint": None,
+            "deployKeys": [{"id": 9, "title": "unknown", "readOnly": False}],
+            "writeKeyCount": 1,
+            "reservedTitleKeyCount": 0,
+            "exact": False,
+        }
+        state = self._cloud_state(automation_push_identity=unbound)
+        with mock.patch.object(cli, "_gate_policy_repository"), mock.patch.object(
+            cli, "_cloud_operating_state", return_value=state
+        ), mock.patch.object(cli, "_capture_command") as mutation, mock.patch.object(
+            cli, "_generated_automation_push_identity"
+        ) as generator:
+            with self.assertRaisesRegex(cli.IntegrityFailure, "unknown or unbound"):
+                cli._configure_cloud(
+                    "owner/repo", True, None,
+                    source_authority=self._source_authority(),
+                )
+        mutation.assert_not_called()
+        generator.assert_not_called()
+
+    def test_private_stdin_runner_never_copies_secret_into_argv_or_capture(self):
+        private_value = b"-----BEGIN OPENSSH PRIVATE KEY-----\nprivate-material\n"
+        completed = mock.Mock(returncode=0, stderr=b"")
+        with tempfile.TemporaryDirectory() as temporary:
+            private_path = Path(temporary) / "identity"
+            private_path.write_bytes(private_value)
+            with mock.patch.object(cli, "_command_exists", return_value=True), \
+                    mock.patch.object(cli.subprocess, "run", return_value=completed) as run:
+                capture = cli._capture_command_with_private_stdin_file(
+                    ("gh", "secret", "set", cli.AUTOMATION_PUSH_SECRET_NAME),
+                    private_path,
+                    label="secret-input",
+                )
+        self.assertNotIn(private_value.decode(), " ".join(capture.argv))
+        self.assertEqual(capture.stdout, b"")
+        self.assertNotIn(private_value, capture.stderr)
+        self.assertNotIn("input", run.call_args.kwargs)
+        self.assertEqual(run.call_args.kwargs["stdout"], cli.subprocess.DEVNULL)
+        self.assertEqual(run.call_args.kwargs["stderr"], cli.subprocess.DEVNULL)
+        self.assertNotIn("private-material", json.dumps(capture.summary()))
+
+    def test_governance_is_proven_before_missing_identity_is_created(self):
+        missing_identity = {
+            "scopeRepository": "owner/repo",
+            "secretName": cli.AUTOMATION_PUSH_SECRET_NAME,
+            "secretPresent": False,
+            "fingerprintVariableName": cli.AUTOMATION_PUSH_FINGERPRINT_VARIABLE,
+            "configuredFingerprint": None,
+            "deployKeyTitle": cli.AUTOMATION_PUSH_DEPLOY_KEY_TITLE,
+            "deployKeys": [],
+            "writeKeyCount": 0,
+            "reservedTitleKeyCount": 0,
+            "exact": False,
+        }
+        missing_governance = {
+            "target": "~DEFAULT_BRANCH",
+            "namedRulesets": {
+                name: {"present": False, "id": None, "exact": False, "contract": None}
+                for name in (
+                    "immutableFastForwardHistory", "prAndVerifiedCi", "immutableGateTag"
+                )
+            },
+            "repositoryRulesetCount": 0,
+            "extraRulesets": [],
+            "unprovenApplicableRulesets": [],
+            "classicBranchProtection": {"present": False, "compatible": True},
+            "exact": False,
+        }
+        before = self._cloud_state(
+            automation_push_identity=missing_identity,
+            branch_governance=missing_governance,
+        )
+        after = self._cloud_state()
+        fingerprint = "SHA256:" + ("B" * 43)
+        operations = []
+        accepted = cli.ExecutionCapture("accepted", ("gh",), 0, b"", b"")
+
+        def capture(argv, **kwargs):
+            operations.append(kwargs["label"])
+            return cli.ExecutionCapture(kwargs["label"], tuple(argv), 0, b"", b"")
+
+        def api_mutation(endpoint, label, **kwargs):
+            operations.append(label)
+            if label == "create-automation-push-deploy-key":
+                payload = kwargs["payload"]
+                self.assertTrue(payload["key"].startswith("ssh-ed25519 "))
+                self.assertNotIn("PRIVATE", payload["key"])
+                self.assertFalse(payload["read_only"])
+            return cli.ExecutionCapture(label, ("gh",), 0, b"", b"")
+
+        with tempfile.TemporaryDirectory() as temporary:
+            private_path = Path(temporary) / "identity"
+            private_path.write_text("private-material", encoding="utf-8")
+            generated = {
+                "privatePath": private_path,
+                "publicKey": (
+                    "ssh-ed25519 "
+                    "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+                ),
+                "fingerprint": fingerprint,
+            }
+            with mock.patch.object(
+                cli,
+                "_gate_policy_repository",
+                return_value={
+                    "nameWithOwner": "owner/repo",
+                    "visibility": "PUBLIC",
+                    "viewerPermission": "ADMIN",
+                },
+            ), mock.patch.object(
+                cli, "_cloud_operating_state", side_effect=(before, after)
+            ), mock.patch.object(
+                cli, "_generated_automation_push_identity",
+                return_value=contextlib.nullcontext(generated),
+            ), mock.patch.object(
+                cli, "_capture_command_with_private_stdin_file",
+                side_effect=lambda argv, path, **kwargs: (
+                    operations.append(kwargs["label"]) or accepted
+                ),
+            ), mock.patch.object(
+                cli, "_capture_command", side_effect=capture
+            ), mock.patch.object(
+                cli, "_github_api_mutation", side_effect=api_mutation
+            ), mock.patch.object(
+                cli, "_repository_variables",
+                return_value={cli.AUTOMATION_PUSH_FINGERPRINT_VARIABLE: fingerprint},
+            ), mock.patch.object(
+                cli, "_repository_secret_names",
+                return_value=frozenset(),
+            ), mock.patch.object(
+                cli, "_environment_secret_names",
+                return_value=frozenset({cli.AUTOMATION_PUSH_SECRET_NAME}),
+            ), mock.patch.object(
+                cli, "_automation_push_identity_state",
+                side_effect=(missing_identity, after["automationPushIdentity"]),
+            ), mock.patch.object(
+                cli, "_github_branch_governance_state",
+                return_value=after["branchGovernance"],
+            ), mock.patch.object(
+                cli, "_github_actions_permissions_state", return_value=after["actions"]
+            ), mock.patch.object(cli, "_try_source_sha", return_value="a" * 40):
+                result = cli._configure_cloud(
+                    "owner/repo", True, None,
+                    source_authority=self._source_authority(),
+                )
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["activationPrecondition"]["proven"])
+        self.assertLess(
+            operations.index("configure-ruleset-immutableFastForwardHistory"),
+            operations.index("configure-ruleset-prAndVerifiedCi"),
+        )
+        self.assertLess(
+            operations.index("configure-ruleset-prAndVerifiedCi"),
+            operations.index("set-automation-push-private-key-secret"),
+        )
+        self.assertLess(
+            operations.index("set-automation-push-private-key-secret"),
+            operations.index("create-automation-push-deploy-key"),
+        )
+        self.assertNotIn("private-material", json.dumps(result))
+
+    def test_ambiguous_secret_write_cannot_be_proved_by_secret_name_presence(self):
+        missing_identity = {
+            "writeKeyCount": 0,
+            "reservedTitleKeyCount": 0,
+            "exact": False,
+        }
+        before = self._cloud_state(
+            automation_push_identity=missing_identity,
+        )
+        fingerprint = "SHA256:" + ("C" * 43)
+        rejected_secret = cli.ExecutionCapture(
+            "set-secret", ("gh",), 1, b"", b"ambiguous timeout"
+        )
+        accepted = cli.ExecutionCapture("accepted", ("gh",), 0, b"", b"")
+        with tempfile.TemporaryDirectory() as temporary:
+            private_path = Path(temporary) / "identity"
+            private_path.write_text("private-material", encoding="utf-8")
+            generated = {
+                "privatePath": private_path,
+                "publicKey": (
+                    "ssh-ed25519 "
+                    "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+                ),
+                "fingerprint": fingerprint,
+            }
+            with mock.patch.object(cli, "_gate_policy_repository"), mock.patch.object(
+                cli, "_cloud_operating_state", return_value=before
+            ), mock.patch.object(
+                cli, "_generated_automation_push_identity",
+                return_value=contextlib.nullcontext(generated),
+            ), mock.patch.object(
+                cli, "_capture_command_with_private_stdin_file",
+                return_value=rejected_secret,
+            ), mock.patch.object(
+                cli, "_capture_command", return_value=accepted
+            ), mock.patch.object(
+                cli, "_repository_variables",
+                return_value={cli.AUTOMATION_PUSH_FINGERPRINT_VARIABLE: fingerprint},
+            ), mock.patch.object(
+                cli, "_repository_secret_names",
+                return_value=frozenset({cli.AUTOMATION_PUSH_SECRET_NAME}),
+            ), mock.patch.object(
+                cli, "_automation_push_identity_state", return_value=missing_identity
+            ), mock.patch.object(
+                cli, "_github_branch_governance_state",
+                return_value=before["branchGovernance"],
+            ), mock.patch.object(
+                cli, "_github_actions_permissions_state", return_value=before["actions"]
+            ), mock.patch.object(
+                cli, "_github_api_mutation"
+            ) as api_mutation, mock.patch.object(
+                cli, "_try_source_sha", return_value="a" * 40
+            ), mock.patch.object(cli.time, "sleep"):
+                result = cli._configure_cloud(
+                    "owner/repo", True, None,
+                    source_authority=self._source_authority(),
+                )
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["activationPrecondition"]["proven"])
+        api_mutation.assert_not_called()
+
+    def test_unproven_governance_skips_every_automation_key_mutation(self):
+        missing_identity = {
+            "writeKeyCount": 0,
+            "reservedTitleKeyCount": 0,
+            "exact": False,
+        }
+        missing_governance = {
+            "namedRulesets": {
+                name: {"id": None, "exact": False}
+                for name in (
+                    "immutableFastForwardHistory", "prAndVerifiedCi", "immutableGateTag"
+                )
+            },
+            "extraRulesets": [],
+            "unprovenApplicableRulesets": [],
+            "classicBranchProtection": {"present": False, "compatible": True},
+            "exact": False,
+        }
+        before = self._cloud_state(
+            automation_push_identity=missing_identity,
+            branch_governance=missing_governance,
+        )
+        rejected = cli.ExecutionCapture(
+            "ruleset", ("gh",), 1, b"", b"remote state unknown"
+        )
+        with mock.patch.object(cli, "_gate_policy_repository"), mock.patch.object(
+            cli, "_cloud_operating_state", side_effect=[before] * 7
+        ), mock.patch.object(
+            cli, "_github_api_mutation", return_value=rejected
+        ) as ruleset_mutation, mock.patch.object(
+            cli, "_github_branch_governance_state", return_value=missing_governance
+        ), mock.patch.object(
+            cli, "_generated_automation_push_identity"
+        ) as identity_generator, mock.patch.object(
+            cli, "_capture_command_with_private_stdin_file"
+        ) as secret_mutation, mock.patch.object(
+            cli, "_github_actions_permissions_state", return_value=before["actions"]
+        ), mock.patch.object(
+            cli, "_try_source_sha", return_value="a" * 40
+        ), mock.patch.object(cli.time, "sleep"):
+            result = cli._configure_cloud(
+                "owner/repo", True, None, source_authority=self._source_authority()
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["activationPrecondition"]["proven"])
+        self.assertIn(
+            "governance was not proven",
+            result["activationPrecondition"]["identityObservationError"],
+        )
+        self.assertEqual(ruleset_mutation.call_count, 3)
+        identity_generator.assert_not_called()
+        secret_mutation.assert_not_called()
+
+    def test_write_key_race_is_rechecked_immediately_before_key_provisioning(self):
+        missing_identity = {
+            "writeKeyCount": 0,
+            "reservedTitleKeyCount": 0,
+            "exact": False,
+        }
+        raced_identity = {
+            "writeKeyCount": 1,
+            "reservedTitleKeyCount": 0,
+            "exact": False,
+        }
+        before = self._cloud_state(automation_push_identity=missing_identity)
+        with mock.patch.object(cli, "_gate_policy_repository"), mock.patch.object(
+            cli, "_cloud_operating_state", side_effect=[before] * 7
+        ), mock.patch.object(
+            cli, "_github_branch_governance_state",
+            return_value=before["branchGovernance"],
+        ), mock.patch.object(
+            cli, "_automation_push_identity_state", return_value=raced_identity
+        ), mock.patch.object(
+            cli, "_generated_automation_push_identity"
+        ) as identity_generator, mock.patch.object(
+            cli, "_capture_command_with_private_stdin_file"
+        ) as secret_mutation, mock.patch.object(
+            cli, "_github_actions_permissions_state", return_value=before["actions"]
+        ), mock.patch.object(
+            cli, "_try_source_sha", return_value="a" * 40
+        ), mock.patch.object(cli.time, "sleep"):
+            result = cli._configure_cloud(
+                "owner/repo", True, None, source_authority=self._source_authority()
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertIn(
+            "unknown or unbound write deploy key",
+            result["activationPrecondition"]["identityObservationError"],
+        )
+        identity_generator.assert_not_called()
+        secret_mutation.assert_not_called()
+
+    def test_unproven_actions_policy_skips_every_automation_key_mutation(self):
+        missing_identity = {
+            "writeKeyCount": 0,
+            "reservedTitleKeyCount": 0,
+            "exact": False,
+        }
+        broad_actions = {
+            "enabled": True,
+            "allowedActions": "all",
+            "shaPinningRequired": False,
+            "selectedActions": None,
+            "defaultWorkflowPermissions": "write",
+            "canApprovePullRequestReviews": True,
+        }
+        before = self._cloud_state(
+            automation_push_identity=missing_identity,
+            actions=broad_actions,
+        )
+        accepted = cli.ExecutionCapture("accepted", ("gh",), 0, b"", b"")
+        with mock.patch.object(cli, "_gate_policy_repository"), mock.patch.object(
+            cli, "_cloud_operating_state", side_effect=[before] * 7
+        ), mock.patch.object(
+            cli, "_capture_command", return_value=accepted
+        ), mock.patch.object(
+            cli, "_github_branch_governance_state",
+            return_value=before["branchGovernance"],
+        ), mock.patch.object(
+            cli, "_automation_push_identity_state", return_value=missing_identity
+        ), mock.patch.object(
+            cli, "_github_actions_permissions_state", return_value=broad_actions
+        ), mock.patch.object(
+            cli, "_generated_automation_push_identity"
+        ) as identity_generator, mock.patch.object(
+            cli, "_capture_command_with_private_stdin_file"
+        ) as secret_mutation, mock.patch.object(
+            cli, "_try_source_sha", return_value="a" * 40
+        ), mock.patch.object(cli.time, "sleep"):
+            result = cli._configure_cloud(
+                "owner/repo", True, None, source_authority=self._source_authority()
+            )
+
+        self.assertFalse(result["ok"])
+        self.assertIn(
+            "Actions policy, privileged environments, or source lease was not proven",
+            result["activationPrecondition"]["identityObservationError"],
+        )
+        identity_generator.assert_not_called()
+        secret_mutation.assert_not_called()
+
     def test_disabled_actions_are_not_enabled_until_every_permission_is_exact(self):
         broad_actions = {
             "enabled": False,
@@ -726,7 +1618,9 @@ class CloudContractTests(unittest.TestCase):
         ) as mutations, mock.patch.object(
             cli, "_try_source_sha", return_value="a" * 40
         ), mock.patch.object(cli.time, "sleep"):
-            result = cli._configure_cloud("owner/repo", True, None)
+            result = cli._configure_cloud(
+                "owner/repo", True, None, source_authority=self._source_authority()
+            )
         self.assertFalse(result["ok"])
         self.assertTrue(result["ambiguousSubsteps"])
         labels = [call.kwargs["label"] for call in mutations.call_args_list]
@@ -773,7 +1667,9 @@ class CloudContractTests(unittest.TestCase):
         ), mock.patch.object(
             cli, "_try_source_sha", return_value="a" * 40
         ), mock.patch.object(cli.time, "sleep"):
-            result = cli._configure_cloud("owner/repo", True, None)
+            result = cli._configure_cloud(
+                "owner/repo", True, None, source_authority=self._source_authority()
+            )
 
         self.assertFalse(result["ok"])
         self.assertEqual(result["_processExitCode"], cli.EXIT_ROLLBACK_INCOMPLETE)
@@ -824,7 +1720,9 @@ class CloudContractTests(unittest.TestCase):
         ), mock.patch.object(
             cli, "_try_source_sha", return_value="a" * 40
         ):
-            result = cli._configure_cloud("owner/repo", True, None)
+            result = cli._configure_cloud(
+                "owner/repo", True, None, source_authority=self._source_authority()
+            )
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["status"], "configured-after-ambiguous-client-result")
@@ -853,7 +1751,9 @@ class CloudContractTests(unittest.TestCase):
             cli, "_capture_command", side_effect=mutation_results
         ), mock.patch.object(cli, "_try_source_sha", return_value="a" * 40), \
                 mock.patch.object(cli.time, "sleep"):
-            result = cli._configure_cloud("owner/repo", True, None)
+            result = cli._configure_cloud(
+                "owner/repo", True, None, source_authority=self._source_authority()
+            )
         self.assertFalse(result["ok"])
         self.assertTrue(result["mutationApplied"])
         self.assertEqual(result["mutationState"], "partially-applied-unverified")
@@ -1054,6 +1954,54 @@ class CloudContractTests(unittest.TestCase):
         self.assertTrue(result["mutationApplied"])
         self.assertEqual(result["_processExitCode"], cli.EXIT_ROLLBACK_INCOMPLETE)
 
+    def test_dispatch_expected_source_drift_fails_before_listing_or_mutation(self):
+        preflight = {
+            "repo": "owner/repo",
+            "workflow": "publish-gate.yml",
+            "defaultBranch": "main",
+        }
+        with mock.patch.object(
+            cli, "_gh_json", return_value={"sha": "b" * 40}
+        ), mock.patch.object(cli, "_latest_runs") as runs, mock.patch.object(
+            cli, "_capture_command"
+        ) as mutation:
+            with self.assertRaisesRegex(cli.IntegrityFailure, "changed"):
+                cli._dispatch_cloud(
+                    preflight, True, expected_source_sha="a" * 40
+                )
+        runs.assert_not_called()
+        mutation.assert_not_called()
+
+    def test_publish_gate_dispatch_binds_the_resolved_source_as_an_input(self):
+        preflight = {
+            "repo": "owner/repo",
+            "workflow": "publish-gate.yml",
+            "defaultBranch": "main",
+        }
+        run = {
+            "id": 8,
+            "head_sha": "a" * 40,
+            "event": "workflow_dispatch",
+            "display_title": "hotdeal-focus-publish-gate-" + ("2" * 32),
+            "path": ".github/workflows/publish-gate.yml",
+            "status": "queued",
+            "conclusion": None,
+            "html_url": "https://github.com/owner/repo/actions/runs/8",
+        }
+        accepted = cli.ExecutionCapture("github-dispatch", ("gh",), 0, b"", b"")
+        with mock.patch.object(cli, "_gh_json", return_value={"sha": "a" * 40}), \
+                mock.patch.object(cli, "_latest_runs", side_effect=[[], [run]]), \
+                mock.patch.object(cli, "_run_metadata", return_value=run), \
+                mock.patch.object(cli, "_capture_command", return_value=accepted) as capture, \
+                mock.patch.object(cli.uuid, "uuid4", return_value=mock.Mock(hex="2" * 32)):
+            result = cli._dispatch_cloud(
+                preflight, True, expected_source_sha="a" * 40
+            )
+        self.assertTrue(result["ok"])
+        argv = capture.call_args.args[0]
+        self.assertIn("dispatch_nonce=" + ("2" * 32), argv)
+        self.assertIn("source_sha=" + ("a" * 40), argv)
+
     def test_dispatch_timeout_without_observable_run_preserves_unknown_state(self):
         preflight = {
             "repo": "owner/repo",
@@ -1123,6 +2071,411 @@ class CloudContractTests(unittest.TestCase):
 
 
 class GateReleaseCommandTests(unittest.TestCase):
+    def setUp(self):
+        tag_lease = mock.patch.object(
+            cli,
+            "_require_gate_tag_lease",
+            side_effect=lambda _repo, tag, source_sha: {
+                "tag": tag,
+                "expectedCommit": source_sha,
+                "observedCommit": source_sha,
+                "exact": True,
+            },
+        )
+        tag_lease.start()
+        self.addCleanup(tag_lease.stop)
+
+    @staticmethod
+    def _exact_default_head(source_sha):
+        return {
+            "branch": "main",
+            "expectedSourceCommit": source_sha,
+            "observedHead": source_sha,
+            "exact": True,
+        }
+
+    @staticmethod
+    def _gate_v2_publish_inputs():
+        repo = "heelee912/adguard-hotdeal-focus"
+        source_sha = "d" * 40
+        manifest = {
+            "gateArtifactVersion": "2.0.2",
+            "filterSubscriptionUrl": (
+                "https://github.com/heelee912/adguard-hotdeal-focus/releases/"
+                "download/gate-v2.0.2/filter.txt"
+            ),
+        }
+        args = mock.Mock(
+            action="publish",
+            repo=repo,
+            evidence_dir=None,
+            apply=True,
+            source_ref=source_sha,
+        )
+        repository = {
+            "nameWithOwner": repo,
+            "visibility": "PUBLIC",
+            "defaultBranchRef": {"name": "main"},
+        }
+        return repo, source_sha, manifest, args, repository
+
+    def test_local_publish_dispatches_the_protected_workflow_with_exact_source(self):
+        repo, source_sha, _manifest, args, _repository = self._gate_v2_publish_inputs()
+        preflight = {
+            "repo": repo,
+            "workflow": "publish-gate.yml",
+            "defaultBranch": "main",
+        }
+        authority = {
+            "sourceSha": source_sha,
+            "defaultBranch": "main",
+            "headLeases": [],
+            "exact": True,
+        }
+        lease = {
+            "phase": "immediately-before-gate-workflow-dispatch",
+            "branch": "main",
+            "expectedSha": source_sha,
+            "observedSha": source_sha,
+            "exact": True,
+        }
+        dispatched = {
+            "ok": True,
+            "status": "dispatched",
+            "sourceCommit": source_sha,
+            "mutationApplied": True,
+        }
+        with mock.patch.object(cli, "_github_gate_publisher_context", return_value=False), \
+                mock.patch.object(cli, "_cloud_preflight", return_value=preflight), \
+                mock.patch.object(cli, "_cloud_source_authority", return_value=authority), \
+                mock.patch.object(cli, "_require_cloud_head_lease", return_value=lease), \
+                mock.patch.object(cli, "_dispatch_cloud", return_value=dispatched) as dispatch:
+            result = cli.command_gate_release_entry(args)
+        dispatch.assert_called_once_with(
+            preflight, True, expected_source_sha=source_sha
+        )
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["directPublication"])
+
+    def test_unobserved_protected_dispatch_is_not_reported_as_success(self):
+        repo, source_sha, _manifest, args, _repository = self._gate_v2_publish_inputs()
+        preflight = {
+            "repo": repo,
+            "workflow": "publish-gate.yml",
+            "defaultBranch": "main",
+        }
+        authority = {
+            "sourceSha": source_sha,
+            "defaultBranch": "main",
+            "headLeases": [],
+            "exact": True,
+        }
+        dispatched = {
+            "ok": False,
+            "status": "dispatch-applied-unverified",
+            "mutationApplied": True,
+            "mutationState": "applied-unverified",
+            "_processExitCode": cli.EXIT_ROLLBACK_INCOMPLETE,
+        }
+        with mock.patch.object(cli, "_github_gate_publisher_context", return_value=False), \
+                mock.patch.object(cli, "_cloud_preflight", return_value=preflight), \
+                mock.patch.object(cli, "_cloud_source_authority", return_value=authority), \
+                mock.patch.object(cli, "_require_cloud_head_lease", return_value={}), \
+                mock.patch.object(cli, "_dispatch_cloud", return_value=dispatched):
+            result = cli.command_gate_release_entry(args)
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["_processExitCode"], cli.EXIT_ROLLBACK_INCOMPLETE)
+
+    def test_publish_head_checks_surround_tag_and_release_in_exact_order(self):
+        repo, source_sha, manifest, args, repository = self._gate_v2_publish_inputs()
+        events = []
+
+        def head(*_args):
+            events.append("head")
+            return {
+                "branch": "main",
+                "expectedSourceCommit": source_sha,
+                "observedHead": source_sha,
+                "exact": True,
+            }
+
+        def tag(*_args):
+            events.append("tag")
+            return {
+                "verified": True,
+                "status": "created",
+                "sourceCommit": source_sha,
+                "mutationApplied": True,
+            }
+
+        def release(argv, **kwargs):
+            del argv
+            self.assertEqual(kwargs["label"], "publish-immutable-gate-release")
+            events.append("release")
+            return cli.ExecutionCapture(kwargs["label"], ("gh",), 0, b"", b"")
+
+        def verify(*_args):
+            events.append("verify")
+            return {"immutable": True, "sourceCommit": source_sha}
+
+        with mock.patch.object(cli, "_command_exists", return_value=True), \
+                mock.patch.object(cli, "_validate_locked_gate_bytes"), \
+                mock.patch.object(cli, "_local_release_contract", return_value=(manifest, [])), \
+                mock.patch.object(cli, "_git_source_binding", return_value=source_sha), \
+                mock.patch.object(cli, "_gh_json", side_effect=(repository, {"sha": source_sha})), \
+                mock.patch.object(cli, "_gate_release_view", return_value=None), \
+                mock.patch.object(cli, "_immutable_release_policy", return_value={"enabled": True}), \
+                mock.patch.object(cli, "_require_remote_default_head", side_effect=head), \
+                mock.patch.object(cli, "_ensure_remote_gate_tag", side_effect=tag), \
+                mock.patch.object(cli, "_capture_command", side_effect=release), \
+                mock.patch.object(cli, "_verify_gate_release_with_retry", side_effect=verify):
+            result = cli.command_gate_release(args)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(events, ["head", "tag", "head", "release", "verify", "head"])
+        self.assertEqual(
+            [item["phase"] for item in result["defaultHeadObservations"]],
+            ["immediately-before-tag", "after-tag-before-release", "after-release"],
+        )
+        self.assertTrue(result["immutableReleasePublished"])
+
+    def test_default_head_observation_has_no_legacy_success_fallback(self):
+        with mock.patch.object(cli, "_require_remote_default_head", return_value=None):
+            with self.assertRaisesRegex(cli.IntegrityFailure, "observation is malformed"):
+                cli._gate_default_head_observation(
+                    "owner/repo", "main", "d" * 40, "immediately-before-tag"
+                )
+
+    def test_default_head_lease_uses_the_pinned_github_api_contract(self):
+        source_sha = "d" * 40
+        with mock.patch.object(
+            cli, "_gh_json", return_value={"sha": source_sha}
+        ) as github:
+            observation = cli._require_remote_default_head(
+                "owner/repo", "main", source_sha
+            )
+        argv = github.call_args.args[0]
+        self.assertIn(cli.GITHUB_JSON_ACCEPT_HEADER, argv)
+        self.assertIn(cli.GITHUB_API_VERSION_HEADER, argv)
+        self.assertEqual(observation, self._exact_default_head(source_sha))
+
+    def test_head_drift_after_tag_aborts_before_release_with_tag_state_evidence(self):
+        repo, source_sha, manifest, args, repository = self._gate_v2_publish_inputs()
+        exact = {
+            "branch": "main",
+            "expectedSourceCommit": source_sha,
+            "observedHead": source_sha,
+            "exact": True,
+        }
+        drift = cli.IntegrityFailure(
+            "gate release source is not the current default-branch head",
+            details={
+                "defaultHeadObservation": {
+                    **exact,
+                    "observedHead": "e" * 40,
+                    "exact": False,
+                }
+            },
+        )
+        tag = {
+            "verified": True,
+            "status": "created",
+            "sourceCommit": source_sha,
+            "mutationApplied": True,
+        }
+        with mock.patch.object(cli, "_command_exists", return_value=True), \
+                mock.patch.object(cli, "_validate_locked_gate_bytes"), \
+                mock.patch.object(cli, "_local_release_contract", return_value=(manifest, [])), \
+                mock.patch.object(cli, "_git_source_binding", return_value=source_sha), \
+                mock.patch.object(cli, "_gh_json", side_effect=(repository, {"sha": source_sha})), \
+                mock.patch.object(cli, "_gate_release_view", return_value=None), \
+                mock.patch.object(cli, "_immutable_release_policy", return_value={"enabled": True}), \
+                mock.patch.object(
+                    cli, "_require_remote_default_head", side_effect=(exact, drift)
+                ), mock.patch.object(
+                    cli, "_ensure_remote_gate_tag", return_value=tag
+                ), mock.patch.object(cli, "_capture_command") as release:
+            result = cli.command_gate_release(args)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "default-head-drift-after-tag-before-release")
+        self.assertFalse(result["immutableReleasePublished"])
+        self.assertEqual(result["mutationState"], "partially-applied-verified")
+        self.assertEqual(result["_processExitCode"], cli.EXIT_ROLLBACK_INCOMPLETE)
+        release.assert_not_called()
+
+    def test_head_recheck_outage_after_tag_is_terminal_with_tag_evidence(self):
+        repo, source_sha, manifest, args, repository = self._gate_v2_publish_inputs()
+        tag = {
+            "verified": True,
+            "status": "created",
+            "sourceCommit": source_sha,
+            "mutationApplied": True,
+        }
+        with mock.patch.object(cli, "_command_exists", return_value=True), \
+                mock.patch.object(cli, "_validate_locked_gate_bytes"), \
+                mock.patch.object(cli, "_local_release_contract", return_value=(manifest, [])), \
+                mock.patch.object(cli, "_git_source_binding", return_value=source_sha), \
+                mock.patch.object(cli, "_gh_json", side_effect=(repository, {"sha": source_sha})), \
+                mock.patch.object(cli, "_gate_release_view", return_value=None), \
+                mock.patch.object(cli, "_immutable_release_policy", return_value={"enabled": True}), \
+                mock.patch.object(
+                    cli,
+                    "_require_remote_default_head",
+                    side_effect=(
+                        self._exact_default_head(source_sha),
+                        cli.TransientFailure("default head temporarily unavailable"),
+                    ),
+                ), mock.patch.object(
+                    cli, "_ensure_remote_gate_tag", return_value=tag
+                ), mock.patch.object(cli, "_capture_command") as release:
+            result = cli.command_gate_release(args)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "default-head-drift-after-tag-before-release")
+        self.assertEqual(result["gateTag"], tag)
+        self.assertIsNone(result["defaultHeadObservations"][-1]["observedHead"])
+        self.assertIn("temporarily unavailable", result["defaultHeadObservations"][-1]["error"])
+        self.assertEqual(result["_processExitCode"], cli.EXIT_ROLLBACK_INCOMPLETE)
+        release.assert_not_called()
+
+    def test_unverified_tag_binding_still_records_post_tag_head(self):
+        repo, source_sha, manifest, args, repository = self._gate_v2_publish_inputs()
+        exact = self._exact_default_head(source_sha)
+        tag = {
+            "verified": False,
+            "status": "terminal-state-unknown",
+            "sourceCommit": None,
+            "expectedSourceCommit": source_sha,
+            "mutationApplied": None,
+        }
+        with mock.patch.object(cli, "_command_exists", return_value=True), \
+                mock.patch.object(cli, "_validate_locked_gate_bytes"), \
+                mock.patch.object(cli, "_local_release_contract", return_value=(manifest, [])), \
+                mock.patch.object(cli, "_git_source_binding", return_value=source_sha), \
+                mock.patch.object(cli, "_gh_json", side_effect=(repository, {"sha": source_sha})), \
+                mock.patch.object(cli, "_gate_release_view", return_value=None), \
+                mock.patch.object(cli, "_immutable_release_policy", return_value={"enabled": True}), \
+                mock.patch.object(
+                    cli, "_require_remote_default_head", side_effect=(exact, exact)
+                ), mock.patch.object(
+                    cli, "_ensure_remote_gate_tag", return_value=tag
+                ), mock.patch.object(cli, "_capture_command") as release:
+            result = cli.command_gate_release(args)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "gate-tag-binding-unverified")
+        self.assertEqual(
+            [item["phase"] for item in result["defaultHeadObservations"]],
+            ["immediately-before-tag", "after-tag-before-release"],
+        )
+        self.assertFalse(result["immutableReleasePublished"])
+        release.assert_not_called()
+
+    def test_head_drift_after_immutable_release_is_terminal_and_fully_evidenced(self):
+        repo, source_sha, manifest, args, repository = self._gate_v2_publish_inputs()
+        exact = {
+            "branch": "main",
+            "expectedSourceCommit": source_sha,
+            "observedHead": source_sha,
+            "exact": True,
+        }
+        drift = cli.IntegrityFailure(
+            "gate release source is not the current default-branch head",
+            details={
+                "defaultHeadObservation": {
+                    **exact,
+                    "observedHead": "e" * 40,
+                    "exact": False,
+                }
+            },
+        )
+        tag = {
+            "verified": True,
+            "status": "created",
+            "sourceCommit": source_sha,
+            "mutationApplied": True,
+        }
+        creation = cli.ExecutionCapture(
+            "publish-immutable-gate-release", ("gh",), 0, b"", b""
+        )
+        proof = {"immutable": True, "sourceCommit": source_sha}
+        with mock.patch.object(cli, "_command_exists", return_value=True), \
+                mock.patch.object(cli, "_validate_locked_gate_bytes"), \
+                mock.patch.object(cli, "_local_release_contract", return_value=(manifest, [])), \
+                mock.patch.object(cli, "_git_source_binding", return_value=source_sha), \
+                mock.patch.object(cli, "_gh_json", side_effect=(repository, {"sha": source_sha})), \
+                mock.patch.object(cli, "_gate_release_view", return_value=None), \
+                mock.patch.object(cli, "_immutable_release_policy", return_value={"enabled": True}), \
+                mock.patch.object(
+                    cli, "_require_remote_default_head", side_effect=(exact, exact, drift)
+                ), mock.patch.object(
+                    cli, "_ensure_remote_gate_tag", return_value=tag
+                ), mock.patch.object(
+                    cli, "_capture_command", return_value=creation
+                ), mock.patch.object(
+                    cli, "_verify_gate_release_with_retry", return_value=proof
+                ):
+            result = cli.command_gate_release(args)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "default-head-drift-after-release")
+        self.assertTrue(result["immutableReleasePublished"])
+        self.assertEqual(result["gateRelease"], proof)
+        self.assertEqual(result["defaultHeadObservations"][-1]["observedHead"], "e" * 40)
+        self.assertEqual(result["_processExitCode"], cli.EXIT_ROLLBACK_INCOMPLETE)
+
+    def test_head_drift_after_ambiguous_create_skips_draft_recovery(self):
+        repo, source_sha, manifest, args, repository = self._gate_v2_publish_inputs()
+        exact = self._exact_default_head(source_sha)
+        drift = cli.IntegrityFailure(
+            "gate release source is not the current default-branch head",
+            details={
+                "defaultHeadObservation": {
+                    **exact,
+                    "observedHead": "e" * 40,
+                    "exact": False,
+                }
+            },
+        )
+        tag = {
+            "verified": True,
+            "status": "created",
+            "sourceCommit": source_sha,
+            "mutationApplied": True,
+        }
+        creation = cli.ExecutionCapture(
+            "publish-immutable-gate-release", ("gh",), 1, b"", b"ambiguous"
+        )
+        with mock.patch.object(cli, "_command_exists", return_value=True), \
+                mock.patch.object(cli, "_validate_locked_gate_bytes"), \
+                mock.patch.object(cli, "_local_release_contract", return_value=(manifest, [])), \
+                mock.patch.object(cli, "_git_source_binding", return_value=source_sha), \
+                mock.patch.object(cli, "_gh_json", side_effect=(repository, {"sha": source_sha})), \
+                mock.patch.object(cli, "_gate_release_view", return_value=None), \
+                mock.patch.object(cli, "_immutable_release_policy", return_value={"enabled": True}), \
+                mock.patch.object(
+                    cli, "_require_remote_default_head", side_effect=(exact, exact, drift)
+                ), mock.patch.object(
+                    cli, "_ensure_remote_gate_tag", return_value=tag
+                ), mock.patch.object(
+                    cli, "_capture_command", return_value=creation
+                ), mock.patch.object(
+                    cli,
+                    "_verify_gate_release_with_retry",
+                    side_effect=cli.IntegrityFailure("release is not observable"),
+                ), mock.patch.object(
+                    cli, "_resume_gate_draft_after_ambiguous_create"
+                ) as recover:
+            result = cli.command_gate_release(args)
+
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["status"], "default-head-drift-after-release-attempt")
+        self.assertEqual(result["gateTag"], tag)
+        self.assertIsNone(result["immutableReleasePublished"])
+        self.assertEqual(result["_processExitCode"], cli.EXIT_ROLLBACK_INCOMPLETE)
+        recover.assert_not_called()
+
     def test_gate_tag_is_peeled_to_one_exact_commit(self):
         tag = "gate-v1.0.0"
         source_sha = "a" * 40
@@ -1264,6 +2617,9 @@ class GateReleaseCommandTests(unittest.TestCase):
         ), mock.patch.object(
             cli, "_immutable_release_policy", return_value={"enabled": True}
         ) as policy, mock.patch.object(
+            cli, "_require_remote_default_head",
+            return_value=self._exact_default_head(source_sha),
+        ), mock.patch.object(
             cli, "_gate_release_view", side_effect=(None, draft)
         ), mock.patch.object(
             cli, "_ensure_remote_gate_tag", return_value={
@@ -1696,6 +3052,9 @@ class GateReleaseCommandTests(unittest.TestCase):
             ), mock.patch.object(
                 cli, "_immutable_release_policy", return_value={"enabled": True}
             ), mock.patch.object(
+                cli, "_require_remote_default_head",
+                return_value=self._exact_default_head(source_sha),
+            ), mock.patch.object(
                 cli, "_capture_command", side_effect=captures
             ) as capture_command, mock.patch.object(
                 cli,
@@ -1829,6 +3188,9 @@ class GateReleaseCommandTests(unittest.TestCase):
                     cli, "_gh_json", side_effect=api_values
                 ), mock.patch.object(
                     cli, "_immutable_release_policy", return_value={"enabled": True}
+                ), mock.patch.object(
+                    cli, "_require_remote_default_head",
+                    return_value=self._exact_default_head(source_sha),
                 ), mock.patch.object(cli, "_capture_command", side_effect=capture), \
                 mock.patch.object(
                     cli, "_verify_gate_release_with_retry",
@@ -1888,6 +3250,9 @@ class GateReleaseCommandTests(unittest.TestCase):
                 ), mock.patch.object(
                     cli, "_immutable_release_policy", return_value={"enabled": True}
                 ), mock.patch.object(
+                    cli, "_require_remote_default_head",
+                    return_value=self._exact_default_head(source_sha),
+                ), mock.patch.object(
                     cli, "_capture_command", side_effect=captures
                 ), mock.patch.object(
                     cli, "_verify_gate_release_with_retry", return_value=proof
@@ -1912,6 +3277,13 @@ class GateDraftRecoveryTests(unittest.TestCase):
         "gate-v1.0.0/filter.txt"
     )
     gate_bytes = b"exact locked gate\n"
+
+    def test_gate_tag_lease_rejects_a_last_moment_tag_move(self):
+        with mock.patch.object(cli, "_remote_gate_tag_commit", return_value="b" * 40):
+            with self.assertRaisesRegex(cli.IntegrityFailure, "immediately before"):
+                cli._require_gate_tag_lease(
+                    "owner/repo", "gate-v2.0.2", "a" * 40
+                )
 
     def draft(self, assets):
         return {

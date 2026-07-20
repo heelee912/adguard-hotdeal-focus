@@ -47,7 +47,7 @@ powershell.exe -NoProfile -File .\scripts\adguard_windows_cli.ps1 migrate-legacy
 .EXAMPLE
 powershell.exe -NoProfile -File .\scripts\adguard_windows_cli.ps1 deploy `
   -UserscriptSource .\hotdeal-focus.user.js `
-  -FilterUrl https://github.com/heelee912/adguard-hotdeal-focus/releases/download/gate-v1.0.0/filter.txt `
+  -FilterUrl https://github.com/heelee912/adguard-hotdeal-focus/releases/download/gate-v2.0.2/filter.txt `
   -ReleaseManifestSource https://heelee912.github.io/adguard-hotdeal-focus/release-manifest.json `
   -ExpectedUserscriptSha256 <canonical-text-sha256> `
   -ExpectedFilterSha256 <raw-file-sha256> `
@@ -59,7 +59,8 @@ powershell.exe -NoProfile -File .\scripts\adguard_windows_cli.ps1 deploy `
 param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('inspect', 'backup', 'restore-backup', 'install-userscript',
-        'migrate-legacy', 'install-filter', 'deploy', 'verify')]
+        'migrate-legacy', 'install-filter', 'deploy', 'verify',
+        'csp-probe-inspect', 'csp-probe-install', 'csp-probe-restore')]
     [string] $Command,
 
     [string] $UserscriptSource,
@@ -99,7 +100,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:ToolVersion = '0.3.6'
+$script:ToolVersion = '0.5.5'
 $script:MaximumSourceBytes = 8MB
 $script:AdGuardInstallDirectory = $null
 $script:AdGuardProcess = $null
@@ -116,6 +117,21 @@ $script:EvidenceAttempted = $false
 $script:HistoricalSnapshotRules = @()
 $script:RecoveryBackupPath = $null
 $script:RecoveryCommand = $null
+$script:ReaderGateProtocolVersion = 2
+$script:ReaderGateGrant = 'GM_addElement'
+$script:MarkerGateArtifactVersion = '2.0.2'
+$script:MarkerGateSubscriptionUrl = ('https://github.com/heelee912/' +
+    'adguard-hotdeal-focus/releases/download/gate-v2.0.2/filter.txt')
+$script:CspProbeUserscriptName = 'AdGuard Hotdeal Focus CSP Probe'
+$script:CspProbeUserscriptVersion = '1.2.0'
+$script:CspProbeFilterName = 'AdGuard Hotdeal Focus CSP Probe Sentinel'
+$script:CspProbeEndpoint = ('https://testcases.agrd.dev/userscripts-csp/' +
+    'header-csp-default-src-none')
+$script:CspProbeSourceSha256 = '3797355e3257c4f2ad67cca61af1cb182b377c9b91a47b76c48cb559547d842a'
+$script:AdGuardStateVisibilityMaxObservations = 20
+$script:AdGuardStateVisibilityDelayMilliseconds = 250
+$script:AdGuardStateVisibilityRequiredConsecutiveReads = 2
+$script:FreshInstallGmProperties = '{}'
 
 function Write-JsonResult {
     param([Parameter(Mandatory = $true)] $Value)
@@ -1202,7 +1218,11 @@ function Get-UserscriptSource {
     $endMarker = '// ==/UserScript=='
     $start = $text.IndexOf($startMarker, [StringComparison]::Ordinal)
     $end = $text.IndexOf($endMarker, [StringComparison]::Ordinal)
-    if ($start -lt 0 -or $end -lt $start) { throw "Userscript metadata block is missing" }
+    if ($start -lt 0 -or $end -lt $start -or
+        @([regex]::Matches($text, [regex]::Escape($startMarker))).Count -ne 1 -or
+        @([regex]::Matches($text, [regex]::Escape($endMarker))).Count -ne 1) {
+        throw "Userscript metadata block is not exact"
+    }
     if ($text.Substring(0, $start).Trim().Length -ne 0) {
         throw "Userscript metadata must be the first content in the file"
     }
@@ -1214,7 +1234,9 @@ function Get-UserscriptSource {
 
     $nameMatch = [regex]::Match($metadata, '(?m)^//\s+@name\s+(?<value>.+?)\s*$')
     $versionMatch = [regex]::Match($metadata, '(?m)^//\s+@version\s+(?<value>\S+)\s*$')
-    if (-not $nameMatch.Success -or -not $versionMatch.Success) {
+    if (-not $nameMatch.Success -or -not $versionMatch.Success -or
+        @([regex]::Matches($metadata, '(?m)^//\s+@name\s+\S.*$')).Count -ne 1 -or
+        @([regex]::Matches($metadata, '(?m)^//\s+@version\s+\S+\s*$')).Count -ne 1) {
         throw "Userscript must declare @name and @version"
     }
     $name = $nameMatch.Groups['value'].Value.Trim()
@@ -1222,10 +1244,19 @@ function Get-UserscriptSource {
     if ($name -cne $UserscriptName) {
         throw "Userscript @name does not equal the configured target name"
     }
-    if ($metadata -notmatch '(?m)^//\s+@run-at\s+document-start\s*$' -or
-        $metadata -notmatch '(?m)^//\s+@grant\s+none\s*$' -or
-        $metadata -notmatch '(?m)^//\s+@noframes\s*$') {
-        throw "Userscript must use document-start, @grant none, and @noframes"
+    $runAtDirectives = @([regex]::Matches(
+            $metadata, '(?m)^//\s+@run-at\s+(?<value>\S+)\s*$'))
+    $grantDirectives = @([regex]::Matches(
+            $metadata, '(?m)^//\s+@grant\s+(?<value>\S+)\s*$'))
+    $noframesDirectives = @([regex]::Matches(
+            $metadata, '(?m)^//\s+@noframes\s*$'))
+    if ($runAtDirectives.Count -ne 1 -or
+        $runAtDirectives[0].Groups['value'].Value -cne 'document-start' -or
+        $grantDirectives.Count -ne 1 -or
+        $grantDirectives[0].Groups['value'].Value -cne $script:ReaderGateGrant -or
+        $noframesDirectives.Count -ne 1) {
+        throw ("Reader Gate v2 must declare exactly one document-start, one @noframes, " +
+            "and exactly one @grant GM_addElement")
     }
     foreach ($hostToken in @('algumon.com', 'clien.net', 'ppomppu.co.kr', 'ruliweb.com',
             'quasarzone.com', 'eomisae.co.kr', 'zod.kr', 'arca.live')) {
@@ -1234,8 +1265,43 @@ function Get-UserscriptSource {
         }
     }
     foreach ($marker in @('data-hotdeal-focus-ready', 'data-hotdeal-focus-keep',
-            'data-hotdeal-focus-protocol')) {
+            'data-hotdeal-focus-protocol', 'data-hotdeal-focus-lock',
+            'data-hotdeal-focus-shell', 'data-hotdeal-focus-deep',
+            'data-hotdeal-focus-role', 'data-hotdeal-focus-state',
+            'data-hotdeal-focus-status')) {
         if (-not $code.Contains($marker)) { throw "Userscript is missing protocol marker: $marker" }
+    }
+    $protocolDeclarations = @([regex]::Matches(
+            $code,
+            '(?m)^\s*const\s+PROTOCOL_VERSION\s*=\s*"(?<value>\d+)";\s*$'
+        ))
+    if ($protocolDeclarations.Count -ne 1 -or
+        [int] $protocolDeclarations[0].Groups['value'].Value -ne
+            $script:ReaderGateProtocolVersion) {
+        throw "Reader Gate userscript must declare exact protocol version 2"
+    }
+    foreach ($contractToken in @(
+            'protocolVersion: Number(PROTOCOL_VERSION)',
+            'setAttribute(ATTR.protocol, PROTOCOL_VERSION)',
+            'data-hotdeal-focus-runtime-style',
+            'style[data-hotdeal-focus-runtime-style="${PROTOCOL_VERSION}"]',
+            'hdf-v2-lock',
+            'hdf-v2-ready',
+            'hdf-v2-keep',
+            'hdf-v2-shell',
+            'hdf-v2-deep',
+            'hdf-v2-role-',
+            'GM_addElement('
+        )) {
+        if (-not $code.Contains($contractToken)) {
+            throw "Reader Gate v2 is missing diagnostics/runtime contract: $contractToken"
+        }
+    }
+    if (@([regex]::Matches(
+                $code,
+                [regex]::Escape('protocolVersion: Number(PROTOCOL_VERSION)')
+            )).Count -ne 1) {
+        throw "Reader Gate v2 diagnostics protocol marker is not unique"
     }
 
     foreach ($urlMatch in [regex]::Matches(
@@ -1255,13 +1321,117 @@ function Get-UserscriptSource {
         Bytes = $bytes
         RawSha256 = Get-Sha256Hex -Bytes $bytes
         Text = $text
-        Metadata = $metadata
+        MetadataBlock = $metadata
         Code = $code
         Name = $name
         Version = $version
+        ProtocolVersion = $script:ReaderGateProtocolVersion
+        Grant = $script:ReaderGateGrant
         Sha256 = Get-CanonicalTextSha256 -Text $text
         MetadataSha256 = Get-CanonicalTextSha256 -Text $metadata
         CodeSha256 = Get-CanonicalTextSha256 -Text $code
+        FreshInstallGmProperties = $script:FreshInstallGmProperties
+        FreshInstallGmPropertiesSha256 = Get-CanonicalTextSha256 `
+            -Text $script:FreshInstallGmProperties
+        TempPath = $null
+        Meta = $null
+    }
+}
+
+function Get-CspProbeUserscriptText {
+    $path = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot 'csp-probe.user.js'))
+    $expectedParent = [System.IO.Path]::GetFullPath($PSScriptRoot)
+    if ([System.IO.Path]::GetDirectoryName($path) -cne $expectedParent) {
+        throw "Fixed CSP probe path escaped the CLI script directory"
+    }
+    $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -and
+        -not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -and
+        [long] $item.Length -gt 0 -and [long] $item.Length -le 64KB) {
+        $bytes = [System.IO.File]::ReadAllBytes($path)
+        return $script:Utf8NoBom.GetString($bytes)
+    }
+    throw "Fixed CSP probe source is not one bounded regular file"
+}
+
+function Get-CspProbeUserscriptSource {
+    $text = Get-CspProbeUserscriptText
+    $bytes = $script:Utf8NoBom.GetBytes($text)
+    $rawSha = Get-Sha256Hex -Bytes $bytes
+    if ($rawSha -cne $script:CspProbeSourceSha256) {
+        throw "Built-in CSP probe source SHA-256 differs from its pinned contract"
+    }
+
+    $startMarker = '// ==UserScript=='
+    $endMarker = '// ==/UserScript=='
+    $start = $text.IndexOf($startMarker, [StringComparison]::Ordinal)
+    $end = $text.IndexOf($endMarker, [StringComparison]::Ordinal)
+    if ($start -ne 0 -or $end -le $start) {
+        throw "Built-in CSP probe metadata block is malformed"
+    }
+    $metadataEnd = $end + $endMarker.Length
+    $metadata = $text.Substring(0, $metadataEnd)
+    $code = $text.Substring($metadataEnd)
+    if ($code.StartsWith("`n")) { $code = $code.Substring(1) }
+
+    $matchDirectives = @([regex]::Matches(
+            $metadata,
+            '(?m)^//\s+@match\s+(?<value>\S+)\s*$'
+        ))
+    $grantDirectives = @([regex]::Matches(
+            $metadata,
+            '(?m)^//\s+@grant\s+(?<value>\S+)\s*$'
+        ))
+    if ($matchDirectives.Count -ne 1 -or
+        $matchDirectives[0].Groups['value'].Value -cne
+            'https://testcases.agrd.dev/userscripts-csp/header-csp-default-src-none') {
+        throw "Built-in CSP probe must have one exact @match directive"
+    }
+    if ($grantDirectives.Count -ne 1 -or
+        $grantDirectives[0].Groups['value'].Value -cne 'GM_addElement' -or
+        $metadata -notmatch '(?m)^//\s+@run-at\s+document-start\s*$' -or
+        $metadata -notmatch '(?m)^//\s+@noframes\s*$') {
+        throw "Built-in CSP probe metadata privileges differ from the fixed contract"
+    }
+    if ($metadata -match ('(?m)^//\s+@(connect|downloadURL|exclude|exclude-match|' +
+            'include|require|resource|updateURL)\b')) {
+        throw "Built-in CSP probe contains a forbidden external capability"
+    }
+    foreach ($networkToken in @(
+            'fetch(', 'GM_xmlhttpRequest', 'navigator.sendBeacon',
+            'WebSocket(', 'XMLHttpRequest'
+        )) {
+        if ($code.Contains($networkToken)) {
+            throw "Built-in CSP probe contains a forbidden network API"
+        }
+    }
+    if (-not $code.Contains('GM_addElement(parent, "style", {') -or
+        $code.Contains('GM_addElement(parent, "style", { nonce') -or
+        $code.Contains('GM_addElement(parent, "style", { "data-source"')) {
+        throw "Built-in CSP probe GM_addElement call differs from the fixed contract"
+    }
+    $endpointGuard = 'if (location.href !== EXPECTED_URL) {'
+    $endpointLiteral = 'const EXPECTED_URL = "' + $script:CspProbeEndpoint + '";'
+    if (-not $code.Contains($endpointLiteral) -or -not $code.Contains($endpointGuard) -or
+        $code.IndexOf($endpointLiteral, [StringComparison]::Ordinal) -gt
+            $code.IndexOf('const setBoolean', [StringComparison]::Ordinal)) {
+        throw "Built-in CSP probe is not guarded by the exact endpoint before DOM mutation"
+    }
+
+    return [pscustomobject]@{
+        Bytes = $bytes
+        RawSha256 = $rawSha
+        Text = $text
+        MetadataBlock = $metadata
+        Code = $code
+        Name = $script:CspProbeUserscriptName
+        Version = $script:CspProbeUserscriptVersion
+        Sha256 = Get-CanonicalTextSha256 -Text $text
+        MetadataSha256 = Get-CanonicalTextSha256 -Text $metadata
+        CodeSha256 = Get-CanonicalTextSha256 -Text $code
+        FreshInstallGmProperties = $script:FreshInstallGmProperties
+        FreshInstallGmPropertiesSha256 = Get-CanonicalTextSha256 `
+            -Text $script:FreshInstallGmProperties
         TempPath = $null
         Meta = $null
     }
@@ -1283,24 +1453,45 @@ function ConvertFrom-FilterSourceBytes {
 
     $text = ConvertFrom-StrictUtf8 -Bytes $bytes
     if ($text.Contains('__HOTDEAL_FOCUS_')) { throw "Filter contains unresolved release placeholders" }
-    $protocolMatch = [regex]::Match(
-        $text,
-        '(?m)^!\s*Hotdeal-Focus-Protocol:\s*(?<value>\d+)\s*$')
-    if (-not $protocolMatch.Success -or
-        -not $text.Contains('data-hotdeal-focus-ready') -or
-        -not $text.Contains('data-hotdeal-focus-keep')) {
-        throw "Filter is not the marker-only Hotdeal Focus protocol gate"
+    $protocolMatches = @([regex]::Matches(
+            $text,
+            '(?m)^!\s*Hotdeal-Focus-Protocol:\s*(?<value>\d+)\s*$'))
+    if ($protocolMatches.Count -ne 1 -or
+        [int] $protocolMatches[0].Groups['value'].Value -ne
+            $script:ReaderGateProtocolVersion) {
+        throw "Filter is not the exact protocol-2 Hotdeal Focus marker gate"
     }
-    $titleMatch = [regex]::Match($text, '(?m)^!\s*Title:\s*(?<value>.+?)\s*$')
-    $versionMatch = [regex]::Match($text, '(?m)^!\s*Version:\s*(?<value>\S+)\s*$')
-    if (-not $titleMatch.Success -or -not $versionMatch.Success) {
+    $titleMatches = @([regex]::Matches(
+            $text, '(?m)^!\s*Title:\s*(?<value>.+?)\s*$'))
+    $versionMatches = @([regex]::Matches(
+            $text, '(?m)^!\s*Version:\s*(?<value>\S+)\s*$'))
+    if ($titleMatches.Count -ne 1 -or $versionMatches.Count -ne 1) {
         throw "Filter must declare Title and Version metadata"
     }
-    $title = $titleMatch.Groups['value'].Value.Trim()
-    if ($title -cne $FilterName) { throw "Filter Title does not equal the configured target name" }
+    $title = $titleMatches[0].Groups['value'].Value.Trim()
+    if ($title -cne $FilterName -or
+        $versionMatches[0].Groups['value'].Value.Trim() -cne
+            $script:MarkerGateArtifactVersion) {
+        throw "Filter Title or Version does not equal the protocol-2 marker gate contract"
+    }
     $sourceRules = @($text -split "`r?`n" | Where-Object {
             $_.Trim().Length -gt 0 -and -not $_.TrimStart().StartsWith('!')
         } | ForEach-Object { [string] $_ })
+    $sourceRulesText = $sourceRules -join "`n"
+    foreach ($marker in @('hdf-v2-lock', 'hdf-v2-ready', 'hdf-v2-keep',
+            'hdf-v2-shell', 'hdf-v2-deep', 'hdf-v2-role-',
+            'data-hotdeal-focus-ready="1"', 'data-hotdeal-focus-keep',
+            'data-hotdeal-focus-protocol="2"', 'data-hotdeal-focus-shell',
+            'data-hotdeal-focus-deep', 'data-hotdeal-focus-role="',
+            'data-hotdeal-focus-state="ready"',
+            'data-hotdeal-focus-status="ready"')) {
+        if (-not $sourceRulesText.Contains($marker)) {
+            throw "Filter is missing protocol-2 class/attribute marker: $marker"
+        }
+    }
+    if ($sourceRulesText.Contains('data-hotdeal-focus-protocol="1"')) {
+        throw "Protocol-2 filter contains a protocol-1 marker"
+    }
     $ruleCount = $sourceRules.Count
     if ($ruleCount -lt 2) { throw "Filter contains too few protocol rules" }
     $sourceRulesSha = Get-RuleListSha256 -Rules $sourceRules
@@ -1317,8 +1508,8 @@ function ConvertFrom-FilterSourceBytes {
         Bytes = $bytes
         Text = $text
         Name = $title
-        Version = $versionMatch.Groups['value'].Value.Trim()
-        ProtocolVersion = [int] $protocolMatch.Groups['value'].Value
+        Version = $versionMatches[0].Groups['value'].Value.Trim()
+        ProtocolVersion = [int] $protocolMatches[0].Groups['value'].Value
         RuleCount = $ruleCount
         SourceRulesSha256 = $sourceRulesSha
         RawSha256 = $rawSha
@@ -1371,14 +1562,18 @@ function Get-ReleaseManifestContract {
         -Label 'release manifest userscript artifact'
     $gateArtifactVersion = [string] $manifest.gateArtifactVersion
     $filterSubscriptionUrl = [string] $manifest.filterSubscriptionUrl
-    $protocolVersion = [int] $manifest.protocolVersion
-    if ($gateArtifactVersion -notmatch '\A\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?\z' -or
+    $protocolValue = $manifest.protocolVersion
+    $protocolIsInteger = $protocolValue -is [int] -or $protocolValue -is [long]
+    $protocolVersion = if ($protocolIsInteger) { [int] $protocolValue } else { -1 }
+    if ($gateArtifactVersion -cne $script:MarkerGateArtifactVersion -or
         [string] $filterEntry.version -cne $gateArtifactVersion -or
         [string] $userscriptEntry.version -cne [string] $manifest.releaseVersion -or
-        $protocolVersion -lt 1 -or
+        -not $protocolIsInteger -or
+        $protocolVersion -ne $script:ReaderGateProtocolVersion -or
+        $filterSubscriptionUrl -cne $script:MarkerGateSubscriptionUrl -or
         (Assert-PublicHttpsUri -Value $filterSubscriptionUrl).AbsoluteUri -cne
             $filterSubscriptionUrl) {
-        throw "Release manifest gate and artifact versions are inconsistent"
+        throw "Release manifest is not the exact protocol-2 gate contract"
     }
     foreach ($entry in @(
             [pscustomobject]@{ Value = [string] $filterEntry.sha256; Name = 'filter sha256' },
@@ -1418,7 +1613,9 @@ function Assert-ReleaseInputsMatchManifest {
                 $ManifestContract.UserscriptCanonicalTextSha256 -or
             $DesiredUserscript.Sha256 -cne $ManifestContract.UserscriptCanonicalTextSha256 -or
             $DesiredUserscript.RawSha256 -cne $ManifestContract.UserscriptRawSha256 -or
-            $DesiredUserscript.Version -cne $ManifestContract.ReleaseVersion) {
+            $DesiredUserscript.Version -cne $ManifestContract.ReleaseVersion -or
+            $DesiredUserscript.ProtocolVersion -ne $ManifestContract.ProtocolVersion -or
+            $DesiredUserscript.Grant -cne $script:ReaderGateGrant) {
             throw "Userscript source or expected hash differs from the release manifest"
         }
     }
@@ -2068,13 +2265,15 @@ function Get-UserscriptSnapshot {
     $targets = @(Get-TargetUserscripts -Client $Client)
     if ($targets.Count -gt 1) { throw "Target userscript name is not unique" }
     if ($targets.Count -eq 0) {
-        return [pscustomobject]@{ Exists = $false; Info = $null; Code = $null; Gm = $null }
+        return [pscustomobject]@{
+            Exists = $false; Info = $null; Code = $null; GmProperties = $null
+        }
     }
     return [pscustomobject]@{
         Exists = $true
         Info = $targets[0]
         Code = $Client.GetUserscriptCode($UserscriptName, $true)
-        Gm = $Client.GetUserscriptGmProperties($UserscriptName)
+        GmProperties = $Client.GetUserscriptGmProperties($UserscriptName)
     }
 }
 
@@ -2128,7 +2327,7 @@ function Get-CompleteTargetStateSnapshot {
                 LastUpdateTime = $null
             }
             Code = [string] $userscript.Code
-            Gm = [string] $userscript.Gm
+            GmProperties = [string] $userscript.GmProperties
         }
     }
     $filterEntries = New-Object 'System.Collections.Generic.List[object]'
@@ -2180,7 +2379,8 @@ function Get-CompleteTargetStateSha256 {
             is_enabled = [bool] $Snapshot.UserscriptSnapshot.Info.IsEnabled
             is_style = [bool] $Snapshot.UserscriptSnapshot.Info.IsStyle
             code_sha256 = Get-CanonicalTextSha256 -Text $Snapshot.UserscriptSnapshot.Code
-            gm_sha256 = Get-CanonicalTextSha256 -Text $Snapshot.UserscriptSnapshot.Gm
+            gm_properties_sha256 = Get-CanonicalTextSha256 `
+                -Text $Snapshot.UserscriptSnapshot.GmProperties
         }
     } else { $null }
     $filters = @($Snapshot.FilterEntries | Sort-Object { $_.Info.FilterId } | ForEach-Object {
@@ -2221,19 +2421,67 @@ function Get-CompleteTargetStateSha256 {
 function Get-StableCompleteTargetStateSnapshot {
     param(
         [Parameter(Mandatory = $true)] $Client,
-        [AllowNull()][string] $ExactFilterUrl
+        [AllowNull()][string] $ExactFilterUrl,
+        [ValidateRange(2, 100)]
+        [int] $MaximumObservations = $script:AdGuardStateVisibilityMaxObservations,
+        [ValidateRange(0, 5000)]
+        [int] $RetryDelayMilliseconds = $script:AdGuardStateVisibilityDelayMilliseconds,
+        [ValidateRange(2, 10)]
+        [int] $RequiredConsecutiveReads = `
+            $script:AdGuardStateVisibilityRequiredConsecutiveReads
     )
-    $first = Get-CompleteTargetStateSnapshot -Client $Client -ExactFilterUrl $ExactFilterUrl
-    $second = Get-CompleteTargetStateSnapshot -Client $Client -ExactFilterUrl $ExactFilterUrl
-    $firstSha = Get-CompleteTargetStateSha256 -Snapshot $first
-    $secondSha = Get-CompleteTargetStateSha256 -Snapshot $second
-    if ($firstSha -cne $secondSha) {
-        throw "Two consecutive complete target-state snapshots were not identical"
+    if ($RequiredConsecutiveReads -gt $MaximumObservations) {
+        throw "Required consecutive reads exceed the bounded observation count"
     }
-    return [pscustomobject]@{
-        Snapshot = $second
-        Read1Sha256 = $firstSha
-        Read2Sha256 = $secondSha
+
+    $previousSha = $null
+    $consecutiveReads = 0
+    for ($observation = 1; $observation -le $MaximumObservations; $observation++) {
+        $snapshot = Get-CompleteTargetStateSnapshot -Client $Client `
+            -ExactFilterUrl $ExactFilterUrl
+        $snapshotSha = Get-CompleteTargetStateSha256 -Snapshot $snapshot
+        if ($null -ne $previousSha -and $snapshotSha -ceq $previousSha) {
+            $consecutiveReads++
+        } else {
+            $consecutiveReads = 1
+        }
+        if ($consecutiveReads -ge $RequiredConsecutiveReads) {
+            return [pscustomobject]@{
+                Snapshot = $snapshot
+                Read1Sha256 = $previousSha
+                Read2Sha256 = $snapshotSha
+                ObservationCount = $observation
+                ConsecutiveReadCount = $consecutiveReads
+            }
+        }
+        $previousSha = $snapshotSha
+        if ($observation -lt $MaximumObservations -and $RetryDelayMilliseconds -gt 0) {
+            Start-Sleep -Milliseconds $RetryDelayMilliseconds
+        }
+    }
+    throw ("Two consecutive complete target-state snapshots were not identical " +
+        "within $MaximumObservations bounded observations")
+}
+
+function Get-CspProbeInspectionReport {
+    param([Parameter(Mandatory = $true)] $Client)
+    $stable = Get-StableCompleteTargetStateSnapshot -Client $Client -ExactFilterUrl $null
+    $probePresent = [bool] $stable.Snapshot.UserscriptSnapshot.Exists
+    return [ordered]@{
+        command = 'csp-probe-inspect'
+        ok = $true
+        state_sha256 = [string] $stable.Read2Sha256
+        read_1_sha256 = [string] $stable.Read1Sha256
+        read_2_sha256 = [string] $stable.Read2Sha256
+        two_read_stable = $true
+        stability_observation_count = [int] $stable.ObservationCount
+        probe_present = $probePresent
+        probe_count = if ($probePresent) { 1 } else { 0 }
+        probe_name = $script:CspProbeUserscriptName
+        probe_version = $script:CspProbeUserscriptVersion
+        probe_source_sha256 = $script:CspProbeSourceSha256
+        endpoint = $script:CspProbeEndpoint
+        adguard_configuration_changed = $false
     }
 }
 
@@ -2396,15 +2644,17 @@ function New-StateBackup {
                 -RelativePath 'target-userscript.code.js' -Content $userscriptSnapshot.Code `
                 -Role 'target-userscript-code'
             $payloads.Add($codePayload)
-            $gmPayload = Write-BackupPayload -Directory $directory `
-                -RelativePath 'target-userscript.gm.txt' -Content $userscriptSnapshot.Gm `
+            $gmPropertiesPayload = Write-BackupPayload -Directory $directory `
+                -RelativePath 'target-userscript.gm-properties.json' `
+                -Content $userscriptSnapshot.GmProperties `
                 -Role 'target-userscript-gm-properties'
-            $payloads.Add($gmPayload)
+            $payloads.Add($gmPropertiesPayload)
             $userscriptRecord = ConvertTo-UserscriptMetadataRecord -Info $userscriptSnapshot.Info
             $userscriptRecord.code_sha256 = Get-CanonicalTextSha256 -Text $userscriptSnapshot.Code
-            $userscriptRecord.gm_sha256 = Get-CanonicalTextSha256 -Text $userscriptSnapshot.Gm
+            $userscriptRecord.gm_properties_sha256 = Get-CanonicalTextSha256 `
+                -Text $userscriptSnapshot.GmProperties
             $userscriptRecord.code_payload = $codePayload.path
-            $userscriptRecord.gm_payload = $gmPayload.path
+            $userscriptRecord.gm_properties_payload = $gmPropertiesPayload.path
         }
 
         $filterRecords = New-Object 'System.Collections.Generic.List[object]'
@@ -2509,6 +2759,18 @@ function Set-RecoveryContext {
         $quotedBackupPath + ' -Apply')
 }
 
+function Set-CspProbeRecoveryContext {
+    param([Parameter(Mandatory = $true)][string] $Directory)
+    $resolved = [System.IO.Path]::GetFullPath($Directory)
+    $script:RecoveryBackupPath = $resolved
+    $scriptPath = [System.IO.Path]::GetFullPath($PSCommandPath)
+    $quotedScriptPath = "'" + $scriptPath.Replace("'", "''") + "'"
+    $quotedBackupPath = "'" + $resolved.Replace("'", "''") + "'"
+    $script:RecoveryCommand = ('powershell.exe -NoProfile -ExecutionPolicy Bypass ' +
+        '-File ' + $quotedScriptPath + ' csp-probe-restore -BackupPath ' +
+        $quotedBackupPath + ' -Apply')
+}
+
 function Write-TransactionJournalEvent {
     param(
         [Parameter(Mandatory = $true)][string] $Directory,
@@ -2528,11 +2790,30 @@ function Write-TransactionJournalEvent {
         -Content ($record | ConvertTo-Json -Depth 10)
 }
 
+function Get-ExpectedUserscriptPostState {
+    param(
+        [Parameter(Mandatory = $true)] $Snapshot,
+        [Parameter(Mandatory = $true)] $Desired
+    )
+    $gmProperties = if ($Snapshot.Exists) {
+        [string] $Snapshot.GmProperties
+    } else {
+        [string] $Desired.FreshInstallGmProperties
+    }
+    return [pscustomobject]@{
+        CodeSha256 = Get-CanonicalTextSha256 -Text $Desired.Meta.Content
+        GmPropertiesSha256 = Get-CanonicalTextSha256 -Text $gmProperties
+        IsCustom = [bool] $Desired.Meta.IsCustom
+        IsStyle = [bool] $Desired.Meta.IsStyle
+    }
+}
+
 function Initialize-TransactionJournal {
     param(
         [Parameter(Mandatory = $true)][string] $Directory,
         [Parameter(Mandatory = $true)][string] $CommandName,
         [AllowNull()] $DesiredUserscript,
+        [AllowNull()] $BeforeUserscriptSnapshot,
         [AllowNull()] $DesiredFilter,
         [AllowNull()] $MigrationPlan
     )
@@ -2540,15 +2821,28 @@ function Initialize-TransactionJournal {
     $manifestBytes = [System.IO.File]::ReadAllBytes($manifestPath)
     $userscriptAfter = $null
     if ($DesiredUserscript) {
+        if ($null -eq $BeforeUserscriptSnapshot) {
+            throw "Userscript transaction planning requires the validated pre-mutation snapshot"
+        }
+        $expectedPostState = Get-ExpectedUserscriptPostState `
+            -Snapshot $BeforeUserscriptSnapshot -Desired $DesiredUserscript
         $userscriptAfter = [ordered]@{
             exists = $true
             name = $DesiredUserscript.Name
             version = $DesiredUserscript.Version
-            code_sha256 = Get-CanonicalTextSha256 -Text $DesiredUserscript.Meta.Content
-            gm_sha256 = Get-CanonicalTextSha256 -Text $DesiredUserscript.Metadata
+            code_sha256 = [string] $expectedPostState.CodeSha256
+            gm_properties_sha256 = [string] $expectedPostState.GmPropertiesSha256
+            fresh_install_gm_properties_sha256 = [string] (
+                $DesiredUserscript.FreshInstallGmPropertiesSha256)
             enabled = $true
-            is_custom = $true
-            is_style = $false
+            is_custom = [bool] $expectedPostState.IsCustom
+            is_style = [bool] $expectedPostState.IsStyle
+            replacement_required = [bool] (
+                $BeforeUserscriptSnapshot.Exists -and
+                ([bool] $BeforeUserscriptSnapshot.Info.IsCustom -ne
+                    [bool] $expectedPostState.IsCustom -or
+                    [bool] $BeforeUserscriptSnapshot.Info.IsStyle -ne
+                    [bool] $expectedPostState.IsStyle))
         }
     }
     $filterAfter = $null
@@ -2794,23 +3088,25 @@ function Get-ValidatedBackup {
     }
 
     $userscriptSnapshot = [pscustomobject]@{
-        Exists = $false; Info = $null; Code = $null; Gm = $null
+        Exists = $false; Info = $null; Code = $null; GmProperties = $null
     }
     if ($null -ne $manifest.target_userscript) {
         $record = $manifest.target_userscript
         Assert-JsonProperties -Value $record -Names @('name', 'version', 'is_custom',
-            'is_enabled', 'is_style', 'code_sha256', 'gm_sha256', 'code_payload', 'gm_payload') `
+            'is_enabled', 'is_style', 'code_sha256', 'gm_properties_sha256', 'code_payload',
+            'gm_properties_payload') `
             -Label 'backup target userscript'
         if (-not $payloadByName.ContainsKey([string] $record.code_payload) -or
-            -not $payloadByName.ContainsKey([string] $record.gm_payload)) {
+            -not $payloadByName.ContainsKey([string] $record.gm_properties_payload)) {
             throw "Backup userscript payload reference is missing"
         }
         $code = ConvertFrom-StrictUtf8 -Bytes ([System.IO.File]::ReadAllBytes(
                 $payloadByName[[string] $record.code_payload]))
-        $gm = ConvertFrom-StrictUtf8 -Bytes ([System.IO.File]::ReadAllBytes(
-                $payloadByName[[string] $record.gm_payload]))
+        $gmProperties = ConvertFrom-StrictUtf8 -Bytes ([System.IO.File]::ReadAllBytes(
+                $payloadByName[[string] $record.gm_properties_payload]))
         if ((Get-CanonicalTextSha256 -Text $code) -cne [string] $record.code_sha256 -or
-            (Get-CanonicalTextSha256 -Text $gm) -cne [string] $record.gm_sha256) {
+            (Get-CanonicalTextSha256 -Text $gmProperties) -cne
+                [string] $record.gm_properties_sha256) {
             throw "Backup userscript semantic hashes failed validation"
         }
         $userscriptSnapshot = [pscustomobject]@{
@@ -2823,7 +3119,7 @@ function Get-ValidatedBackup {
                 IsStyle = [bool] $record.is_style
             }
             Code = $code
-            Gm = $gm
+            GmProperties = $gmProperties
         }
     }
 
@@ -2902,6 +3198,50 @@ function Get-ValidatedBackup {
     }
 }
 
+function Assert-CspProbeBackupContract {
+    param(
+        [Parameter(Mandatory = $true)] $Backup,
+        [Parameter(Mandatory = $true)] $Desired
+    )
+    if ($null -ne $Backup.Manifest.target_userscript -or
+        $Backup.UserscriptSnapshot.Exists) {
+        throw "CSP probe backup must prove that the fixed probe was absent before install"
+    }
+    if (@($Backup.Manifest.target_filters).Count -ne 0 -or
+        @($Backup.FilterSnapshot.States).Count -ne 0) {
+        throw "CSP probe backup unexpectedly contains a target filter"
+    }
+    $plan = $Backup.TransactionPlan
+    if (-not $plan -or [string] $plan.command -cne 'csp-probe-install' -or
+        $null -ne $plan.migration_after -or $null -ne $plan.filter_after) {
+        throw "Backup is not an exact CSP probe installation transaction"
+    }
+    $after = $plan.userscript_after
+    if (-not $after) {
+        throw "CSP probe transaction is missing its fixed userscript state"
+    }
+    Assert-JsonProperties -Value $after -Names @('exists', 'name', 'version',
+        'code_sha256', 'gm_properties_sha256', 'fresh_install_gm_properties_sha256',
+        'enabled', 'is_custom', 'is_style', 'replacement_required') `
+        -Label 'CSP probe transaction userscript plan'
+    $expectedPostState = Get-ExpectedUserscriptPostState `
+        -Snapshot $Backup.UserscriptSnapshot -Desired $Desired
+    if (-not [bool] $after.exists -or
+        [string] $after.name -cne $script:CspProbeUserscriptName -or
+        [string] $after.version -cne $script:CspProbeUserscriptVersion -or
+        [string] $after.code_sha256 -cne [string] $expectedPostState.CodeSha256 -or
+        [string] $after.gm_properties_sha256 -cne
+            [string] $expectedPostState.GmPropertiesSha256 -or
+        [string] $after.fresh_install_gm_properties_sha256 -cne
+            [string] $Desired.FreshInstallGmPropertiesSha256 -or
+        -not [bool] $after.enabled -or
+        [bool] $after.is_custom -ne [bool] $expectedPostState.IsCustom -or
+        [bool] $after.is_style -ne [bool] $expectedPostState.IsStyle -or
+        [bool] $after.replacement_required) {
+        throw "CSP probe transaction userscript state differs from the pinned source"
+    }
+}
+
 function Test-UserscriptSnapshotExact {
     param(
         [Parameter(Mandatory = $true)] $Left,
@@ -2915,7 +3255,7 @@ function Test-UserscriptSnapshotExact {
         [bool] $Left.Info.IsEnabled -eq [bool] $Right.Info.IsEnabled -and
         [bool] $Left.Info.IsStyle -eq [bool] $Right.Info.IsStyle -and
         [string] $Left.Code -ceq [string] $Right.Code -and
-        [string] $Left.Gm -ceq [string] $Right.Gm
+        [string] $Left.GmProperties -ceq [string] $Right.GmProperties
 }
 
 function Get-AllowedLegacyRestoreDelta {
@@ -2995,48 +3335,91 @@ function Assert-UserscriptRestorePreconditions {
     }
     $after = $TransactionPlan.userscript_after
     Assert-JsonProperties -Value $after -Names @('exists', 'name', 'version', 'code_sha256',
-        'gm_sha256', 'enabled', 'is_custom', 'is_style') -Label 'transaction userscript plan'
-    if (-not [bool] $after.exists -or -not $Current.Exists) {
+        'gm_properties_sha256', 'fresh_install_gm_properties_sha256', 'enabled',
+        'is_custom', 'is_style', 'replacement_required') `
+        -Label 'transaction userscript plan'
+    if (-not [bool] $after.exists) {
         throw "Current userscript existence is not an authorized transaction prefix"
     }
+
+    $replacementRequired = $BackupSnapshot.Exists -and
+        ([bool] $BackupSnapshot.Info.IsCustom -ne [bool] $after.is_custom -or
+            [bool] $BackupSnapshot.Info.IsStyle -ne [bool] $after.is_style)
+    if ([bool] $after.replacement_required -ne [bool] $replacementRequired) {
+        throw "Transaction userscript replacement classification is inconsistent"
+    }
+
+    # A classification replacement starts with RemoveUserscript. Absence is an
+    # authorized durable-intent prefix only when the bound before/after classes
+    # prove that the transaction had to replace the existing entry.
+    if (-not $Current.Exists) {
+        if ($replacementRequired) { return $true }
+        throw "Current userscript existence is not an authorized transaction prefix"
+    }
+
+    $currentCodeSha = Get-CanonicalTextSha256 -Text ([string] $Current.Code)
+    $currentGmSha = Get-CanonicalTextSha256 -Text ([string] $Current.GmProperties)
+    $afterCodeSha = [string] $after.code_sha256
+    $afterGmSha = [string] $after.gm_properties_sha256
+    $afterVersion = [string] $after.version
+    $afterEnabled = [bool] $after.enabled
+    $freshGmSha = [string] $after.fresh_install_gm_properties_sha256
     $identityMatchesAfter = [string] $Current.Info.Name -ceq [string] $after.name -and
         [bool] $Current.Info.IsCustom -eq [bool] $after.is_custom -and
         [bool] $Current.Info.IsStyle -eq [bool] $after.is_style
+    $identityMatchesBefore = $BackupSnapshot.Exists -and
+        [string] $Current.Info.Name -ceq [string] $BackupSnapshot.Info.Name -and
+        [bool] $Current.Info.IsCustom -eq [bool] $BackupSnapshot.Info.IsCustom -and
+        [bool] $Current.Info.IsStyle -eq [bool] $BackupSnapshot.Info.IsStyle
+    if ($replacementRequired -and $identityMatchesBefore) {
+        # A restore of a classification replacement is itself resumable. After
+        # reinstalling the original class, GM values and enabled status may
+        # still be at their fresh-install values; the atomic install may expose
+        # either enabled value before the explicit snapshot-status write.
+        $beforeCodeSha = Get-CanonicalTextSha256 -Text ([string] $BackupSnapshot.Code)
+        $beforeGmSha = Get-CanonicalTextSha256 `
+            -Text ([string] $BackupSnapshot.GmProperties)
+        $isRollbackInstallPrefix = $currentCodeSha -ceq $beforeCodeSha -and
+            [string] $Current.Info.Version -ceq [string] $BackupSnapshot.Info.Version -and
+            ($currentGmSha -ceq $freshGmSha -or $currentGmSha -ceq $beforeGmSha)
+        if ($isRollbackInstallPrefix) { return $true }
+        throw "Current userscript is not an enumerated rollback-prefix state"
+    }
     if (-not $identityMatchesAfter) {
         throw "Current userscript identity is not an authorized transaction prefix"
     }
-    $currentCodeSha = Get-CanonicalTextSha256 -Text ([string] $Current.Code)
-    $currentGmSha = Get-CanonicalTextSha256 -Text ([string] $Current.Gm)
-    $afterCodeSha = [string] $after.code_sha256
-    $afterGmSha = [string] $after.gm_sha256
-    $afterVersion = [string] $after.version
-    $afterEnabled = [bool] $after.enabled
 
     $isAllowedPrefix = $false
-    if ($BackupSnapshot.Exists) {
+    if ($replacementRequired) {
+        # InstallUserscriptFromMeta may expose the replacement either disabled
+        # or enabled. The next write restores the independent GM value-store,
+        # followed by the explicit enabled=true write.
+        $isAllowedPrefix = $currentCodeSha -ceq $afterCodeSha -and
+            [string] $Current.Info.Version -ceq $afterVersion -and
+            ($currentGmSha -ceq $freshGmSha -or $currentGmSha -ceq $afterGmSha) -and
+            ([bool] $Current.Info.IsEnabled -eq $false -or
+                [bool] $Current.Info.IsEnabled -eq $afterEnabled)
+    } elseif ($BackupSnapshot.Exists) {
         $beforeCodeSha = Get-CanonicalTextSha256 -Text ([string] $BackupSnapshot.Code)
-        $beforeGmSha = Get-CanonicalTextSha256 -Text ([string] $BackupSnapshot.Gm)
+        $beforeGmSha = Get-CanonicalTextSha256 `
+            -Text ([string] $BackupSnapshot.GmProperties)
         $beforeEnabled = [bool] $BackupSnapshot.Info.IsEnabled
-        # Forward API order is UpdateCode -> UpdateGM -> SetStatus. Only those exact
-        # prefixes are recoverable; arbitrary fieldwise mixtures are rejected.
+        # Forward API order is UpdateCode -> SetStatus. GM_* persistent values are
+        # independent user data and remain byte-exact throughout a normal update.
         $isAfterCodePrefix = $currentCodeSha -ceq $afterCodeSha -and
             $currentGmSha -ceq $beforeGmSha -and
-            [string] $Current.Info.Version -ceq [string] $BackupSnapshot.Info.Version -and
-            [bool] $Current.Info.IsEnabled -eq $beforeEnabled
-        $isAfterGmPrefix = $currentCodeSha -ceq $afterCodeSha -and
-            $currentGmSha -ceq $afterGmSha -and
             [string] $Current.Info.Version -ceq $afterVersion -and
             [bool] $Current.Info.IsEnabled -eq $beforeEnabled
         $isAfterEnablePrefix = $currentCodeSha -ceq $afterCodeSha -and
             $currentGmSha -ceq $afterGmSha -and
             [string] $Current.Info.Version -ceq $afterVersion -and
             [bool] $Current.Info.IsEnabled -eq $afterEnabled
-        $isAllowedPrefix = $isAfterCodePrefix -or $isAfterGmPrefix -or $isAfterEnablePrefix
+        $isAllowedPrefix = $isAfterCodePrefix -or $isAfterEnablePrefix
     } else {
         # InstallUserscriptFromMeta is one atomic IPC substep. AdGuard versions may
         # expose it disabled or already enabled before the explicit SetStatus call.
         $isAllowedPrefix = $currentCodeSha -ceq $afterCodeSha -and
-            $currentGmSha -ceq $afterGmSha -and
+            $currentGmSha -ceq $freshGmSha -and
             [string] $Current.Info.Version -ceq $afterVersion -and
             ([bool] $Current.Info.IsEnabled -eq $false -or
                 [bool] $Current.Info.IsEnabled -eq $afterEnabled)
@@ -3335,10 +3718,70 @@ function Prepare-UserscriptMeta {
         [string]::IsNullOrWhiteSpace($Source.Meta.Content)) {
         throw "AdGuard did not parse the expected userscript metadata and content"
     }
+    $metaProperties = @($Source.Meta.PSObject.Properties | ForEach-Object { $_.Name })
+    foreach ($requiredProperty in @('IsCustom', 'IsStyle')) {
+        if ($metaProperties -notcontains $requiredProperty) {
+            throw "AdGuard userscript metadata is missing classification: $requiredProperty"
+        }
+    }
     if ($Source.Meta.Version -cne $Source.Version) {
         throw "AdGuard parsed a different userscript version"
     }
+    if ([bool] $Source.Meta.IsStyle) {
+        throw "AdGuard parsed the authenticated userscript as a style extension"
+    }
+    if ((Get-CanonicalTextSha256 -Text ([string] $Source.Meta.Content)) -cne
+            (Get-CanonicalTextSha256 -Text ([string] $Source.Text))) {
+        throw "AdGuard parsed userscript content that differs from the authenticated source"
+    }
+    # GetUserscriptMeta parses a local/manual source with IsCustom=false in
+    # AdGuard 7.22. That entry is stored but not selected for execution. Only
+    # after the complete authenticated source contract above is proven may the
+    # installation request be promoted to an executable manual userscript.
+    $Source.Meta.IsCustom = $true
+    if (-not [bool] $Source.Meta.IsCustom) {
+        throw "AdGuard userscript metadata rejected executable custom classification"
+    }
     return $Source
+}
+
+function Get-CspProbeParsedMetaEvidence {
+    param([Parameter(Mandatory = $true)] $Meta)
+    $matches = @($Meta.Match | ForEach-Object { [string] $_ })
+    $includes = @($Meta.Include | ForEach-Object { [string] $_ })
+    $excludes = @($Meta.Exclude | ForEach-Object { [string] $_ })
+    $grants = @($Meta.Grant | ForEach-Object { [string] $_ })
+    $connects = @($Meta.Connect | ForEach-Object { [string] $_ })
+    $requires = @($Meta.Require)
+    $resources = @($Meta.Resource)
+    $downloadUri = $null
+    $downloadUriValid = [Uri]::TryCreate(
+        [string] $Meta.DownloadUrl,
+        [UriKind]::Absolute,
+        [ref] $downloadUri
+    )
+    return [ordered]@{
+        match_count = $matches.Count
+        match_exact = $matches.Count -eq 1 -and
+            $matches[0] -ceq $script:CspProbeEndpoint
+        include_count = $includes.Count
+        exclude_count = $excludes.Count
+        grant_count = $grants.Count
+        grant_exact = $grants.Count -eq 1 -and $grants[0] -ceq 'GM_addElement'
+        connect_count = $connects.Count
+        require_count = $requires.Count
+        resource_count = $resources.Count
+        noframes = [bool] $Meta.IsNoFrames
+        run_at_document_start = [string] $Meta.RunAt -ceq 'document-start'
+        namespace_exact = [string] $Meta.Namespace -ceq
+            'https://github.com/heelee912/adguard-hotdeal-focus/csp-probe'
+        download_url_absent = [string]::IsNullOrWhiteSpace([string] $Meta.DownloadUrl)
+        download_url_is_file = $downloadUriValid -and [bool] $downloadUri.IsFile
+        download_url_is_https = $downloadUriValid -and
+            [string] $downloadUri.Scheme -ceq 'https'
+        update_url_absent = [string]::IsNullOrWhiteSpace([string] $Meta.UpdateUrl)
+        unsafe_csp_required = [bool] $Meta.UnsafeCspRequired
+    }
 }
 
 function Compare-Version {
@@ -3355,25 +3798,47 @@ function Compare-Version {
     return [string]::CompareOrdinal($Left, $Right)
 }
 
+function Assert-ReaderGateSnapshotOwnership {
+    param([Parameter(Mandatory = $true)] $Snapshot)
+    $source = [string] $Snapshot.Code
+    $expectedDirectives = [ordered]@{
+        name = $UserscriptName
+        namespace = 'https://github.com/heelee912/adguard-hotdeal-focus'
+        downloadURL = 'https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js'
+        updateURL = 'https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js'
+    }
+    foreach ($entry in $expectedDirectives.GetEnumerator()) {
+        $matches = @([regex]::Matches(
+                $source,
+                ('(?m)^//\s+@' + [regex]::Escape([string] $entry.Key) +
+                    '\s+(?<value>.+?)\s*$')
+            ))
+        if ($matches.Count -ne 1 -or
+            $matches[0].Groups['value'].Value -cne [string] $entry.Value) {
+            throw "Existing same-name userscript lacks exact Reader Gate ownership metadata"
+        }
+    }
+}
+
 function Assert-UserscriptMutationPreconditions {
     param(
         [Parameter(Mandatory = $true)] $Snapshot,
         [Parameter(Mandatory = $true)] $Desired
     )
-    if ($Snapshot.Exists -and -not $Snapshot.Info.IsCustom) {
-        throw "Refusing to overwrite a non-custom userscript"
+    if ($Snapshot.Exists -and -not [bool] $Snapshot.Info.IsCustom) {
+        # AdGuard 7.22 may store a local/manual source as IsCustom=false, which
+        # prevents execution. Exact source coordinates prove that this broken
+        # same-name entry is ours and may be transactionally reclassified.
+        Assert-ReaderGateSnapshotOwnership -Snapshot $Snapshot
     }
     if ($Snapshot.Exists) {
         $versionOrder = Compare-Version -Left $Desired.Version -Right $Snapshot.Info.Version
         $currentCodeSha = Get-CanonicalTextSha256 -Text $Snapshot.Code
         $desiredCodeSha = Get-CanonicalTextSha256 -Text $Desired.Meta.Content
-        $currentGmSha = Get-CanonicalTextSha256 -Text $Snapshot.Gm
-        $desiredGmSha = Get-CanonicalTextSha256 -Text $Desired.Metadata
         if ($versionOrder -lt 0) {
             throw "Userscript version downgrade is forbidden"
         }
-        if ($versionOrder -eq 0 -and
-            ($currentCodeSha -cne $desiredCodeSha -or $currentGmSha -cne $desiredGmSha)) {
+        if ($versionOrder -eq 0 -and $currentCodeSha -cne $desiredCodeSha) {
             throw "Userscript bytes changed without a strictly newer version"
         }
     }
@@ -3384,18 +3849,141 @@ function Assert-BackupUserscriptMatchesDesired {
         [Parameter(Mandatory = $true)] $Snapshot,
         [Parameter(Mandatory = $true)] $Desired
     )
-    if (-not $Snapshot.Exists -or -not [bool] $Snapshot.Info.IsCustom -or
-        -not [bool] $Snapshot.Info.IsEnabled -or [bool] $Snapshot.Info.IsStyle -or
+    if (-not $Snapshot.Exists -or -not [bool] $Snapshot.Info.IsEnabled -or
+        [bool] $Snapshot.Info.IsCustom -ne [bool] $Desired.Meta.IsCustom -or
+        [bool] $Snapshot.Info.IsStyle -ne [bool] $Desired.Meta.IsStyle -or
         [string] $Snapshot.Info.Name -cne [string] $Desired.Name -or
         [string] $Snapshot.Info.Version -cne [string] $Desired.Version) {
         throw "Completed backup does not contain the exact enabled desired userscript"
     }
     if ((Get-CanonicalTextSha256 -Text ([string] $Snapshot.Code)) -cne
-            (Get-CanonicalTextSha256 -Text ([string] $Desired.Meta.Content)) -or
-        (Get-CanonicalTextSha256 -Text ([string] $Snapshot.Gm)) -cne
-            (Get-CanonicalTextSha256 -Text ([string] $Desired.Metadata))) {
-        throw "Completed backup userscript code or canonical GM metadata differs from the release"
+            (Get-CanonicalTextSha256 -Text ([string] $Desired.Meta.Content))) {
+        throw "Completed backup userscript code differs from the release contract"
     }
+}
+
+function Get-UserscriptMetaForSnapshotRestore {
+    param(
+        [Parameter(Mandatory = $true)] $Client,
+        [Parameter(Mandatory = $true)] $Snapshot
+    )
+    if (-not $Snapshot.Exists -or
+        [string] $Snapshot.Info.Name -cne [string] $UserscriptName) {
+        throw "Userscript snapshot restore metadata identity is invalid"
+    }
+    $temporary = Join-Path ([System.IO.Path]::GetTempPath()) (
+        'hotdeal-focus-restore-' + [Guid]::NewGuid().ToString('N') + '.user.js')
+    [System.IO.File]::WriteAllBytes(
+        $temporary,
+        $script:Utf8NoBom.GetBytes([string] $Snapshot.Code)
+    )
+    $script:TemporaryPaths.Add($temporary)
+    $meta = $Client.GetUserscriptMeta($temporary)
+    if (-not $meta -or [string] $meta.Name -cne [string] $Snapshot.Info.Name -or
+        [string] $meta.Version -cne [string] $Snapshot.Info.Version -or
+        [string]::IsNullOrWhiteSpace([string] $meta.Content)) {
+        throw "AdGuard could not parse the exact backup userscript metadata"
+    }
+    $metaProperties = @($meta.PSObject.Properties | ForEach-Object { $_.Name })
+    foreach ($requiredProperty in @('IsCustom', 'IsStyle')) {
+        if ($metaProperties -notcontains $requiredProperty) {
+            throw "Backup userscript metadata is missing classification: $requiredProperty"
+        }
+    }
+    if ((Get-CanonicalTextSha256 -Text ([string] $meta.Content)) -cne
+            (Get-CanonicalTextSha256 -Text ([string] $Snapshot.Code))) {
+        throw "AdGuard parsed backup userscript content that differs from the snapshot"
+    }
+    # Classification is restored only after the complete backup identity and
+    # content have been authenticated against the validated snapshot.
+    $meta.IsCustom = [bool] $Snapshot.Info.IsCustom
+    $meta.IsStyle = [bool] $Snapshot.Info.IsStyle
+    if ([bool] $meta.IsCustom -ne [bool] $Snapshot.Info.IsCustom -or
+        [bool] $meta.IsStyle -ne [bool] $Snapshot.Info.IsStyle) {
+        throw "AdGuard rejected the exact backup userscript classification"
+    }
+    return $meta
+}
+
+function Assert-UserscriptInstallReceipt {
+    param(
+        [Parameter(Mandatory = $true)][AllowNull()] $Receipt,
+        [Parameter(Mandatory = $true)] $ExpectedMeta,
+        [Parameter(Mandatory = $true)][string] $ExpectedName,
+        [Parameter(Mandatory = $true)][string] $ExpectedVersion
+    )
+    if (-not $Receipt -or -not $Receipt.Meta -or
+        [string] $Receipt.Meta.Name -cne $ExpectedName -or
+        [string] $Receipt.Meta.Version -cne $ExpectedVersion -or
+        [bool] $Receipt.Meta.IsCustom -ne [bool] $ExpectedMeta.IsCustom -or
+        [bool] $Receipt.Meta.IsStyle -ne [bool] $ExpectedMeta.IsStyle -or
+        (Get-CanonicalTextSha256 -Text ([string] $Receipt.Meta.Content)) -cne
+            (Get-CanonicalTextSha256 -Text ([string] $ExpectedMeta.Content))) {
+        throw "AdGuard userscript installation receipt differs from the exact source"
+    }
+}
+
+function Assert-UserscriptAbsent {
+    param(
+        [Parameter(Mandatory = $true)] $Client,
+        [ValidateRange(2, 100)]
+        [int] $MaximumObservations = $script:AdGuardStateVisibilityMaxObservations,
+        [ValidateRange(0, 5000)]
+        [int] $RetryDelayMilliseconds = $script:AdGuardStateVisibilityDelayMilliseconds,
+        [ValidateRange(2, 10)]
+        [int] $RequiredConsecutiveReads = `
+            $script:AdGuardStateVisibilityRequiredConsecutiveReads
+    )
+    if ($RequiredConsecutiveReads -gt $MaximumObservations) {
+        throw "Required consecutive reads exceed the bounded observation count"
+    }
+    $consecutiveReads = 0
+    for ($observation = 1; $observation -le $MaximumObservations; $observation++) {
+        $targets = @(Get-TargetUserscripts -Client $Client)
+        if ($targets.Count -eq 0) {
+            $consecutiveReads++
+            if ($consecutiveReads -ge $RequiredConsecutiveReads) { return $observation }
+        } else {
+            $consecutiveReads = 0
+        }
+        if ($observation -lt $MaximumObservations -and $RetryDelayMilliseconds -gt 0) {
+            Start-Sleep -Milliseconds $RetryDelayMilliseconds
+        }
+    }
+    throw ("Target userscript absence did not remain exact for " +
+        "$RequiredConsecutiveReads consecutive reads within $MaximumObservations observations")
+}
+
+function Assert-UserscriptSnapshotConverged {
+    param(
+        [Parameter(Mandatory = $true)] $Client,
+        [Parameter(Mandatory = $true)] $ExpectedSnapshot,
+        [ValidateRange(2, 100)]
+        [int] $MaximumObservations = $script:AdGuardStateVisibilityMaxObservations,
+        [ValidateRange(0, 5000)]
+        [int] $RetryDelayMilliseconds = $script:AdGuardStateVisibilityDelayMilliseconds,
+        [ValidateRange(2, 10)]
+        [int] $RequiredConsecutiveReads = `
+            $script:AdGuardStateVisibilityRequiredConsecutiveReads
+    )
+    if ($RequiredConsecutiveReads -gt $MaximumObservations) {
+        throw "Required consecutive reads exceed the bounded observation count"
+    }
+    $consecutiveReads = 0
+    for ($observation = 1; $observation -le $MaximumObservations; $observation++) {
+        $current = Get-UserscriptSnapshot -Client $Client
+        if (Test-UserscriptSnapshotExact -Left $current -Right $ExpectedSnapshot) {
+            $consecutiveReads++
+            if ($consecutiveReads -ge $RequiredConsecutiveReads) { return $current }
+        } else {
+            $consecutiveReads = 0
+        }
+        if ($observation -lt $MaximumObservations -and $RetryDelayMilliseconds -gt 0) {
+            Start-Sleep -Milliseconds $RetryDelayMilliseconds
+        }
+    }
+    throw ("Exact userscript snapshot did not converge for " +
+        "$RequiredConsecutiveReads consecutive reads within $MaximumObservations observations")
 }
 
 function Invoke-UserscriptMutation {
@@ -3406,40 +3994,107 @@ function Invoke-UserscriptMutation {
         [AllowNull()][string] $JournalDirectory
     )
     Assert-UserscriptMutationPreconditions -Snapshot $Snapshot -Desired $Desired
-    if ($Snapshot.Exists) {
+    $expectedPostState = Get-ExpectedUserscriptPostState -Snapshot $Snapshot -Desired $Desired
+    $replacementRequired = $Snapshot.Exists -and
+        ([bool] $Snapshot.Info.IsCustom -ne [bool] $Desired.Meta.IsCustom -or
+            [bool] $Snapshot.Info.IsStyle -ne [bool] $Desired.Meta.IsStyle)
+
+    if ($replacementRequired) {
+        if ($JournalDirectory) {
+            Write-TransactionJournalEvent -Directory $JournalDirectory `
+                -Event 'intent-userscript-reclassification-remove' `
+                -Details ([ordered]@{
+                        before_is_custom = [bool] $Snapshot.Info.IsCustom
+                        before_is_style = [bool] $Snapshot.Info.IsStyle
+                        after_is_custom = [bool] $Desired.Meta.IsCustom
+                        after_is_style = [bool] $Desired.Meta.IsStyle
+                        preserved_gm_properties_sha256 = `
+                            [string] $expectedPostState.GmPropertiesSha256
+                    })
+        }
+        $Client.RemoveUserscript($UserscriptName)
+        $absenceObservationCount = Assert-UserscriptAbsent -Client $Client
+        if ($JournalDirectory) {
+            Write-TransactionJournalEvent -Directory $JournalDirectory `
+                -Event 'userscript-reclassification-absence-verified' `
+                -Details ([ordered]@{
+                        observation_count = [int] $absenceObservationCount
+                    })
+        }
+    }
+
+    if ($Snapshot.Exists -and -not $replacementRequired) {
         if ($JournalDirectory) {
             Write-TransactionJournalEvent -Directory $JournalDirectory `
                 -Event 'intent-userscript-update-code' `
                 -Details ([ordered]@{
                         code_sha256 = Get-CanonicalTextSha256 -Text $Desired.Meta.Content
+                        preserved_gm_properties_sha256 = `
+                            [string] $expectedPostState.GmPropertiesSha256
                     })
         }
-        $Client.UpdateUserscriptCode($UserscriptName, $Desired.Meta.Content)
-        if ($JournalDirectory) {
-            Write-TransactionJournalEvent -Directory $JournalDirectory `
-                -Event 'intent-userscript-update-gm' `
-                -Details ([ordered]@{
-                        gm_sha256 = Get-CanonicalTextSha256 -Text $Desired.Metadata
-                    })
-        }
-        $Client.UpdateUserscriptGmProperties($UserscriptName, $Desired.Metadata)
+        [void] $Client.UpdateUserscriptCode($UserscriptName, $Desired.Meta.Content)
     } else {
         if ($JournalDirectory) {
             Write-TransactionJournalEvent -Directory $JournalDirectory `
                 -Event 'intent-userscript-install' `
                 -Details ([ordered]@{
                         code_sha256 = Get-CanonicalTextSha256 -Text $Desired.Meta.Content
-                        gm_sha256 = Get-CanonicalTextSha256 -Text $Desired.Metadata
+                        expected_fresh_gm_properties_sha256 = `
+                            [string] $Desired.FreshInstallGmPropertiesSha256
+                        replacement = [bool] $replacementRequired
+                        is_custom = [bool] $Desired.Meta.IsCustom
+                        is_style = [bool] $Desired.Meta.IsStyle
                     })
         }
-        [void] $Client.InstallUserscriptFromMeta($Desired.Meta)
+        $installReceipt = $Client.InstallUserscriptFromMeta($Desired.Meta)
+        Assert-UserscriptInstallReceipt -Receipt $installReceipt `
+            -ExpectedMeta $Desired.Meta -ExpectedName $Desired.Name `
+            -ExpectedVersion $Desired.Version
+        if ($JournalDirectory) {
+            Write-TransactionJournalEvent -Directory $JournalDirectory `
+                -Event 'userscript-install-accepted' `
+                -Details ([ordered]@{
+                        version = [string] $installReceipt.Meta.Version
+                        initially_enabled = [bool] $installReceipt.IsEnabled
+                        is_custom = [bool] $installReceipt.Meta.IsCustom
+                        is_style = [bool] $installReceipt.Meta.IsStyle
+                        code_sha256 = Get-CanonicalTextSha256 `
+                            -Text ([string] $installReceipt.Meta.Content)
+                    })
+        }
+    }
+    if ($replacementRequired) {
+        if ($JournalDirectory) {
+            Write-TransactionJournalEvent -Directory $JournalDirectory `
+                -Event 'intent-userscript-reclassification-restore-gm' `
+                -Details ([ordered]@{
+                        gm_properties_sha256 = `
+                            [string] $expectedPostState.GmPropertiesSha256
+                    })
+        }
+        [void] $Client.UpdateUserscriptGmProperties(
+            $UserscriptName,
+            [string] $Snapshot.GmProperties
+        )
     }
     if ($JournalDirectory) {
         Write-TransactionJournalEvent -Directory $JournalDirectory `
             -Event 'intent-userscript-enable' -Details ([ordered]@{ enabled = $true })
     }
-    $Client.SetUserscriptStatus($UserscriptName, $true)
-    Assert-UserscriptInstalled -Client $Client -Desired $Desired
+    [void] $Client.SetUserscriptStatus($UserscriptName, $true)
+    try {
+        return Assert-UserscriptInstalled -Client $Client -Desired $Desired `
+            -ExpectedPostState $expectedPostState
+    }
+    catch {
+        if ($JournalDirectory) {
+            Write-TransactionJournalEvent -Directory $JournalDirectory `
+                -Event 'userscript-convergence-failed' `
+                -Details ([ordered]@{ error = [string] $_.Exception.Message })
+        }
+        throw
+    }
 }
 
 function Restore-UserscriptSnapshot {
@@ -3450,97 +4105,243 @@ function Restore-UserscriptSnapshot {
     )
     $current = @(Get-TargetUserscripts -Client $Client)
     if ($Snapshot.Exists) {
-        if ($current.Count -ne 1) {
-            throw "Cannot roll back because the previous userscript no longer exists uniquely"
+        if ($current.Count -gt 1) {
+            throw "Cannot roll back a non-unique userscript"
         }
-        # Reverse the forward API order so a hard crash during rollback remains
-        # one of the same enumerated forward prefixes.
-        if ($JournalDirectory) {
-            Write-TransactionJournalEvent -Directory $JournalDirectory `
-                -Event 'intent-rollback-userscript-status' `
-                -Details ([ordered]@{ enabled = [bool] $Snapshot.Info.IsEnabled })
+        $classificationDiffers = $current.Count -eq 0 -or
+            [bool] $current[0].IsCustom -ne [bool] $Snapshot.Info.IsCustom -or
+            [bool] $current[0].IsStyle -ne [bool] $Snapshot.Info.IsStyle
+        if ($classificationDiffers) {
+            # Parse and authenticate the backup before removing any current
+            # entry. Classification cannot be changed in place by AdGuard.
+            $restoreMeta = Get-UserscriptMetaForSnapshotRestore `
+                -Client $Client -Snapshot $Snapshot
+            if ($current.Count -eq 1) {
+                if ($JournalDirectory) {
+                    Write-TransactionJournalEvent -Directory $JournalDirectory `
+                        -Event 'intent-rollback-userscript-reclassification-remove' `
+                        -Details ([ordered]@{
+                                current_is_custom = [bool] $current[0].IsCustom
+                                restore_is_custom = [bool] $Snapshot.Info.IsCustom
+                            })
+                }
+                $Client.RemoveUserscript($UserscriptName)
+                $absenceObservationCount = Assert-UserscriptAbsent -Client $Client
+                if ($JournalDirectory) {
+                    Write-TransactionJournalEvent -Directory $JournalDirectory `
+                        -Event 'rollback-userscript-absence-verified' `
+                        -Details ([ordered]@{
+                                observation_count = [int] $absenceObservationCount
+                            })
+                }
+            }
+            if ($JournalDirectory) {
+                Write-TransactionJournalEvent -Directory $JournalDirectory `
+                    -Event 'intent-rollback-userscript-reclassification-install' `
+                    -Details ([ordered]@{
+                            version = [string] $Snapshot.Info.Version
+                            is_custom = [bool] $Snapshot.Info.IsCustom
+                            is_style = [bool] $Snapshot.Info.IsStyle
+                            code_sha256 = Get-CanonicalTextSha256 -Text $Snapshot.Code
+                        })
+            }
+            $installReceipt = $Client.InstallUserscriptFromMeta($restoreMeta)
+            Assert-UserscriptInstallReceipt -Receipt $installReceipt `
+                -ExpectedMeta $restoreMeta -ExpectedName $Snapshot.Info.Name `
+                -ExpectedVersion $Snapshot.Info.Version
+            if ($JournalDirectory) {
+                Write-TransactionJournalEvent -Directory $JournalDirectory `
+                    -Event 'rollback-userscript-install-accepted' `
+                    -Details ([ordered]@{
+                            initially_enabled = [bool] $installReceipt.IsEnabled
+                            is_custom = [bool] $installReceipt.Meta.IsCustom
+                            is_style = [bool] $installReceipt.Meta.IsStyle
+                        })
+            }
+            if ($JournalDirectory) {
+                Write-TransactionJournalEvent -Directory $JournalDirectory `
+                    -Event 'intent-rollback-userscript-gm' `
+                    -Details ([ordered]@{
+                            gm_properties_sha256 = Get-CanonicalTextSha256 `
+                                -Text $Snapshot.GmProperties
+                        })
+            }
+            [void] $Client.UpdateUserscriptGmProperties(
+                $UserscriptName,
+                $Snapshot.GmProperties
+            )
+            if ($JournalDirectory) {
+                Write-TransactionJournalEvent -Directory $JournalDirectory `
+                    -Event 'intent-rollback-userscript-status' `
+                    -Details ([ordered]@{ enabled = [bool] $Snapshot.Info.IsEnabled })
+            }
+            $Client.SetUserscriptStatus($UserscriptName, [bool] $Snapshot.Info.IsEnabled)
+        } else {
+            # Reverse the normal UpdateCode -> SetStatus forward order. GM_*
+            # values are restored independently before the original code.
+            if ($JournalDirectory) {
+                Write-TransactionJournalEvent -Directory $JournalDirectory `
+                    -Event 'intent-rollback-userscript-status' `
+                    -Details ([ordered]@{ enabled = [bool] $Snapshot.Info.IsEnabled })
+            }
+            $Client.SetUserscriptStatus($UserscriptName, [bool] $Snapshot.Info.IsEnabled)
+            if ($JournalDirectory) {
+                Write-TransactionJournalEvent -Directory $JournalDirectory `
+                    -Event 'intent-rollback-userscript-gm' `
+                    -Details ([ordered]@{
+                            gm_properties_sha256 = Get-CanonicalTextSha256 `
+                                -Text $Snapshot.GmProperties
+                        })
+            }
+            [void] $Client.UpdateUserscriptGmProperties(
+                $UserscriptName,
+                $Snapshot.GmProperties
+            )
+            if ($JournalDirectory) {
+                Write-TransactionJournalEvent -Directory $JournalDirectory `
+                    -Event 'intent-rollback-userscript-code' `
+                    -Details ([ordered]@{
+                            code_sha256 = Get-CanonicalTextSha256 -Text $Snapshot.Code
+                        })
+            }
+            $Client.UpdateUserscriptCode($UserscriptName, $Snapshot.Code)
         }
-        $Client.SetUserscriptStatus($UserscriptName, [bool] $Snapshot.Info.IsEnabled)
-        if ($JournalDirectory) {
-            Write-TransactionJournalEvent -Directory $JournalDirectory `
-                -Event 'intent-rollback-userscript-gm' `
-                -Details ([ordered]@{
-                        gm_sha256 = Get-CanonicalTextSha256 -Text $Snapshot.Gm
-                    })
-        }
-        $Client.UpdateUserscriptGmProperties($UserscriptName, $Snapshot.Gm)
-        if ($JournalDirectory) {
-            Write-TransactionJournalEvent -Directory $JournalDirectory `
-                -Event 'intent-rollback-userscript-code' `
-                -Details ([ordered]@{
-                        code_sha256 = Get-CanonicalTextSha256 -Text $Snapshot.Code
-                    })
-        }
-        $Client.UpdateUserscriptCode($UserscriptName, $Snapshot.Code)
     } elseif ($current.Count -eq 1) {
         if ($JournalDirectory) {
             Write-TransactionJournalEvent -Directory $JournalDirectory `
                 -Event 'intent-rollback-userscript-remove' -Details $null
         }
         $Client.RemoveUserscript($UserscriptName)
+        [void] (Assert-UserscriptAbsent -Client $Client)
     } elseif ($current.Count -gt 1) {
         throw "Cannot roll back a non-unique newly installed userscript"
     }
-
-    $restored = @(Get-TargetUserscripts -Client $Client)
-    if (-not $Snapshot.Exists) {
-        if ($restored.Count -ne 0) {
-            throw "Userscript rollback postcondition failed: newly installed target remains"
-        }
-        return
-    }
-    if ($restored.Count -ne 1 -or
-        [bool] $restored[0].IsEnabled -ne [bool] $Snapshot.Info.IsEnabled -or
-        [bool] $restored[0].IsCustom -ne [bool] $Snapshot.Info.IsCustom -or
-        [bool] $restored[0].IsStyle -ne [bool] $Snapshot.Info.IsStyle -or
-        [string] $restored[0].Version -cne [string] $Snapshot.Info.Version) {
-        throw "Userscript rollback metadata postcondition failed"
-    }
-    $restoredCode = $Client.GetUserscriptCode($UserscriptName, $true)
-    $restoredGm = $Client.GetUserscriptGmProperties($UserscriptName)
-    if ([string] $restoredCode -cne [string] $Snapshot.Code -or
-        [string] $restoredGm -cne [string] $Snapshot.Gm) {
-        throw "Userscript rollback content postcondition failed"
-    }
+    [void] (Assert-UserscriptSnapshotConverged -Client $Client `
+            -ExpectedSnapshot $Snapshot)
 }
 
 function Assert-UserscriptInstalled {
     param(
         [Parameter(Mandatory = $true)] $Client,
-        [AllowNull()] $Desired
+        [AllowNull()] $Desired,
+        [AllowNull()] $ExpectedPostState,
+        [ValidateRange(2, 100)]
+        [int] $MaximumObservations = $script:AdGuardStateVisibilityMaxObservations,
+        [ValidateRange(0, 5000)]
+        [int] $RetryDelayMilliseconds = $script:AdGuardStateVisibilityDelayMilliseconds,
+        [ValidateRange(2, 10)]
+        [int] $RequiredConsecutiveReads = `
+            $script:AdGuardStateVisibilityRequiredConsecutiveReads
     )
-    $targets = @(Get-TargetUserscripts -Client $Client)
-    if ($targets.Count -ne 1 -or -not $targets[0].IsEnabled -or
-        -not $targets[0].IsCustom -or $targets[0].IsStyle) {
-        throw "Target userscript is not uniquely installed and enabled"
+    if ($RequiredConsecutiveReads -gt $MaximumObservations) {
+        throw "Required consecutive reads exceed the bounded observation count"
     }
-    $installedCode = $Client.GetUserscriptCode($UserscriptName, $true)
-    $installedGm = $Client.GetUserscriptGmProperties($UserscriptName)
-    $installedCodeHash = Get-CanonicalTextSha256 -Text $installedCode
-    $installedGmHash = Get-CanonicalTextSha256 -Text $installedGm
-    if ($Desired) {
-        if ($targets[0].Version -cne $Desired.Version) {
-            throw "Installed userscript version does not match the source"
+
+    $previousFingerprint = $null
+    $consecutiveReads = 0
+    $lastFailure = $null
+    for ($observation = 1; $observation -le $MaximumObservations; $observation++) {
+        try {
+            $targets = @(Get-TargetUserscripts -Client $Client)
+            if ($targets.Count -ne 1) {
+                throw ("Target userscript is not uniquely installed and enabled " +
+                    "(observed_count=$($targets.Count))")
+            }
+            if (-not $targets[0].IsEnabled) {
+                throw ("Target userscript is not uniquely installed and enabled " +
+                    "(observed_enabled=false)")
+            }
+            if (-not [bool] $targets[0].IsCustom) {
+                throw ("Target userscript is not selected as an executable custom extension " +
+                    "(observed_custom=false)")
+            }
+            if ($targets[0].IsStyle) {
+                throw ("Target userscript is not uniquely installed and enabled " +
+                    "(observed_style=true)")
+            }
+            $installedCode = $Client.GetUserscriptCode($UserscriptName, $true)
+            $installedGmProperties = $Client.GetUserscriptGmProperties($UserscriptName)
+            $installedCodeHash = Get-CanonicalTextSha256 -Text $installedCode
+            $installedGmPropertiesHash = Get-CanonicalTextSha256 `
+                -Text $installedGmProperties
+            if ($Desired) {
+                if ($targets[0].Version -cne $Desired.Version) {
+                    throw "Installed userscript version does not match the source"
+                }
+                $expectedIsCustom = if ($ExpectedPostState) {
+                    [bool] $ExpectedPostState.IsCustom
+                } else { [bool] $Desired.Meta.IsCustom }
+                $expectedIsStyle = if ($ExpectedPostState) {
+                    [bool] $ExpectedPostState.IsStyle
+                } else { [bool] $Desired.Meta.IsStyle }
+                if ([bool] $targets[0].IsCustom -ne $expectedIsCustom -or
+                    [bool] $targets[0].IsStyle -ne $expectedIsStyle) {
+                    throw ("Installed userscript metadata classification does not match " +
+                        "the planned post-state " +
+                        "(observed IsCustom=$([bool] $targets[0].IsCustom), " +
+                        "IsStyle=$([bool] $targets[0].IsStyle); " +
+                        "expected IsCustom=$expectedIsCustom, " +
+                        "IsStyle=$expectedIsStyle)")
+                }
+                $desiredHash = Get-CanonicalTextSha256 -Text $Desired.Meta.Content
+                if ($installedCodeHash -cne $desiredHash) {
+                    throw "Installed userscript code SHA-256 does not match the source"
+                }
+                if ($ExpectedPostState -and $installedGmPropertiesHash -cne
+                    [string] $ExpectedPostState.GmPropertiesSha256) {
+                    throw ("Installed userscript GM value-store SHA-256 does not match " +
+                        "the planned post-state " +
+                        "(observed=$installedGmPropertiesHash, " +
+                        "expected=$($ExpectedPostState.GmPropertiesSha256), " +
+                        "observed_length=$(([string] $installedGmProperties).Length), " +
+                        "fresh_contract_length=$(([string] $Desired.FreshInstallGmProperties).Length))")
+                }
+            }
+            $fingerprintRecord = [ordered]@{
+                name = [string] $targets[0].Name
+                version = [string] $targets[0].Version
+                enabled = [bool] $targets[0].IsEnabled
+                custom = [bool] $targets[0].IsCustom
+                style = [bool] $targets[0].IsStyle
+                code_sha256 = $installedCodeHash
+                gm_properties_sha256 = $installedGmPropertiesHash
+            }
+            $fingerprint = Get-CanonicalTextSha256 -Text (
+                $fingerprintRecord | ConvertTo-Json -Compress)
+            if ($null -ne $previousFingerprint -and
+                $fingerprint -ceq $previousFingerprint) {
+                $consecutiveReads++
+            } else {
+                $consecutiveReads = 1
+            }
+            $previousFingerprint = $fingerprint
+            $lastFailure = $null
+            if ($consecutiveReads -ge $RequiredConsecutiveReads) {
+                Add-Member -InputObject $targets[0] -NotePropertyName InstalledCodeSha256 `
+                    -NotePropertyValue $installedCodeHash -Force
+                Add-Member -InputObject $targets[0] `
+                    -NotePropertyName InstalledGmPropertiesSha256 `
+                    -NotePropertyValue $installedGmPropertiesHash -Force
+                Add-Member -InputObject $targets[0] -NotePropertyName VisibilityObservationCount `
+                    -NotePropertyValue $observation -Force
+                return $targets[0]
+            }
         }
-        $desiredHash = Get-CanonicalTextSha256 -Text $Desired.Meta.Content
-        $desiredGmHash = Get-CanonicalTextSha256 -Text $Desired.Metadata
-        if ($installedCodeHash -cne $desiredHash) {
-            throw "Installed userscript code SHA-256 does not match the source"
+        catch {
+            $lastFailure = [string] $_.Exception.Message
+            $previousFingerprint = $null
+            $consecutiveReads = 0
         }
-        if ($installedGmHash -cne $desiredGmHash) {
-            throw "Installed userscript canonical GM metadata SHA-256 does not match the source"
+        if ($observation -lt $MaximumObservations -and $RetryDelayMilliseconds -gt 0) {
+            Start-Sleep -Milliseconds $RetryDelayMilliseconds
         }
     }
-    Add-Member -InputObject $targets[0] -NotePropertyName InstalledCodeSha256 `
-        -NotePropertyValue $installedCodeHash -Force
-    Add-Member -InputObject $targets[0] -NotePropertyName InstalledGmSha256 `
-        -NotePropertyValue $installedGmHash -Force
-    return $targets[0]
+    if ($lastFailure) {
+        throw ("$lastFailure; exact userscript state did not converge within " +
+            "$MaximumObservations bounded observations")
+    }
+    throw ("Exact installed userscript state did not remain identical for " +
+        "$RequiredConsecutiveReads consecutive reads within $MaximumObservations observations")
 }
 
 function Prepare-FilterMetaSet {
@@ -3805,9 +4606,9 @@ function Get-InspectionReport {
     $userscriptRecords = @($userscripts | ForEach-Object {
             $record = ConvertTo-UserscriptMetadataRecord -Info $_
             $code = $client.GetUserscriptCode($_.Name, $true)
-            $gm = $client.GetUserscriptGmProperties($_.Name)
+            $gmProperties = $client.GetUserscriptGmProperties($_.Name)
             $record.code_sha256 = Get-CanonicalTextSha256 -Text $code
-            $record.gm_sha256 = Get-CanonicalTextSha256 -Text $gm
+            $record.gm_properties_sha256 = Get-CanonicalTextSha256 -Text $gmProperties
             $record
         })
 
@@ -3872,7 +4673,8 @@ function Assert-DeploymentVerified {
         protection_enabled = $true
         userscript = ConvertTo-UserscriptMetadataRecord -Info $userscript
         installed_userscript_code_sha256 = $userscript.InstalledCodeSha256
-        installed_userscript_gm_sha256 = $userscript.InstalledGmSha256
+        installed_userscript_gm_properties_sha256 = `
+            $userscript.InstalledGmPropertiesSha256
         filter = ConvertTo-FilterMetadataRecord -Filter $filter.Filter
         installed_filter_rule_count = $filter.RuleCount
         installed_filter_rules_sha256 = $filter.RulesSha256
@@ -3934,6 +4736,19 @@ function Assert-ExclusiveTargetMigrationAuthorized {
     }
 }
 
+$isCspProbeCommand = $Command -in @(
+    'csp-probe-inspect', 'csp-probe-install', 'csp-probe-restore')
+$cspProbeForbiddenParameters = @(
+    'UserscriptSource', 'FilterUrl', 'ReleaseManifestSource',
+    'UserscriptName', 'FilterName', 'ExpectedUserscriptSha256',
+    'ExpectedFilterSha256', 'ExpectedInstalledFilterRulesSha256',
+    'ReferenceUserFilterSnapshot', 'ApproveExclusiveTargetMigration'
+)
+if ($isCspProbeCommand) {
+    $UserscriptName = $script:CspProbeUserscriptName
+    $FilterName = $script:CspProbeFilterName
+}
+
 Assert-Sha256Value -Value $ExpectedUserscriptSha256 -Name 'ExpectedUserscriptSha256'
 Assert-Sha256Value -Value $ExpectedFilterSha256 -Name 'ExpectedFilterSha256'
 Assert-Sha256Value -Value $ExpectedInstalledFilterRulesSha256 `
@@ -3945,6 +4760,27 @@ $desiredFilter = $null
 $validatedBackup = $null
 $releaseManifestContract = $null
 try {
+    if ($isCspProbeCommand) {
+        foreach ($forbiddenParameter in $cspProbeForbiddenParameters) {
+            if ($PSBoundParameters.ContainsKey($forbiddenParameter)) {
+                throw "CSP probe commands reject parameter: -$forbiddenParameter"
+            }
+        }
+        if ($Command -eq 'csp-probe-inspect' -and
+            ($Apply -or $PSBoundParameters.ContainsKey('WhatIf') -or
+                $PSBoundParameters.ContainsKey('BackupRoot') -or
+                $PSBoundParameters.ContainsKey('BackupPath'))) {
+            throw "csp-probe-inspect is read-only and accepts no mutation or backup switch"
+        }
+        if ($Command -eq 'csp-probe-install' -and
+            $PSBoundParameters.ContainsKey('BackupPath')) {
+            throw "csp-probe-install does not accept -BackupPath"
+        }
+        if ($Command -eq 'csp-probe-restore' -and
+            $PSBoundParameters.ContainsKey('BackupRoot')) {
+            throw "csp-probe-restore does not accept -BackupRoot"
+        }
+    }
     if ($Command -in @('install-userscript', 'install-filter', 'deploy', 'verify') -and
         -not $UserscriptSource) {
         throw "$Command requires -UserscriptSource"
@@ -3967,7 +4803,13 @@ try {
     if ($Command -eq 'restore-backup' -and -not $BackupPath) {
         throw "restore-backup requires -BackupPath"
     }
+    if ($Command -eq 'csp-probe-restore' -and -not $BackupPath) {
+        throw "csp-probe-restore requires -BackupPath"
+    }
 
+    if ($isCspProbeCommand) {
+        $desiredUserscript = Get-CspProbeUserscriptSource
+    }
     if ($UserscriptSource) {
         $desiredUserscript = Get-UserscriptSource -Source $UserscriptSource
     }
@@ -3984,19 +4826,29 @@ try {
         $validatedBackup = Get-ValidatedBackup -Path $BackupPath
         Set-RecoveryContext -Directory $validatedBackup.Directory
     }
+    if ($Command -eq 'csp-probe-restore') {
+        $validatedBackup = Get-ValidatedBackup -Path $BackupPath
+        Set-CspProbeRecoveryContext -Directory $validatedBackup.Directory
+    }
 
     $session = Connect-AdGuardSession
     $client = $session.Client
-    if ($desiredUserscript) {
+    if ($desiredUserscript -and $Command -ne 'csp-probe-inspect') {
         $desiredUserscript = Prepare-UserscriptMeta -Client $client -Source $desiredUserscript
     }
     if ($desiredFilter) {
         $desiredFilter = Prepare-FilterMetaSet -Client $client -Source $desiredFilter
     }
+    if ($Command -eq 'csp-probe-restore') {
+        Assert-CspProbeBackupContract -Backup $validatedBackup -Desired $desiredUserscript
+    }
 
     switch ($Command) {
         'inspect' {
             Write-JsonResult -Value (Get-InspectionReport -Session $session)
+        }
+        'csp-probe-inspect' {
+            Write-JsonResult -Value (Get-CspProbeInspectionReport -Client $client)
         }
         'backup' {
             if (-not $WhatIfPreference -and
@@ -4047,6 +4899,49 @@ try {
                         restore_order = @('target-filter', 'legacy-rule-delta', 'target-userscript',
                             'exact-postcondition-verification')
                         adguard_configuration_changed = $false
+                })
+            }
+        }
+        'csp-probe-restore' {
+            Assert-MutationAuthorized
+            [void] (Assert-GlobalProtection -Client $client)
+            $restorePlan = Get-BackupRestorePlan -Client $client -Backup $validatedBackup
+            if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess(
+                    $validatedBackup.Directory,
+                    'Restore and remove the fixed CSP probe from its validated backup')) {
+                Write-TransactionJournalEvent -Directory $validatedBackup.Directory `
+                    -Event 'restore-started' `
+                    -Details ([ordered]@{ already_restored = $restorePlan.IsAlreadyRestored })
+                Invoke-BackupRestore -Client $client -Backup $validatedBackup -Plan $restorePlan
+                $post = Get-CspProbeInspectionReport -Client $client
+                if ($post.probe_present -or
+                    [string] $post.state_sha256 -cne
+                        [string] $validatedBackup.Manifest.complete_target_state.read_2_sha256) {
+                    throw "CSP probe restore did not reproduce the exact pre-install state"
+                }
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'csp-probe-restore'
+                        ok = $true
+                        changed = -not $restorePlan.IsAlreadyRestored
+                        verified = $true
+                        backup = $validatedBackup.Directory
+                        state_sha256 = $post.state_sha256
+                        probe_present = $false
+                        probe_source_sha256 = $script:CspProbeSourceSha256
+                        idempotent = $true
+                    })
+            } else {
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'csp-probe-restore'
+                        ok = $true
+                        what_if = $true
+                        backup = $validatedBackup.Directory
+                        already_restored = $restorePlan.IsAlreadyRestored
+                        userscript_restore_required = $restorePlan.UserscriptNeedsRestore
+                        restore_order = @('fixed-probe-userscript',
+                            'two-read-exact-postcondition-verification')
+                        probe_source_sha256 = $script:CspProbeSourceSha256
+                        adguard_configuration_changed = $false
                     })
             }
         }
@@ -4067,19 +4962,18 @@ try {
                 $snapshot = $mutationBackup.UserscriptSnapshot
                 Initialize-TransactionJournal -Directory $backup `
                     -CommandName 'install-userscript' -DesiredUserscript $desiredUserscript `
-                    -DesiredFilter $null -MigrationPlan $null
+                    -BeforeUserscriptSnapshot $snapshot -DesiredFilter $null -MigrationPlan $null
                 try {
                     [void] (Assert-CurrentStateEqualsBackup -Client $client `
                             -Backup $mutationBackup -ExactFilterUrl $null)
-                    Invoke-UserscriptMutation -Client $client -Snapshot $snapshot `
+                    $installed = Invoke-UserscriptMutation -Client $client -Snapshot $snapshot `
                         -Desired $desiredUserscript -JournalDirectory $backup
-                    $installed = Assert-UserscriptInstalled -Client $client `
-                        -Desired $desiredUserscript
                     Write-TransactionJournalEvent -Directory $backup `
                         -Event 'userscript-applied' `
                         -Details ([ordered]@{
                                 code_sha256 = $installed.InstalledCodeSha256
-                                gm_sha256 = $installed.InstalledGmSha256
+                                gm_properties_sha256 = `
+                                    $installed.InstalledGmPropertiesSha256
                             })
                     Write-TransactionJournalEvent -Directory $backup `
                         -Event 'transaction-complete' -Details $null
@@ -4089,7 +4983,7 @@ try {
                             backup = $backup
                             userscript = ConvertTo-UserscriptMetadataRecord -Info $installed
                             code_sha256 = $installed.InstalledCodeSha256
-                            gm_sha256 = $installed.InstalledGmSha256
+                            gm_properties_sha256 = $installed.InstalledGmPropertiesSha256
                         })
                 }
                 catch {
@@ -4111,6 +5005,105 @@ try {
                         userscript_version = $desiredUserscript.Version
                         userscript_sha256 = $desiredUserscript.Sha256
                         adguard_configuration_changed = $false
+                })
+            }
+        }
+        'csp-probe-install' {
+            Assert-MutationAuthorized
+            [void] (Assert-GlobalProtection -Client $client)
+            $pre = Get-CspProbeInspectionReport -Client $client
+            if ($pre.probe_present -or [int] $pre.probe_count -ne 0) {
+                throw "Fixed CSP probe already exists; refusing to overwrite or adopt it"
+            }
+            if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess(
+                    $script:CspProbeUserscriptName,
+                    'Install the fixed hash-pinned CSP probe temporarily')) {
+                $backup = New-StateBackup -Client $client -ExactFilterUrl $null
+                $mutationBackup = Get-ValidatedBackup -Path $backup
+                if ($mutationBackup.UserscriptSnapshot.Exists -or
+                    @($mutationBackup.FilterSnapshot.States).Count -ne 0) {
+                    throw "Completed CSP probe backup does not prove an absent probe target"
+                }
+                Initialize-TransactionJournal -Directory $backup `
+                    -CommandName 'csp-probe-install' -DesiredUserscript $desiredUserscript `
+                    -BeforeUserscriptSnapshot $mutationBackup.UserscriptSnapshot `
+                    -DesiredFilter $null -MigrationPlan $null
+                $mutationBackup = Get-ValidatedBackup -Path $backup
+                Assert-CspProbeBackupContract -Backup $mutationBackup `
+                    -Desired $desiredUserscript
+                Set-CspProbeRecoveryContext -Directory $backup
+                try {
+                    [void] (Assert-CurrentStateEqualsBackup -Client $client `
+                            -Backup $mutationBackup -ExactFilterUrl $null)
+                    $installed = Invoke-UserscriptMutation -Client $client `
+                        -Snapshot $mutationBackup.UserscriptSnapshot `
+                        -Desired $desiredUserscript -JournalDirectory $backup
+                    $installedState = Get-CspProbeInspectionReport -Client $client
+                    if (-not $installedState.probe_present -or
+                        [int] $installedState.probe_count -ne 1) {
+                        throw "Fixed CSP probe was not uniquely visible after installation"
+                    }
+                    Write-TransactionJournalEvent -Directory $backup `
+                        -Event 'userscript-applied' `
+                        -Details ([ordered]@{
+                                code_sha256 = $installed.InstalledCodeSha256
+                                gm_properties_sha256 = `
+                                    $installed.InstalledGmPropertiesSha256
+                            })
+                    Write-TransactionJournalEvent -Directory $backup `
+                        -Event 'transaction-complete' -Details $null
+                    Write-JsonResult -Value ([ordered]@{
+                            command = 'csp-probe-install'
+                            ok = $true
+                            changed = $true
+                            backup = $backup
+                            pre_state_sha256 = [string] (
+                                $mutationBackup.Manifest.complete_target_state.read_2_sha256)
+                            installed_state_sha256 = $installedState.state_sha256
+                            probe_present = $true
+                            probe_name = $script:CspProbeUserscriptName
+                            probe_version = $script:CspProbeUserscriptVersion
+                            probe_source_sha256 = $script:CspProbeSourceSha256
+                            endpoint = $script:CspProbeEndpoint
+                            is_custom = [bool] $installed.IsCustom
+                            is_style = [bool] $installed.IsStyle
+                            code_sha256 = $installed.InstalledCodeSha256
+                            gm_properties_sha256 = $installed.InstalledGmPropertiesSha256
+                        })
+                }
+                catch {
+                    $original = $_
+                    try {
+                        Invoke-Rollback -Client $client `
+                            -UserscriptSnapshot $mutationBackup.UserscriptSnapshot `
+                            -FilterSnapshot $null -ExactFilterUrl $null `
+                            -JournalDirectory $backup
+                        try { Write-TransactionJournalEvent -Directory $backup `
+                                -Event 'rollback-complete' -Details $null } catch { }
+                    }
+                    catch { throw "CSP probe installation failed and rollback was incomplete" }
+                    throw $original
+                }
+            } else {
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'csp-probe-install'
+                        ok = $true
+                        what_if = $true
+                        order = @('two-read-stable-pre-inspection',
+                            'complete-schema-v2-backup', 'fixed-hash-pinned-probe-install',
+                            'strict-CSP-browser-proof', 'validated-backup-restore',
+                            'two-independent-stable-post-inspections')
+                        pre_state_sha256 = $pre.state_sha256
+                        probe_present = $false
+                        probe_name = $script:CspProbeUserscriptName
+                        probe_version = $script:CspProbeUserscriptVersion
+                        probe_source_sha256 = $script:CspProbeSourceSha256
+                        endpoint = $script:CspProbeEndpoint
+                        is_custom = [bool] $desiredUserscript.Meta.IsCustom
+                        is_style = [bool] $desiredUserscript.Meta.IsStyle
+                        parsed_meta = Get-CspProbeParsedMetaEvidence `
+                            -Meta $desiredUserscript.Meta
+                        adguard_configuration_changed = $false
                     })
             }
         }
@@ -4131,7 +5124,8 @@ try {
                 Assert-ExclusiveTargetMigrationAuthorized -Plan $migrationPlan
                 Initialize-TransactionJournal -Directory $backup `
                     -CommandName 'migrate-legacy' -DesiredUserscript $null `
-                    -DesiredFilter $null -MigrationPlan $migrationPlan
+                    -BeforeUserscriptSnapshot $null -DesiredFilter $null `
+                    -MigrationPlan $migrationPlan
                 $migration = $null
                 try {
                     [void] (Assert-CurrentStateEqualsBackup -Client $client `
@@ -4204,7 +5198,8 @@ try {
                     -Desired $desiredFilter
                 Initialize-TransactionJournal -Directory $backup `
                     -CommandName 'install-filter' -DesiredUserscript $null `
-                    -DesiredFilter $desiredFilter -MigrationPlan $null
+                    -BeforeUserscriptSnapshot $null -DesiredFilter $desiredFilter `
+                    -MigrationPlan $null
                 try {
                     [void] (Assert-CurrentStateEqualsBackup -Client $client `
                             -Backup $mutationBackup -ExactFilterUrl $desiredFilter.Url)
@@ -4280,21 +5275,22 @@ try {
                 Assert-FilterSnapshotMutationPreconditions -Snapshot $filterSnapshot `
                     -Desired $desiredFilter
                 Initialize-TransactionJournal -Directory $backup -CommandName 'deploy' `
-                    -DesiredUserscript $desiredUserscript -DesiredFilter $desiredFilter `
+                    -DesiredUserscript $desiredUserscript `
+                    -BeforeUserscriptSnapshot $userscriptSnapshot -DesiredFilter $desiredFilter `
                     -MigrationPlan $migrationPlan
                 $migrationTransaction = $null
                 try {
                     [void] (Assert-CurrentStateEqualsBackup -Client $client `
                             -Backup $mutationBackup -ExactFilterUrl $desiredFilter.Url)
-                    Invoke-UserscriptMutation -Client $client -Snapshot $userscriptSnapshot `
+                    $appliedUserscript = Invoke-UserscriptMutation -Client $client `
+                        -Snapshot $userscriptSnapshot `
                         -Desired $desiredUserscript -JournalDirectory $backup
-                    $appliedUserscript = Assert-UserscriptInstalled -Client $client `
-                        -Desired $desiredUserscript
                     Write-TransactionJournalEvent -Directory $backup `
                         -Event 'userscript-applied' `
                         -Details ([ordered]@{
                                 code_sha256 = $appliedUserscript.InstalledCodeSha256
-                                gm_sha256 = $appliedUserscript.InstalledGmSha256
+                                gm_properties_sha256 = `
+                                    $appliedUserscript.InstalledGmPropertiesSha256
                             })
                     $migrationTransaction = Invoke-LegacyMigration -Client $client `
                         -Plan $migrationPlan -JournalDirectory $backup

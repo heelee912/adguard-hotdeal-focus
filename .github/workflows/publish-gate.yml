@@ -7,22 +7,35 @@ on:
         description: Machine correlation nonce
         required: false
         type: string
+      source_sha:
+        description: Exact source commit authorized by the dispatcher
+        required: true
+        type: string
 
 run-name: hotdeal-focus-publish-gate-${{ inputs.dispatch_nonce || github.run_id }}
 
 permissions: {}
 
 concurrency:
-  group: hotdeal-focus-gate-v1
+  group: hotdeal-focus-release-state
   cancel-in-progress: false
 
 jobs:
-  publish:
+  verify-source:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
-      contents: write
+      contents: read
     steps:
+      - name: Require the workflow-dispatch ref to resolve to the authorized source
+        env:
+          AUTHORIZED_SOURCE_SHA: ${{ inputs.source_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${AUTHORIZED_SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]]
+          [[ "${GITHUB_SHA}" == "${AUTHORIZED_SOURCE_SHA}" ]]
+
       - name: Check out the exact source commit
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -52,10 +65,35 @@ jobs:
           npm run build
           git diff --exit-code -- .
           npm run integrity
+          timeout --kill-after=5s 60s npm run test:network
+          timeout --kill-after=5s 90s npm run test:oracle
           timeout --kill-after=5s 60s npm run test:tamper
           timeout --kill-after=10s 15m npm run test:behavior
 
-      - name: Publish or exactly verify gate-v1.0.0
+  publish:
+    needs: verify-source
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    environment:
+      name: hdf-release-publisher
+      deployment: false
+    permissions:
+      contents: write
+    env:
+      HDF_PRIVILEGED_ENVIRONMENT: hdf-release-publisher
+    steps:
+      - name: Check out the exact independently verified source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Publish or exactly verify gate-v2.0.2
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -78,3 +116,36 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
+
+  redispatch-verify:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Check out the exact publisher source without credentials
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Dispatch and observe one nonce-bound Verify run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/hotdeal_focus_cli.py cloud dispatch \
+            --repo "${GITHUB_REPOSITORY}" \
+            --workflow verify.yml \
+            --apply \
+            --json > "${RUNNER_TEMP}/verify-redispatch.json"
+          jq -c '{ok,status,sourceSha,workflow,ref,dispatchNonce,run}' \
+            "${RUNNER_TEMP}/verify-redispatch.json"

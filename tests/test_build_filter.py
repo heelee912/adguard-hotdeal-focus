@@ -33,7 +33,7 @@ EXPECTED_LAYOUTS = {
     "clien": {"jirum"},
     "ppomppu": {"pc", "mobile"},
     "ruliweb": {"hotdeal"},
-    "quasarzone": {"market"},
+    "quasarzone": {"market", "market-mobile"},
     "eomisae": {"hotdeal"},
     "zod": {"deal"},
     "arcalive": {"hotdeal"},
@@ -111,6 +111,29 @@ class RepositoryContractTests(unittest.TestCase):
         }
         self.assertEqual(EXPECTED_LAYOUTS, actual_layouts)
         self.assertEqual(7, len(actual_layouts))
+
+    def test_quasar_article_image_cdn_is_scoped_to_both_market_profiles(self) -> None:
+        quasar = next(site for site in self.config["sites"] if site["id"] == "quasarzone")
+        self.assertEqual({"market", "market-mobile"}, {layout["id"] for layout in quasar["layouts"]})
+        for layout in quasar["layouts"]:
+            with self.subTest(layout=layout["id"]):
+                self.assertEqual(["img2.quasarzone.com"], layout["resource_domains"])
+
+        unverified_hosts = {
+            "cdn.jsdelivr.net",
+            "cdnjs.cloudflare.com",
+            "fonts.googleapis.com",
+            "fonts.gstatic.com",
+            "maxcdn.bootstrapcdn.com",
+            "ac-p.namu.la",
+        }
+        configured_hosts = {
+            host
+            for site in self.config["sites"]
+            for layout in site["layouts"]
+            for host in layout["resource_domains"]
+        }
+        self.assertTrue(unverified_hosts.isdisjoint(configured_hosts))
 
     def test_every_layout_has_integrity_markers_and_role_coverage(self) -> None:
         for site in self.config["sites"]:
@@ -249,7 +272,8 @@ class RuleGenerationTests(unittest.TestCase):
         layout = minimal_layout()
         selector = build_hide_selector(layout)
         self.assertEqual(
-            "body *:not(:has(.body)):not(:has(.comment)):not(:has(.title))"
+            "body *:not(:has(:is(.body))):not(:has(:is(.comment)))"
+            ":not(:has(:is(.title)))"
             ":not(.body):not(.body *)"
             ":not(.comment):not(.comment *)"
             ":not(.title)",
@@ -260,6 +284,20 @@ class RuleGenerationTests(unittest.TestCase):
             f"[$domain=example.com,path=|/deal/]#?#{selector}",
             build_rule(layout),
         )
+
+    def test_document_scoped_marker_remains_visible_from_inside_its_root(self) -> None:
+        layout = minimal_layout()
+        layout["ancestor_markers"] = ["#D_ article > .rhymix_content"]
+        layout["preserve_deep"] = ["#D_ article > .rhymix_content"]
+        layout["preserve_shallow"] = []
+
+        selector = build_hide_selector(layout)
+
+        self.assertIn(
+            ":not(:has(:is(#D_ article > .rhymix_content)))",
+            selector,
+        )
+        self.assertNotIn(":has(#D_ article > .rhymix_content)", selector)
 
     def test_render_is_canonical_when_input_order_changes(self) -> None:
         config = minimal_config()
@@ -305,7 +343,16 @@ class ConfigurationValidationTests(unittest.TestCase):
         second_site["name"] = "Second"
         second_site["layouts"][0]["id"] = "second"
         duplicate_target["sites"].append(second_site)
-        self.assert_config_error(duplicate_target, "duplicate domain/path target")
+        self.assert_config_error(duplicate_target, "duplicate domain/path/profile target")
+
+        profile_split_target = minimal_config()
+        desktop_layout = profile_split_target["sites"][0]["layouts"][0]
+        desktop_layout["applicable_profiles"] = ["desktop"]
+        mobile_layout = copy.deepcopy(desktop_layout)
+        mobile_layout["id"] = "article-mobile"
+        mobile_layout["applicable_profiles"] = ["mobile"]
+        profile_split_target["sites"][0]["layouts"].append(mobile_layout)
+        validate_config(profile_split_target)
 
     def test_rejects_duplicate_selector_and_deep_shallow_overlap(self) -> None:
         duplicate_selector = minimal_config()
@@ -351,6 +398,47 @@ class ConfigurationValidationTests(unittest.TestCase):
         layout["preserve_shallow"] = []
         self.assert_config_error(no_preservation, "at least one selector")
 
+    def test_nonzero_product_projection_requires_explicit_layout_order(self) -> None:
+        missing_order = minimal_config()
+        product = missing_order["sites"][0]["layouts"][0]["role_projection"][
+            "product"
+        ]
+        product.update(
+            {
+                "mode": "atomic-boundary",
+                "cardinality": "optional",
+                "selectors": [".product"],
+            }
+        )
+        self.assert_config_error(missing_order, "product fields are invalid")
+
+        invalid_order = copy.deepcopy(missing_order)
+        invalid_order["sites"][0]["layouts"][0]["role_projection"]["product"][
+            "order"
+        ] = "near-body"
+        self.assert_config_error(invalid_order, "product.order is invalid")
+
+        valid_order = copy.deepcopy(missing_order)
+        valid_order["sites"][0]["layouts"][0]["role_projection"]["product"][
+            "order"
+        ] = "after-body"
+        valid_layout = valid_order["sites"][0]["layouts"][0]
+        valid_layout["ancestor_markers"].append(".product")
+        valid_layout["preserve_deep"].append(".product")
+        normalized = validate_config(valid_order)
+        self.assertEqual(
+            "after-body",
+            normalized["sites"][0]["layouts"][0]["role_projection"]["product"][
+                "order"
+            ],
+        )
+
+        forbidden_zero_order = minimal_config()
+        forbidden_zero_order["sites"][0]["layouts"][0]["role_projection"][
+            "product"
+        ]["order"] = "before-body"
+        self.assert_config_error(forbidden_zero_order, "product fields are invalid")
+
     def test_rejects_invalid_domain_path_and_sample_scope(self) -> None:
         invalid_domain = minimal_config()
         invalid_domain["sites"][0]["layouts"][0]["domain"] = "https://example.com"
@@ -371,6 +459,31 @@ class ConfigurationValidationTests(unittest.TestCase):
             "https://example.com/other/123"
         ]
         self.assert_config_error(wrong_sample_path, "does not contain")
+
+    def test_resource_domains_are_validated_and_survive_normalization(self) -> None:
+        config = minimal_config()
+        config["sites"][0]["layouts"][0]["resource_domains"] = [
+            "images.example-cdn.com",
+            "static.example-cdn.com",
+        ]
+        normalized = validate_config(config)
+        self.assertEqual(
+            ["images.example-cdn.com", "static.example-cdn.com"],
+            normalized["sites"][0]["layouts"][0]["resource_domains"],
+        )
+
+        invalid = minimal_config()
+        invalid["sites"][0]["layouts"][0]["resource_domains"] = [
+            "https://static.example-cdn.com/assets",
+        ]
+        self.assert_config_error(invalid, "lowercase hostname")
+
+        duplicate = minimal_config()
+        duplicate["sites"][0]["layouts"][0]["resource_domains"] = [
+            "static.example-cdn.com",
+            "static.example-cdn.com",
+        ]
+        self.assert_config_error(duplicate, "duplicate values")
 
     def test_rejects_selector_injection_and_malformed_selectors(self) -> None:
         invalid_selectors = (

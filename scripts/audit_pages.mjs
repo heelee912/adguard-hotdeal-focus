@@ -15,10 +15,12 @@
 import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
 import { promises as fs } from "node:fs";
-import { isIP } from "node:net";
+import { createServer } from "node:http";
+import { BlockList, createConnection, isIP } from "node:net";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { PREAUTHORIZED_ADGUARD_CONTROL_SOURCE } from "./preauthorized_adguard_control.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 const PROJECT_ROOT = path.resolve(SCRIPT_DIR, "..");
@@ -45,6 +47,33 @@ const ALGUMON_GLOBAL_DISCOVERY_URL = `${ALGUMON_ORIGIN}/n/deal`;
 const ALGUMON_SITE_LINK_SCAN_LIMIT = 12;
 const ALGUMON_PROOF_REPRESENTATIVES_PER_ROUTE_PROFILE = 3;
 const ALGUMON_RELAY_RESPONSE_MAX_BYTES = 4_096;
+const ALGUMON_FRESH_RELAY_MAX_AGE_MS = 5 * 60 * 1_000;
+const ALGUMON_FRESH_RELAY_FUTURE_SKEW_MS = 30 * 1_000;
+const ARTICLE_ACCESS_LEASE_TTL_MS = 60 * 1_000;
+const ARTICLE_ACCESS_LEASE_MAX_COOKIES = 64;
+const ARTICLE_ACCESS_LEASE_MAX_COOKIE_BYTES = 64 * 1_024;
+const DESTINATION_CHALLENGE_SETTLE_MAX_MS = 12_000;
+const NETWORK_POLICY_MAX_REMOTE_HOSTS = 128;
+const NETWORK_POLICY_MAX_REMOTE_REQUESTS = 4_096;
+const PINNED_PROXY_MAX_CONNECT_REQUESTS = 1_024;
+const PINNED_PROXY_MAX_ACTIVE_TUNNELS = 256;
+const PINNED_PROXY_MAX_TRANSFER_BYTES = 512 * 1024 * 1024;
+const PINNED_PROXY_CONNECT_TIMEOUT_MS = 15_000;
+const PINNED_PROXY_DNS_TIMEOUT_MS = 5_000;
+const PINNED_PROXY_MAX_DNS_ADDRESSES = 16;
+const PINNED_PROXY_MAX_EVIDENCE_HOSTS = 128;
+const EXACT_CHALLENGE_RESOURCE_HOSTS_BY_SITE = Object.freeze({
+  arcalive: Object.freeze(["challenges.cloudflare.com"]),
+});
+const ARTICLE_IDENTITY_DOMAINS = Object.freeze({
+  clien: "clien.net",
+  ppomppu: "ppomppu.co.kr",
+  ruliweb: "ruliweb.com",
+  quasarzone: "quasarzone.com",
+  eomisae: "eomisae.co.kr",
+  zod: "zod.kr",
+  arcalive: "arca.live",
+});
 const ORACLE_EXECUTION_WORLD = "chromium-isolated-v1";
 const SCREENSHOT_MAX_BYTES = 2 * 1024 * 1024;
 const SCREENSHOT_MAX_COUNT = 256;
@@ -77,31 +106,39 @@ const REQUIRED_SITE_IDS = Object.freeze([
   "arcalive",
 ]);
 const REQUIRED_ROLE_NAMES = Object.freeze(["title", "body", "comments"]);
+const READER_GATE_PROTOCOL_VERSION = 2;
+const READER_GATE_ARTIFACT_VERSION = "2.0.2";
+const READER_GATE_READY_SELECTOR =
+  'html.hdf-v2-ready[data-hotdeal-focus-ready="1"]' +
+  '[data-hotdeal-focus-protocol="2"]' +
+  '[data-hotdeal-focus-state="ready"]' +
+  '[data-hotdeal-focus-status="ready"]';
+const READER_GATE_PROJECTION_HIDE_SELECTOR =
+  `${READER_GATE_READY_SELECTOR} body *:not(` +
+  ".hdf-v2-keep[data-hotdeal-focus-keep])";
+const IMPORTANT_DISPLAY_NONE_DECLARATION =
+  /(?:^|;)\s*display\s*:\s*none\s*!important\s*(?:;|$)/iu;
+const READER_GATE_SUBSCRIPTION_URL =
+  "https://github.com/heelee912/adguard-hotdeal-focus/releases/download/" +
+  "gate-v2.0.2/filter.txt";
+const FIRST_PAINT_PROBE_SCHEMA_VERSION = 1;
+const ARTICLE_ACCESS_LEASE_SCHEMA_VERSION = 1;
 const DEVICE_PROFILES = Object.freeze({
   desktop: {
-    viewport: { width: 1440, height: 1200 },
-    userAgent:
-      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) " +
-      "AppleWebKit/537.36 (KHTML, like Gecko) " +
-      "Chrome/136.0.0.0 Safari/537.36",
-    isMobile: false,
-    hasTouch: false,
+    descriptorName: "Desktop Chrome",
+    expectedMobile: false,
   },
   mobile: {
-    viewport: { width: 390, height: 844 },
-    userAgent:
-      "Mozilla/5.0 (Linux; Android 15; Pixel 8) " +
-      "AppleWebKit/537.36 (KHTML, like Gecko) " +
-      "Chrome/136.0.0.0 Mobile Safari/537.36",
-    isMobile: true,
-    hasTouch: true,
+    descriptorName: "Pixel 7",
+    expectedMobile: true,
   },
 });
+let RUNTIME_DEVICE_PROFILES = null;
 const FIRST_PAINT_PROBE_SOURCE = String.raw`
 (() => {
   "use strict";
   const probe = {
-    protocolVersion: 1,
+    schemaVersion: ${FIRST_PAINT_PROBE_SCHEMA_VERSION},
     sampleCount: 0,
     flashFrameCount: 0,
     firstContentFrame: null,
@@ -117,23 +154,39 @@ const FIRST_PAINT_PROBE_SOURCE = String.raw`
   const isVisible = (element) => {
     const style = window.getComputedStyle(element);
     return style.display !== "none" && style.visibility !== "hidden" &&
-      Number(style.opacity) !== 0 && element.getClientRects().length > 0;
+      Number(style.opacity) !== 0 &&
+      [...element.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0);
   };
   const sample = () => {
     const root = document.documentElement;
     const body = document.body;
     const state = root?.getAttribute("data-hotdeal-focus-state") ?? "unset";
-    const ready = root?.getAttribute("data-hotdeal-focus-ready") === "1" && state === "ready";
+    const ready = root?.classList.contains("hdf-v2-ready") === true &&
+      root?.getAttribute("data-hotdeal-focus-ready") === "1" &&
+      root?.getAttribute("data-hotdeal-focus-protocol") === "2" &&
+      state === "ready" &&
+      root?.getAttribute("data-hotdeal-focus-status") === "ready" &&
+      root?.classList.contains("hdf-v2-lock") === false &&
+      !root?.hasAttribute("data-hotdeal-focus-lock");
     const rootStyle = root ? window.getComputedStyle(root) : null;
     const paintLockIntact = !ready &&
+      root?.classList.contains("hdf-v2-lock") === true &&
       root?.getAttribute("data-hotdeal-focus-lock") === "1" &&
       rootStyle?.transitionProperty === "none" &&
       rootStyle?.animationName === "none" &&
-      rootStyle?.contentVisibility === "hidden" &&
       rootStyle?.visibility === "hidden" &&
+      rootStyle?.contentVisibility === "hidden" &&
       Number(rootStyle?.opacity) === 0 &&
+      rootStyle?.clipPath === "inset(50%)" &&
       rootStyle?.pointerEvents === "none" &&
-      rootStyle?.clipPath === "inset(50%)";
+      root?.style.getPropertyValue("opacity") === "0" &&
+      root?.style.getPropertyPriority("opacity") === "important" &&
+      root?.style.getPropertyValue("clip-path") === "inset(50%)" &&
+      root?.style.getPropertyPriority("clip-path") === "important" &&
+      root?.style.getPropertyValue("visibility") === "hidden" &&
+      root?.style.getPropertyPriority("visibility") === "important" &&
+      root?.style.getPropertyValue("content-visibility") === "hidden" &&
+      root?.style.getPropertyPriority("content-visibility") === "important";
     const bodyElementCount = body?.querySelectorAll("*").length ?? 0;
     const visibleUnmarkedCount = paintLockIntact
       ? 0
@@ -164,6 +217,11 @@ const FIRST_PAINT_PROBE_SOURCE = String.raw`
   window.requestAnimationFrame(sample);
 })();
 `;
+
+function userscriptAuditInitSource(userscriptContent) {
+  return `${FIRST_PAINT_PROBE_SOURCE}\n` +
+    `${PREAUTHORIZED_ADGUARD_CONTROL_SOURCE}\n${userscriptContent}`;
+}
 
 function parseArguments(argv) {
   const options = {
@@ -325,6 +383,31 @@ async function readJson(filePath) {
   return JSON.parse(raw);
 }
 
+function assertConfiguredResourceDomains(value, location) {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) {
+    throw new Error(`${location} must be an array`);
+  }
+  const domainPattern = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})$/u;
+  const domains = value.map((domain, index) => {
+    if (
+      typeof domain !== "string" ||
+      domain !== domain.trim() ||
+      domain !== domain.toLocaleLowerCase() ||
+      !domainPattern.test(domain)
+    ) {
+      throw new Error(
+        `${location}[${index}] must be a lowercase hostname without scheme, port, path or wildcard`,
+      );
+    }
+    return domain;
+  });
+  if (new Set(domains).size !== domains.length) {
+    throw new Error(`${location} contains duplicate values`);
+  }
+  return domains;
+}
+
 function assertAuditConfig(config) {
   if (!config || config.schema_version !== 1 || !Array.isArray(config.sites)) {
     throw new Error("config/sites.json must use schema_version 1 and contain sites[]");
@@ -335,8 +418,13 @@ function assertAuditConfig(config) {
       throw new Error(`invalid or duplicate site entry: ${site?.id ?? "<missing>"}`);
     }
     siteIds.add(site.id);
+    assertConfiguredResourceDomains(
+      site.algumon_resource_domains,
+      `${site.id}.algumon_resource_domains`,
+    );
     for (const layout of site.layouts) {
       const location = `${site.id}/${layout?.id ?? "<missing>"}`;
+      assertConfiguredResourceDomains(layout?.resource_domains, `${location}.resource_domains`);
       for (const field of [
         "sample_urls",
         "ancestor_markers",
@@ -395,6 +483,13 @@ function assertAuditConfig(config) {
       buildProjectedHideSelector(layout);
     }
   }
+  const actualSiteIds = [...siteIds].sort();
+  const requiredSiteIds = [...REQUIRED_SITE_IDS].sort();
+  if (canonicalJson(actualSiteIds) !== canonicalJson(requiredSiteIds)) {
+    throw new Error(
+      "config/sites.json site IDs must equal the exact Algumon seven-source contract",
+    );
+  }
   return config;
 }
 
@@ -414,6 +509,43 @@ function requiredRolesForLayout(layout) {
   const invalid = roles.filter((role) => !allowedRoles.has(role));
   if (invalid.length > 0) throw new Error(`invalid required_roles: ${invalid.join(", ")}`);
   return [...new Set(roles)];
+}
+
+function projectionPolicyFingerprint(value) {
+  const source = JSON.stringify(value);
+  let hash = 2166136261;
+  for (let index = 0; index < source.length; index += 1) {
+    hash ^= source.charCodeAt(index);
+    hash = Math.imul(hash, 16777619) >>> 0;
+  }
+  return `projection-policy-v1-${hash.toString(16).padStart(8, "0")}`;
+}
+
+function commentControlSelectorDigest(selectors) {
+  return projectionPolicyFingerprint({
+    kind: "comment-control-selectors",
+    selectors: [...new Set(selectors)].sort(),
+  }).replace("projection-policy-v1-", "comment-control-selectors-v1-");
+}
+
+function commentControlSelectorDigestsForUrl(layout, urlText) {
+  const contracts = [layout, ...(layout.variants ?? [])];
+  let parsed;
+  try {
+    parsed = new URL(urlText);
+  } catch {
+    return [];
+  }
+  const pathAndQuery = parsed.pathname + parsed.search;
+  return [...new Set(
+    contracts
+      .filter((contract) => pathsForLayout(contract).some(
+        (configuredPath) => wildcardPathMatches(pathAndQuery, configuredPath),
+      ))
+      .map((contract) => commentControlSelectorDigest(
+        contract.comment_contract?.controls ?? [],
+      )),
+  )].sort();
 }
 
 function selectedSites(config, selectedIds) {
@@ -522,7 +654,7 @@ function sitesForPromotionRetest(config, scope) {
 
 function buildProjectedHideSelector(layout) {
   const markers = [...layout.ancestor_markers].sort().join(", ");
-  let selector = `body *:not(:has(${markers}))`;
+  let selector = `body *:not(:has(:is(${markers})))`;
   for (const preserved of [...layout.preserve_deep].sort()) {
     selector += `:not(${preserved}):not(${preserved} *)`;
   }
@@ -532,13 +664,49 @@ function buildProjectedHideSelector(layout) {
   return selector;
 }
 
+function parsedCosmeticRule(domains, pathPattern, operator, payload) {
+  if (operator !== "#$#" && operator !== "#$?#") {
+    return {
+      domains,
+      selector: payload,
+      declarations: null,
+      cssText: null,
+      malformed: false,
+      path: pathPattern,
+      operator,
+    };
+  }
+  const declarationStart = payload.lastIndexOf(" {");
+  const hasClosingBrace = payload.endsWith("}");
+  if (declarationStart <= 0 || !hasClosingBrace) {
+    return {
+      domains,
+      selector: payload,
+      declarations: null,
+      cssText: payload,
+      malformed: true,
+      path: pathPattern,
+      operator,
+    };
+  }
+  return {
+    domains,
+    selector: payload.slice(0, declarationStart).trim(),
+    declarations: payload.slice(declarationStart + 2, -1).trim(),
+    cssText: payload,
+    malformed: false,
+    path: pathPattern,
+    operator,
+  };
+}
+
 function parseAdguardCosmeticRules(filterText) {
   const rules = [];
   for (const rawLine of filterText.split(/\r?\n/u)) {
     const line = rawLine.trim();
     if (!line || line.startsWith("!")) continue;
     const officialMatch = line.match(
-      /^\[\$domain=([^,\]]+),path=([^\]]+)\](#\?#|#\$#|##)(.+)$/u,
+      /^\[\$domain=([^,\]]+),path=([^\]]+)\](#\$\?#|#\?#|#\$#|##)(.+)$/u,
     );
     if (officialMatch) {
       const [, domainValue, configuredPath, operator, selector] = officialMatch;
@@ -547,12 +715,12 @@ function parseAdguardCosmeticRules(filterText) {
         .map((domain) => domain.trim())
         .filter((domain) => domain && !domain.startsWith("~"));
       if (domains.length > 0 && selector && configuredPath) {
-        rules.push({ domains, selector, path: configuredPath, operator });
+        rules.push(parsedCosmeticRule(domains, configuredPath, operator, selector));
       }
       continue;
     }
     const domainOnlyMatch = line.match(
-      /^\[\$domain=([^,\]]+)\](#\?#|#\$#|##)(.+)$/u,
+      /^\[\$domain=([^,\]]+)\](#\$\?#|#\?#|#\$#|##)(.+)$/u,
     );
     if (domainOnlyMatch) {
       const [, domainValue, operator, selector] = domainOnlyMatch;
@@ -561,17 +729,19 @@ function parseAdguardCosmeticRules(filterText) {
         .map((domain) => domain.trim())
         .filter((domain) => domain && !domain.startsWith("~"));
       if (domains.length > 0 && selector) {
-        rules.push({ domains, selector, path: null, operator });
+        rules.push(parsedCosmeticRule(domains, null, operator, selector));
       }
       continue;
     }
-    const operator = line.includes("#?#")
-      ? "#?#"
-      : line.includes("#$#")
-        ? "#$#"
-        : line.includes("##")
-          ? "##"
-          : null;
+    const operator = line.includes("#$?#")
+      ? "#$?#"
+      : line.includes("#?#")
+        ? "#?#"
+        : line.includes("#$#")
+          ? "#$#"
+          : line.includes("##")
+            ? "##"
+            : null;
     if (!operator) continue;
     const operatorIndex = line.indexOf(operator);
     const pathIndex = line.lastIndexOf("$path=");
@@ -584,10 +754,18 @@ function parseAdguardCosmeticRules(filterText) {
     const selector = line.slice(operatorIndex + operator.length, pathIndex);
     const configuredPath = line.slice(pathIndex + "$path=".length);
     if (domains.length > 0 && selector && configuredPath) {
-      rules.push({ domains, selector, path: configuredPath, operator });
+      rules.push(parsedCosmeticRule(domains, configuredPath, operator, selector));
     }
   }
   return rules;
+}
+
+function isReaderGateProjectionHideRule(rule) {
+  return (
+    rule.malformed === false &&
+    rule.selector === READER_GATE_PROJECTION_HIDE_SELECTOR &&
+    IMPORTANT_DISPLAY_NONE_DECLARATION.test(rule.declarations ?? "")
+  );
 }
 
 function markerSelectorsForUrl(filterText, layout, urlText) {
@@ -601,8 +779,8 @@ function markerSelectorsForUrl(filterText, layout, urlText) {
             rule.domains.some((domain) => hostnameMatches(parsed.hostname, domain)) &&
             hostnameMatches(parsed.hostname, layout.domain) &&
             (rule.path === null || wildcardPathMatches(pathAndQuery, rule.path)) &&
-            rule.operator === "#?#" &&
-            rule.selector.includes("data-hotdeal-focus-keep"),
+            rule.operator === "#$?#" &&
+            isReaderGateProjectionHideRule(rule),
         )
         .map((rule) => rule.selector),
     ),
@@ -618,51 +796,489 @@ function hostnameMatches(hostname, domain) {
   );
 }
 
+function exactChallengeResourceHostsForSite(siteId) {
+  return [...(EXACT_CHALLENGE_RESOURCE_HOSTS_BY_SITE[siteId] ?? [])];
+}
+
+function networkRequestDecision(
+  urlText,
+  isMainNavigation,
+  allowedNavigationDomains = [],
+  allowedResourceDomains = allowedNavigationDomains,
+  exactResourceHosts = [],
+  allowPublicHttpsSubresources = false,
+) {
+  let parsed;
+  try {
+    parsed = new URL(urlText);
+  } catch {
+    return { allowed: false, reason: "invalid-url", hostname: null };
+  }
+  if (["about:", "blob:", "data:"].includes(parsed.protocol)) {
+    if (isMainNavigation && parsed.href !== "about:blank") {
+      return {
+        allowed: false,
+        reason: "local-top-level-navigation-denied",
+        hostname: null,
+      };
+    }
+    return { allowed: true, reason: "local-browser-scheme", hostname: null };
+  }
+  const hostname = normalizedHostname(parsed.hostname);
+  const secureTransport =
+    parsed.protocol === "https:" ||
+    (!isMainNavigation && parsed.protocol === "wss:");
+  if (!secureTransport) {
+    return { allowed: false, reason: "https-required", hostname };
+  }
+  if (parsed.username || parsed.password || parsed.port) {
+    return { allowed: false, reason: "credentialed-or-non-default-authority", hostname };
+  }
+  if (forbiddenInfrastructureHostname(hostname)) {
+    return { allowed: false, reason: "forbidden-infrastructure", hostname };
+  }
+  const navigationAllowed = allowedNavigationDomains.some((domain) =>
+    hostnameMatches(hostname, domain),
+  );
+  const firstPartyResourceAllowed = allowedResourceDomains.some((domain) =>
+    hostnameMatches(hostname, domain),
+  );
+  const exactChallengeResourceAllowed = exactResourceHosts.some(
+    (exactHostname) => hostname === normalizedHostname(exactHostname),
+  );
+  if (isMainNavigation && !navigationAllowed) {
+    return { allowed: false, reason: "top-level-navigation-denied", hostname };
+  }
+  if (isMainNavigation) {
+    return { allowed: true, reason: "declared-navigation-domain", hostname };
+  }
+  if (!firstPartyResourceAllowed && !exactChallengeResourceAllowed) {
+    return allowPublicHttpsSubresources
+      ? { allowed: true, reason: "bounded-public-https-subresource", hostname }
+      : { allowed: false, reason: "resource-host-denied", hostname };
+  }
+  return {
+    allowed: true,
+    reason: exactChallengeResourceAllowed && !firstPartyResourceAllowed
+      ? "exact-challenge-subresource"
+      : "declared-resource-domain",
+    hostname,
+  };
+}
+
+function isTopLevelNavigationRequest(request) {
+  if (!request.isNavigationRequest()) return false;
+  try {
+    return request.frame().parentFrame() === null;
+  } catch {
+    return true;
+  }
+}
+
+function createNetworkPolicyEvidenceRecorder({
+  allowPublicHttpsSubresources = false,
+  maximumRemoteHosts = NETWORK_POLICY_MAX_REMOTE_HOSTS,
+  maximumRemoteRequests = NETWORK_POLICY_MAX_REMOTE_REQUESTS,
+} = {}) {
+  if (!Number.isInteger(maximumRemoteHosts) || maximumRemoteHosts < 1) {
+    throw new Error("maximumRemoteHosts must be a positive integer");
+  }
+  if (!Number.isInteger(maximumRemoteRequests) || maximumRemoteRequests < 1) {
+    throw new Error("maximumRemoteRequests must be a positive integer");
+  }
+  const blockedByHost = new Map();
+  const exactChallengeByHost = new Map();
+  const allowedPublicByHost = new Map();
+  const undeclaredPublicByHost = new Map();
+  const failedAllowedRequestByHost = new Map();
+  const failedAllowedResponseByHost = new Map();
+  const navigationViolationByAuthority = new Map();
+  const navigationViolationKeys = new Set();
+  const attemptedRemoteHosts = new Set();
+  let attemptedRemoteRequestCount = 0;
+  let remoteHostBudgetOverflowCount = 0;
+  let remoteRequestBudgetOverflowCount = 0;
+  let blockedHostOverflowCount = 0;
+  let activeRemoteRequestCount = 0;
+  let lateRequestCount = 0;
+  let drainTimeoutCount = 0;
+  let sealed = false;
+  let lastRemoteEventAt = Date.now();
+  const record = (collection, hostname, requestType, reason, isMainNavigation) => {
+    const normalized = normalizedHostname(hostname);
+    let entry = collection.get(normalized);
+    if (!entry) {
+      if (collection.size >= maximumRemoteHosts) {
+        blockedHostOverflowCount += 1;
+        return;
+      }
+      entry = {
+        hostname: normalized.slice(0, 253),
+        count: 0,
+        mainNavigationCount: 0,
+        requestTypes: new Set(),
+        reasons: new Set(),
+      };
+      collection.set(normalized, entry);
+    }
+    entry.count += 1;
+    if (isMainNavigation) entry.mainNavigationCount += 1;
+    entry.requestTypes.add(String(requestType ?? "unknown").slice(0, 32));
+    entry.reasons.add(String(reason ?? "unknown").slice(0, 64));
+  };
+  const serialize = (collection) => [...collection.values()]
+    .map((entry) => ({
+      hostname: entry.hostname,
+      count: entry.count,
+      mainNavigationCount: entry.mainNavigationCount,
+      requestTypes: [...entry.requestTypes].sort(),
+      reasons: [...entry.reasons].sort(),
+    }))
+    .sort((left, right) =>
+      left.hostname < right.hostname ? -1 : left.hostname > right.hostname ? 1 : 0,
+    );
+  return {
+    reserveRemoteRequest(hostname) {
+      lastRemoteEventAt = Date.now();
+      if (sealed) {
+        lateRequestCount += 1;
+        return {
+          allowed: false,
+          reason: "network-evidence-sealed",
+          finish() {},
+        };
+      }
+      activeRemoteRequestCount += 1;
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        activeRemoteRequestCount -= 1;
+        lastRemoteEventAt = Date.now();
+      };
+      attemptedRemoteRequestCount += 1;
+      if (attemptedRemoteRequestCount > maximumRemoteRequests) {
+        remoteRequestBudgetOverflowCount += 1;
+        return { allowed: false, reason: "remote-request-budget-exceeded", finish };
+      }
+      const normalized = normalizedHostname(hostname);
+      if (normalized && !attemptedRemoteHosts.has(normalized)) {
+        if (attemptedRemoteHosts.size >= maximumRemoteHosts) {
+          remoteHostBudgetOverflowCount += 1;
+          return { allowed: false, reason: "remote-host-budget-exceeded", finish };
+        }
+        attemptedRemoteHosts.add(normalized);
+      }
+      return { allowed: true, reason: "within-remote-network-budget", finish };
+    },
+    recordBlocked(hostname, requestType, reason, isMainNavigation) {
+      record(blockedByHost, hostname, requestType, reason, isMainNavigation);
+    },
+    recordAllowedPublic(hostname, requestType, reason, isMainNavigation) {
+      record(allowedPublicByHost, hostname, requestType, reason, isMainNavigation);
+      if (reason === "bounded-public-https-subresource") {
+        record(undeclaredPublicByHost, hostname, requestType, reason, isMainNavigation);
+      }
+    },
+    recordAllowedRequestFailure(hostname, requestType, reason, isMainNavigation) {
+      record(failedAllowedRequestByHost, hostname, requestType, reason, isMainNavigation);
+    },
+    recordAllowedResponseFailure(hostname, requestType, status, isMainNavigation) {
+      record(
+        failedAllowedResponseByHost,
+        hostname,
+        requestType,
+        `http-${Number.isInteger(status) ? status : "invalid"}`,
+        isMainNavigation,
+      );
+    },
+    recordExactChallenge(hostname, requestType, reason, isMainNavigation) {
+      record(exactChallengeByHost, hostname, requestType, reason, isMainNavigation);
+    },
+    recordNavigationViolation(protocol, hostname, reason) {
+      const safeProtocol = String(protocol ?? "unknown")
+        .toLowerCase()
+        .replace(/[^a-z0-9+.-]/gu, "")
+        .slice(0, 24);
+      const safeHostname = normalizedHostname(hostname) || `[${safeProtocol || "unknown"}]`;
+      const key = `${safeProtocol}|${safeHostname}|${String(reason ?? "unknown")}`;
+      if (navigationViolationKeys.has(key)) return;
+      navigationViolationKeys.add(key);
+      record(
+        navigationViolationByAuthority,
+        safeHostname,
+        "document",
+        reason,
+        true,
+      );
+    },
+    async sealAndDrain({
+      quietWindowMs = 250,
+      timeoutMs = 3_000,
+      onSeal = () => {},
+    } = {}) {
+      const deadline = Date.now() + timeoutMs;
+      while (
+        activeRemoteRequestCount > 0 ||
+        Date.now() - lastRemoteEventAt < quietWindowMs
+      ) {
+        if (Date.now() >= deadline) {
+          drainTimeoutCount += 1;
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, Math.min(50, quietWindowMs)));
+      }
+      sealed = true;
+      onSeal();
+      await new Promise((resolve) => setTimeout(resolve, Math.min(100, quietWindowMs)));
+      return this.snapshot();
+    },
+    snapshot() {
+      const blockedHosts = serialize(blockedByHost);
+      return {
+        policyVersion: 2,
+        mode: allowPublicHttpsSubresources
+          ? "bounded-public-https-fidelity"
+          : "declared-only",
+        limits: {
+          maximumRemoteHosts,
+          maximumRemoteRequests,
+        },
+        attemptedRemoteHostCount: attemptedRemoteHosts.size,
+        attemptedRemoteRequestCount,
+        remoteHostBudgetOverflowCount,
+        remoteRequestBudgetOverflowCount,
+        activeRemoteRequestCount,
+        lateRequestCount,
+        drainTimeoutCount,
+        sealed,
+        allowedPublicHosts: serialize(allowedPublicByHost),
+        undeclaredPublicHosts: serialize(undeclaredPublicByHost),
+        failedAllowedRequestHosts: serialize(failedAllowedRequestByHost),
+        failedAllowedResponseHosts: serialize(failedAllowedResponseByHost),
+        navigationViolations: serialize(navigationViolationByAuthority),
+        blockedHosts,
+        blockedHostCount: blockedHosts.length,
+        blockedRequestCount: blockedHosts.reduce((sum, entry) => sum + entry.count, 0),
+        blockedHostOverflowCount,
+        exactChallengeHosts: serialize(exactChallengeByHost),
+      };
+    },
+  };
+}
+
+function networkFidelityFailures(
+  networkPolicyEvidence,
+  declaredResourceDomains = [],
+  roleReferencedResourceEvidence = [],
+) {
+  const failures = [];
+  const roleResourceEvidence = Array.isArray(roleReferencedResourceEvidence)
+    ? {
+        hosts: roleReferencedResourceEvidence,
+        selectorErrorCount: 0,
+        rootOverflowCount: 0,
+        nodeOverflowCount: 0,
+        urlOverflowCount: 0,
+        hostOverflowCount: 0,
+        elapsedTimeOverflowCount: 0,
+        unsafeReferences: [],
+        unsafeReferenceOverflowCount: 0,
+      }
+    : roleReferencedResourceEvidence ?? { hosts: [] };
+  const pinnedTransport = networkPolicyEvidence?.pinnedTransport ?? null;
+  if (
+    networkPolicyEvidence?.mode === "bounded-public-https-fidelity" &&
+    pinnedTransport?.mode !== "route-approved-numeric-ip-connect"
+  ) {
+    failures.push("bounded public fidelity mode has no pinned numeric-IP transport proof");
+  }
+  if (
+    networkPolicyEvidence?.mode === "bounded-public-https-fidelity" &&
+    networkPolicyEvidence?.sealed !== true
+  ) {
+    failures.push("bounded public fidelity evidence was not sealed after a quiet drain");
+  }
+  if ((networkPolicyEvidence?.activeRemoteRequestCount ?? 0) > 0) {
+    failures.push("network evidence sealed with active remote requests");
+  }
+  if ((networkPolicyEvidence?.lateRequestCount ?? 0) > 0) {
+    failures.push("remote requests appeared after the network evidence seal");
+  }
+  if ((networkPolicyEvidence?.drainTimeoutCount ?? 0) > 0) {
+    failures.push("remote requests did not drain inside the fail-closed deadline");
+  }
+  if ((networkPolicyEvidence?.navigationViolations ?? []).length > 0) {
+    failures.push("a main frame reached a non-approved or local document URL");
+  }
+  if ((networkPolicyEvidence?.failedAllowedRequestHosts ?? []).length > 0) {
+    failures.push("an allowed remote request failed before a complete response");
+  }
+  if ((networkPolicyEvidence?.failedAllowedResponseHosts ?? []).length > 0) {
+    failures.push("an allowed remote response returned HTTP 4xx or 5xx");
+  }
+  if ((networkPolicyEvidence?.remoteHostBudgetOverflowCount ?? 0) > 0) {
+    failures.push("remote resource host cardinality exceeded its fail-closed budget");
+  }
+  if ((networkPolicyEvidence?.remoteRequestBudgetOverflowCount ?? 0) > 0) {
+    failures.push("remote request count exceeded its fail-closed budget");
+  }
+  if ((networkPolicyEvidence?.blockedHostOverflowCount ?? 0) > 0) {
+    failures.push("blocked resource host evidence exceeded its bounded host cardinality");
+  }
+  if ((pinnedTransport?.connectRequestBudgetOverflowCount ?? 0) > 0) {
+    failures.push("pinned transport CONNECT count exceeded its fail-closed budget");
+  }
+  if ((pinnedTransport?.activeTunnelBudgetOverflowCount ?? 0) > 0) {
+    failures.push("pinned transport active tunnel count exceeded its fail-closed budget");
+  }
+  if ((pinnedTransport?.transferByteBudgetOverflowCount ?? 0) > 0) {
+    failures.push("pinned transport transfer bytes exceeded its fail-closed budget");
+  }
+  if ((pinnedTransport?.dnsAddressOverflowCount ?? 0) > 0) {
+    failures.push("DNS answer cardinality exceeded its fail-closed budget");
+  }
+  if ((pinnedTransport?.dnsTimeoutCount ?? 0) > 0) {
+    failures.push("public-host DNS resolution exceeded its fail-closed deadline");
+  }
+  if ((pinnedTransport?.evidenceHostOverflowCount ?? 0) > 0) {
+    failures.push("pinned transport evidence exceeded its bounded host cardinality");
+  }
+  if ((pinnedTransport?.transportErrorCount ?? 0) > 0) {
+    failures.push("pinned transport emitted an internal server error");
+  }
+  if (
+    networkPolicyEvidence?.mode === "bounded-public-https-fidelity" &&
+    pinnedTransport?.sealed !== true
+  ) {
+    failures.push("pinned numeric-IP transport was not sealed with network evidence");
+  }
+  if ((pinnedTransport?.lateConnectCount ?? 0) > 0) {
+    failures.push("CONNECT attempts appeared after the pinned transport seal");
+  }
+  if ((roleResourceEvidence.selectorErrorCount ?? 0) > 0) {
+    failures.push("exact semantic role resource selector evaluation failed");
+  }
+  if ((roleResourceEvidence.rootOverflowCount ?? 0) > 0) {
+    failures.push("semantic role resource traversal exceeded its root budget");
+  }
+  if ((roleResourceEvidence.nodeOverflowCount ?? 0) > 0) {
+    failures.push("semantic role resource traversal exceeded its node budget");
+  }
+  if ((roleResourceEvidence.urlOverflowCount ?? 0) > 0) {
+    failures.push("semantic role resource traversal exceeded its URL budget");
+  }
+  if ((roleResourceEvidence.hostOverflowCount ?? 0) > 0) {
+    failures.push("semantic role resource traversal exceeded its host budget");
+  }
+  if ((roleResourceEvidence.elapsedTimeOverflowCount ?? 0) > 0) {
+    failures.push("semantic role resource traversal exceeded its time budget");
+  }
+  if ((roleResourceEvidence.unsafeReferenceOverflowCount ?? 0) > 0) {
+    failures.push("unsafe semantic role resource evidence exceeded its host budget");
+  }
+  if ((roleResourceEvidence.unsafeReferences ?? []).length > 0) {
+    failures.push("semantic role resources contain insecure or non-default authorities");
+  }
+  const referencedHosts = new Set((roleResourceEvidence.hosts ?? []).map(normalizedHostname));
+  const isRequiredHost = (hostname) =>
+    declaredResourceDomains.some((domain) => hostnameMatches(hostname, domain)) ||
+    referencedHosts.has(normalizedHostname(hostname));
+  const requiredBlockedHosts = (networkPolicyEvidence?.blockedHosts ?? []).filter(
+    (entry) => isRequiredHost(entry.hostname),
+  );
+  if (requiredBlockedHosts.length > 0) {
+    failures.push(
+      `${requiredBlockedHosts.length} required resource hosts were blocked by the audit network policy`,
+    );
+  }
+  const connectedHosts = new Set(
+    (pinnedTransport?.connectedHosts ?? []).map((entry) => normalizedHostname(entry.hostname)),
+  );
+  const requiredRejectedTransportHosts = (pinnedTransport?.rejectedHosts ?? []).filter(
+    (entry) => isRequiredHost(entry.hostname) && !connectedHosts.has(normalizedHostname(entry.hostname)),
+  );
+  if (requiredRejectedTransportHosts.length > 0) {
+    failures.push(
+      `${requiredRejectedTransportHosts.length} required resource hosts failed pinned transport`,
+    );
+  }
+  const unpinnedMainNavigationHosts = (networkPolicyEvidence?.allowedPublicHosts ?? []).filter(
+    (entry) => entry.mainNavigationCount > 0 && !connectedHosts.has(normalizedHostname(entry.hostname)),
+  );
+  if (unpinnedMainNavigationHosts.length > 0) {
+    failures.push("main-document transport did not prove a pinned numeric-IP tunnel");
+  }
+  return failures;
+}
+
 function normalizedHostname(hostname) {
   return String(hostname ?? "")
-    .toLocaleLowerCase()
+    .toLowerCase()
     .replace(/^\[|\]$/gu, "")
     .replace(/\.$/u, "");
 }
 
+const NON_PUBLIC_IPV4_BLOCKLIST = new BlockList();
+const NON_PUBLIC_IPV6_BLOCKLIST = new BlockList();
+for (const [network, prefix] of [
+  ["0.0.0.0", 8],
+  ["10.0.0.0", 8],
+  ["100.64.0.0", 10],
+  ["127.0.0.0", 8],
+  ["169.254.0.0", 16],
+  ["172.16.0.0", 12],
+  ["192.0.0.0", 24],
+  ["192.0.2.0", 24],
+  ["192.88.99.0", 24],
+  ["192.168.0.0", 16],
+  ["198.18.0.0", 15],
+  ["198.51.100.0", 24],
+  ["203.0.113.0", 24],
+  ["224.0.0.0", 4],
+  ["240.0.0.0", 4],
+]) {
+  NON_PUBLIC_IPV4_BLOCKLIST.addSubnet(network, prefix, "ipv4");
+}
+for (const [network, prefix] of [
+  ["::", 128],
+  ["::1", 128],
+  ["::", 96],
+  ["::ffff:0:0", 96],
+  ["64:ff9b::", 96],
+  ["64:ff9b:1::", 48],
+  ["100::", 64],
+  ["2001::", 23],
+  ["2001:db8::", 32],
+  ["2002::", 16],
+  ["fc00::", 7],
+  ["fe80::", 10],
+  ["fec0::", 10],
+  ["ff00::", 8],
+]) {
+  NON_PUBLIC_IPV6_BLOCKLIST.addSubnet(network, prefix, "ipv6");
+}
+
+function ipv4MappedAddress(address) {
+  const normalized = normalizedHostname(address);
+  const dotted = normalized.match(/^::(?:ffff:)?(\d+\.\d+\.\d+\.\d+)$/u)?.[1];
+  if (dotted) return dotted;
+  const hexadecimal = normalized.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/u);
+  if (!hexadecimal) return null;
+  const high = Number.parseInt(hexadecimal[1], 16);
+  const low = Number.parseInt(hexadecimal[2], 16);
+  return `${high >>> 8}.${high & 255}.${low >>> 8}.${low & 255}`;
+}
+
 function isPrivateOrSpecialIp(address) {
   const normalized = normalizedHostname(address);
-  if (normalized.includes(":")) {
-    if (
-      normalized === "::" ||
-      normalized === "::1" ||
-      normalized.startsWith("fe8") ||
-      normalized.startsWith("fe9") ||
-      normalized.startsWith("fea") ||
-      normalized.startsWith("feb") ||
-      normalized.startsWith("fc") ||
-      normalized.startsWith("fd")
-    ) {
-      return true;
-    }
-    const mapped = normalized.match(/::ffff:(\d+\.\d+\.\d+\.\d+)$/u)?.[1];
-    return mapped ? isPrivateOrSpecialIp(mapped) : false;
-  }
-  const octets = normalized.split(".").map(Number);
-  if (
-    octets.length !== 4 ||
-    octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)
-  ) {
-    return true;
-  }
-  const [first, second] = octets;
-  return (
-    first === 0 ||
-    first === 10 ||
-    first === 127 ||
-    (first === 100 && second >= 64 && second <= 127) ||
-    (first === 169 && second === 254) ||
-    (first === 172 && second >= 16 && second <= 31) ||
-    (first === 192 && second === 0) ||
-    (first === 192 && second === 168) ||
-    (first === 198 && (second === 18 || second === 19)) ||
-    first >= 224
-  );
+  const family = isIP(normalized);
+  if (family === 0) return true;
+  const mapped = family === 6 ? ipv4MappedAddress(normalized) : null;
+  if (mapped) return NON_PUBLIC_IPV4_BLOCKLIST.check(mapped, "ipv4");
+  return family === 4
+    ? NON_PUBLIC_IPV4_BLOCKLIST.check(normalized, "ipv4")
+    : NON_PUBLIC_IPV6_BLOCKLIST.check(normalized, "ipv6");
 }
 
 function forbiddenInfrastructureHostname(hostname) {
@@ -673,8 +1289,326 @@ function forbiddenInfrastructureHostname(hostname) {
     normalized.endsWith(".local") ||
     normalized.endsWith(".internal") ||
     normalized === "metadata.google.internal" ||
-    (isIP(normalized) !== 0 && isPrivateOrSpecialIp(normalized))
+    isIP(normalized) !== 0
   );
+}
+
+function parseConnectAuthority(authority) {
+  const match = String(authority ?? "").match(/^([^\s:@/?#\[\]]+):(\d{1,5})$/u);
+  if (!match) return null;
+  const hostname = normalizedHostname(match[1]);
+  const port = Number(match[2]);
+  if (
+    !hostname ||
+    hostname.length > 253 ||
+    !Number.isInteger(port) ||
+    port < 1 ||
+    port > 65_535 ||
+    isIP(hostname) !== 0 ||
+    forbiddenInfrastructureHostname(hostname)
+  ) {
+    return null;
+  }
+  return { hostname, port };
+}
+
+async function createPinnedPublicHttpsProxy() {
+  const approvedAddressesByHost = new Map();
+  const resolutionCache = new Map();
+  const connectedByHost = new Map();
+  const rejectedByHost = new Map();
+  const sockets = new Set();
+  let connectRequestCount = 0;
+  let activeTunnelCount = 0;
+  let connectRequestBudgetOverflowCount = 0;
+  let activeTunnelBudgetOverflowCount = 0;
+  let transferByteCount = 0;
+  let transferByteBudgetOverflowCount = 0;
+  let dnsAddressOverflowCount = 0;
+  let dnsTimeoutCount = 0;
+  let evidenceHostOverflowCount = 0;
+  let transportErrorCount = 0;
+  let lateConnectCount = 0;
+  let sealed = false;
+  let closePromise = null;
+
+  const record = (collection, hostname, reason) => {
+    const normalized = normalizedHostname(hostname);
+    let entry = collection.get(normalized);
+    if (!entry) {
+      if (collection.size >= PINNED_PROXY_MAX_EVIDENCE_HOSTS) {
+        evidenceHostOverflowCount += 1;
+        return;
+      }
+      entry = { hostname: normalized.slice(0, 253), count: 0, reasons: new Set() };
+      collection.set(normalized, entry);
+    }
+    entry.count += 1;
+    entry.reasons.add(String(reason ?? "unknown").slice(0, 64));
+  };
+  const serialize = (collection) => [...collection.values()]
+    .map((entry) => ({
+      hostname: entry.hostname,
+      count: entry.count,
+      reasons: [...entry.reasons].sort(),
+    }))
+    .sort((left, right) =>
+      left.hostname < right.hostname ? -1 : left.hostname > right.hostname ? 1 : 0,
+    );
+  const resolvePublicAddresses = async (hostname) => {
+    const normalized = normalizedHostname(hostname);
+    if (forbiddenInfrastructureHostname(normalized)) return [];
+    const now = Date.now();
+    const cached = resolutionCache.get(normalized);
+    if (cached && cached.expiresAt > now) return cached.promise;
+    const promise = (async () => {
+      try {
+        let timeoutId;
+        const records = await Promise.race([
+          lookup(normalized, { all: true, verbatim: true }),
+          new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+              dnsTimeoutCount += 1;
+              reject(new Error("public-host DNS resolution timed out"));
+            }, PINNED_PROXY_DNS_TIMEOUT_MS);
+          }),
+        ]).finally(() => clearTimeout(timeoutId));
+        const addresses = [
+          ...new Set(records.map(({ address }) => normalizedHostname(address))),
+        ].sort();
+        if (addresses.length > PINNED_PROXY_MAX_DNS_ADDRESSES) {
+          dnsAddressOverflowCount += 1;
+          return [];
+        }
+        if (
+          addresses.length < 1 ||
+          addresses.some((address) => isPrivateOrSpecialIp(address))
+        ) {
+          return [];
+        }
+        return addresses;
+      } catch {
+        return [];
+      }
+    })();
+    resolutionCache.set(normalized, { expiresAt: now + 300_000, promise });
+    return promise;
+  };
+  const approvePublicHost = async (hostname) => {
+    const normalized = normalizedHostname(hostname);
+    const addresses = await resolvePublicAddresses(normalized);
+    if (addresses.length < 1) return [];
+    if (
+      !approvedAddressesByHost.has(normalized) &&
+      approvedAddressesByHost.size >= NETWORK_POLICY_MAX_REMOTE_HOSTS
+    ) {
+      evidenceHostOverflowCount += 1;
+      return [];
+    }
+    approvedAddressesByHost.set(normalized, addresses);
+    return addresses;
+  };
+  const connectToAddress = (
+    address,
+    timeoutMs,
+    observeSocket = () => {},
+  ) => new Promise((resolve, reject) => {
+    const upstream = createConnection({
+      host: address,
+      port: 443,
+      family: isIP(address),
+    });
+    observeSocket(upstream);
+    let settled = false;
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      upstream.destroy();
+      reject(error);
+    };
+    upstream.setTimeout(
+      timeoutMs,
+      () => fail(new Error("pinned CONNECT timed out")),
+    );
+    upstream.once("error", fail);
+    upstream.once("connect", () => {
+      if (settled) return;
+      settled = true;
+      upstream.removeListener("error", fail);
+      upstream.setTimeout(0);
+      resolve(upstream);
+    });
+  });
+  const rejectConnect = (clientSocket, status, hostname, reason) => {
+    record(rejectedByHost, hostname, reason);
+    if (!clientSocket.destroyed) {
+      clientSocket.end(
+        `HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
+      );
+    }
+  };
+  const server = createServer((_request, response) => {
+    response.writeHead(405, { Connection: "close", "Content-Length": "0" });
+    response.end();
+  });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  server.on("connect", (request, clientSocket, head) => {
+    connectRequestCount += 1;
+    const authority = parseConnectAuthority(request.url);
+    const evidenceHostname = authority?.hostname ?? "invalid-connect-authority";
+    if (sealed) {
+      lateConnectCount += 1;
+      rejectConnect(clientSocket, "403 Forbidden", evidenceHostname, "transport-sealed");
+      return;
+    }
+    if (connectRequestCount > PINNED_PROXY_MAX_CONNECT_REQUESTS) {
+      connectRequestBudgetOverflowCount += 1;
+      rejectConnect(clientSocket, "429 Too Many Requests", evidenceHostname, "connect-budget");
+      return;
+    }
+    if (activeTunnelCount >= PINNED_PROXY_MAX_ACTIVE_TUNNELS) {
+      activeTunnelBudgetOverflowCount += 1;
+      rejectConnect(clientSocket, "429 Too Many Requests", evidenceHostname, "active-budget");
+      return;
+    }
+    if (!authority || authority.port !== 443) {
+      rejectConnect(clientSocket, "403 Forbidden", evidenceHostname, "authority-denied");
+      return;
+    }
+    const approvedAddresses = approvedAddressesByHost.get(authority.hostname);
+    if (!approvedAddresses?.length) {
+      rejectConnect(clientSocket, "403 Forbidden", authority.hostname, "unapproved-host");
+      return;
+    }
+    activeTunnelCount += 1;
+    let tunnelReleased = false;
+    let clientClosed = false;
+    let pendingUpstream = null;
+    const releaseTunnel = () => {
+      if (tunnelReleased) return;
+      tunnelReleased = true;
+      activeTunnelCount -= 1;
+    };
+    clientSocket.once("close", () => {
+      clientClosed = true;
+      pendingUpstream?.destroy();
+      releaseTunnel();
+    });
+    void (async () => {
+      let upstream = null;
+      const connectDeadline = Date.now() + PINNED_PROXY_CONNECT_TIMEOUT_MS;
+      for (const address of approvedAddresses) {
+        if (clientClosed) break;
+        const remainingMs = connectDeadline - Date.now();
+        if (remainingMs <= 0) break;
+        try {
+          pendingUpstream = await connectToAddress(
+            address,
+            remainingMs,
+            (socket) => {
+              pendingUpstream = socket;
+            },
+          );
+          upstream = pendingUpstream;
+          break;
+        } catch {}
+      }
+      pendingUpstream = null;
+      if (!upstream || clientClosed) {
+        upstream?.destroy();
+        releaseTunnel();
+        if (!clientClosed) {
+          rejectConnect(clientSocket, "502 Bad Gateway", authority.hostname, "connect-failed");
+        }
+        return;
+      }
+      sockets.add(upstream);
+      upstream.once("close", () => sockets.delete(upstream));
+      record(connectedByHost, authority.hostname, "pinned-public-ip");
+      const accountTransfer = (chunk) => {
+        transferByteCount += chunk.length;
+        if (
+          transferByteCount > PINNED_PROXY_MAX_TRANSFER_BYTES &&
+          transferByteBudgetOverflowCount === 0
+        ) {
+          transferByteBudgetOverflowCount += 1;
+          clientSocket.destroy();
+          upstream.destroy();
+        }
+      };
+      clientSocket.on("data", accountTransfer);
+      upstream.on("data", accountTransfer);
+      clientSocket.once("error", () => upstream.destroy());
+      upstream.once("error", () => clientSocket.destroy());
+      clientSocket.once("close", () => upstream.destroy());
+      upstream.once("close", () => clientSocket.destroy());
+      clientSocket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+      if (head?.length) {
+        accountTransfer(head);
+        if (!upstream.destroyed) upstream.write(head);
+      }
+      clientSocket.pipe(upstream);
+      upstream.pipe(clientSocket);
+    })().catch(() => {
+      releaseTunnel();
+      rejectConnect(clientSocket, "502 Bad Gateway", authority.hostname, "proxy-error");
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.removeListener("error", reject);
+      resolve();
+    });
+  });
+  server.on("error", () => {
+    transportErrorCount += 1;
+    for (const socket of sockets) socket.destroy();
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    throw new Error("pinned public HTTPS proxy did not bind to a TCP port");
+  }
+  return {
+    serverUrl: `http://127.0.0.1:${address.port}`,
+    approvePublicHost,
+    seal() {
+      sealed = true;
+    },
+    snapshot() {
+      return {
+        policyVersion: 1,
+        mode: "route-approved-numeric-ip-connect",
+        approvedHostCount: approvedAddressesByHost.size,
+        connectRequestCount,
+        activeTunnelCount,
+        connectRequestBudgetOverflowCount,
+        activeTunnelBudgetOverflowCount,
+        transferByteCount,
+        transferByteBudgetOverflowCount,
+        dnsAddressOverflowCount,
+        dnsTimeoutCount,
+        evidenceHostOverflowCount,
+        transportErrorCount,
+        lateConnectCount,
+        sealed,
+        connectedHosts: serialize(connectedByHost),
+        rejectedHosts: serialize(rejectedByHost),
+      };
+    },
+    async close() {
+      if (!closePromise) {
+        closePromise = (async () => {
+          for (const socket of sockets) socket.destroy();
+          await new Promise((resolve) => server.close(resolve));
+        })();
+      }
+      return closePromise;
+    },
+  };
 }
 
 function wildcardPathMatches(pathAndQuery, configuredPath) {
@@ -729,6 +1663,100 @@ function urlMatchesLayout(urlText, layout) {
   return matchingApprovedPaths(urlText, layout).length > 0;
 }
 
+function runtimeExpectationForTarget(target) {
+  const derived = target?.source === "sample" && !target.algumon
+    ? "direct-negative"
+    : target?.source === "algumon-latest" && target.algumon
+      ? "relay-positive"
+      : null;
+  if (
+    derived &&
+    (target.runtimeExpectation === undefined || target.runtimeExpectation === derived)
+  ) {
+    return derived;
+  }
+  throw new Error("audit target has no explicit direct-negative or relay-positive expectation");
+}
+
+function candidateGenerationAllowed(
+  runtimeExpectation,
+  sourceClassification,
+  networkFidelityFailureCount = 0,
+) {
+  return Boolean(
+    runtimeExpectation === "relay-positive" &&
+      sourceClassification?.kind === "article-response" &&
+      sourceClassification?.candidateEligible === true &&
+      networkFidelityFailureCount === 0,
+  );
+}
+
+function classifyProfileLandingRoute(
+  site,
+  profileName,
+  finalUrl,
+  promotionCandidate = null,
+) {
+  const applicableLayouts = site.layouts.filter((layout) =>
+    profilesForLayout(site, layout).includes(profileName),
+  );
+  const configuredMatches = applicableLayouts.flatMap((layout) =>
+    matchingApprovedPaths(finalUrl, layout).map((configuredPath) => ({
+      layout,
+      configuredPath,
+    })),
+  );
+  const baselineMatches = applicableLayouts.flatMap((layout) => {
+    const excludedVariantId =
+      promotionCandidate?.siteId === site.id &&
+      promotionCandidate?.layoutId === layout.id
+        ? promotionCandidate.variantId
+        : null;
+    return matchingApprovedPaths(finalUrl, layout, excludedVariantId).map(
+      (configuredPath) => ({ layout, configuredPath }),
+    );
+  });
+  const sameDomainLayouts = applicableLayouts.filter((layout) => {
+    try {
+      return hostnameMatches(new URL(finalUrl).hostname, layout.domain);
+    } catch {
+      return false;
+    }
+  });
+  const configuredLayoutIds = new Set(
+    configuredMatches.map(({ layout }) => layout.id),
+  );
+  const associatedLayout = configuredLayoutIds.size === 1
+    ? configuredMatches[0].layout
+    : configuredMatches.length === 0 && sameDomainLayouts.length === 1
+      ? sameDomainLayouts[0]
+      : null;
+  const classification = configuredMatches.length === 1
+    ? "configured-exact"
+    : configuredMatches.length > 1
+      ? "configured-ambiguous"
+      : associatedLayout
+        ? "same-domain-candidate"
+        : "outside-or-ambiguous-domain";
+  return {
+    layoutId: associatedLayout?.id ?? null,
+    classification,
+    configuredPathMatchCount: configuredMatches.length,
+    configuredPathMatches: configuredMatches.map(({ layout, configuredPath }) => ({
+      layoutId: layout.id,
+      configuredPath,
+    })),
+    baselineApprovedPathMatchCount: baselineMatches.length,
+    baselineApprovedPathMatches: baselineMatches.map(({ layout, configuredPath }) => ({
+      layoutId: layout.id,
+      configuredPath,
+    })),
+    approvedRouteMatched: baselineMatches.length === 1,
+    matchedApprovedPath:
+      baselineMatches.length === 1 ? baselineMatches[0].configuredPath : null,
+  };
+}
+
 function profilesForLayout(site, layout) {
   if (
     Array.isArray(layout.applicable_profiles) &&
@@ -761,6 +1789,12 @@ function resourceDomainsForLayout(site, layout, includeAlgumon = false) {
       ? site.algumon_resource_domains
       : []),
   ];
+}
+
+function resourceDomainsForSite(site, includeAlgumon = false) {
+  return [...new Set(site.layouts.flatMap((layout) =>
+    resourceDomainsForLayout(site, layout, includeAlgumon),
+  ))];
 }
 
 function sha256(content) {
@@ -919,6 +1953,7 @@ async function buildIntegrityManifest(
   const userscript = byPath.get("hotdeal-focus.user.js");
   const configArtifact = byPath.get("config/sites.json");
   const approvedStateArtifact = byPath.get("state/approved-variants.json");
+  const gateArtifactLockArtifact = byPath.get("config/gate-artifacts.json");
   const releaseManifestArtifact = byPath.get("release-manifest.json");
   const behaviorBaselineArtifact = byPath.get(
     "tests/fixtures/behavior-baseline.json",
@@ -937,6 +1972,14 @@ async function buildIntegrityManifest(
       approvedState = JSON.parse(approvedStateArtifact.content);
     } catch {
       approvedState = null;
+    }
+  }
+  let gateArtifactLock = null;
+  if (!gateArtifactLockArtifact?.missing) {
+    try {
+      gateArtifactLock = JSON.parse(gateArtifactLockArtifact.content);
+    } catch {
+      gateArtifactLock = null;
     }
   }
   const isDraftBundle = draftManifest !== null;
@@ -966,7 +2009,7 @@ async function buildIntegrityManifest(
     isDraftBundle &&
     draftManifest?.schemaVersion === 1 &&
     draftManifest?.status === "draft-non-promotable" &&
-    Number.isInteger(draftManifest?.protocolVersion) &&
+    draftManifest?.protocolVersion === READER_GATE_PROTOCOL_VERSION &&
     typeof draftManifest?.releaseVersion === "string" &&
     canonicalJson(draftArtifactPaths) === canonicalJson(expectedDraftArtifactPaths) &&
     canonicalJson(draftManifest.artifacts) === canonicalJson(draftArtifactEntries) &&
@@ -986,6 +2029,9 @@ async function buildIntegrityManifest(
   const actualContractCount = actualLayoutCount + actualVariantCount;
   const missingSiteIds = REQUIRED_SITE_IDS.filter(
     (siteId) => !actualSiteIds.includes(siteId),
+  );
+  const unexpectedSiteIds = actualSiteIds.filter(
+    (siteId) => !REQUIRED_SITE_IDS.includes(siteId),
   );
   const staticRules = staticFilter?.missing
     ? []
@@ -1020,41 +2066,118 @@ async function buildIntegrityManifest(
   const markerRules = markerFilter?.missing
     ? []
     : parseAdguardCosmeticRules(markerFilter.content);
+  const exactObjectKeys = (value, expectedKeys) =>
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    canonicalJson(Object.keys(value).sort()) === canonicalJson([...expectedKeys].sort());
+  const gateLockEntry = gateArtifactLock?.artifact;
+  const gateArtifactLockContract = isDraftBundle || (
+    !markerFilter?.missing &&
+    !gateArtifactLockArtifact?.missing &&
+    exactObjectKeys(gateArtifactLock, [
+      "schemaVersion",
+      "protocolVersion",
+      "gateArtifactVersion",
+      "filterSubscriptionUrl",
+      "artifact",
+    ]) &&
+    exactObjectKeys(gateLockEntry, [
+      "path",
+      "bytes",
+      "sha256",
+      "installedRulesSha256",
+    ]) &&
+    gateArtifactLock.schemaVersion === 1 &&
+    gateArtifactLock.protocolVersion === READER_GATE_PROTOCOL_VERSION &&
+    gateArtifactLock.gateArtifactVersion === READER_GATE_ARTIFACT_VERSION &&
+    gateArtifactLock.filterSubscriptionUrl === READER_GATE_SUBSCRIPTION_URL &&
+    gateLockEntry.path === "filter.txt" &&
+    gateLockEntry.bytes === markerFilter.bytes &&
+    gateLockEntry.sha256 === markerFilter.sha256 &&
+    gateLockEntry.installedRulesSha256 ===
+      installedFilterRulesSha256(markerFilter.content)
+  );
   const markerDomains = [...new Set(layouts.map((layout) => layout.domain))];
+  const paintSafeLayoutPreservingLockDeclarations = [
+    "transition: none !important",
+    "animation: none !important",
+    "visibility: hidden !important",
+    "content-visibility: hidden !important",
+    "opacity: 0 !important",
+    "clip-path: inset(50%) !important",
+    "pointer-events: none !important",
+    "caret-color: transparent !important",
+  ];
+  const domainGateRules = (domain) => markerRules.filter(
+    (rule) =>
+      rule.path === null &&
+      rule.domains.length === 1 &&
+      rule.domains[0] === domain,
+  );
   const markerGateCovered = markerDomains.every((domain) =>
-    markerRules.some(
-      (rule) =>
-        rule.domains.some((ruleDomain) => ruleDomain === domain) &&
-        rule.path === null &&
-        rule.operator === "#?#" &&
-        /\[data-hotdeal-focus-ready=(?:"1"|'1')\]/u.test(rule.selector) &&
-        /\[data-hotdeal-focus-state=(?:"ready"|'ready')\]/u.test(rule.selector) &&
-        /:not\(\[data-hotdeal-focus-keep\]\)/u.test(rule.selector),
-    ),
+    (() => {
+      const rules = domainGateRules(domain);
+      const standard = rules.filter((rule) => rule.operator === "#$#");
+      const extended = rules.filter((rule) => rule.operator === "#$?#");
+      const everyRuleIsV2 = rules.every((rule) =>
+        rule.malformed === false &&
+        !/hdf-v1-|data-hotdeal-focus-protocol=["'](?!2["'])/u.test(rule.selector));
+      const projectionInBothEngines = [standard, extended].every((engineRules) =>
+        engineRules.some(isReaderGateProjectionHideRule));
+      const requiredMarkerTokens = [
+        "hdf-v2-keep",
+        "hdf-v2-shell",
+        "hdf-v2-deep",
+        "hdf-v2-role-title",
+        "hdf-v2-role-title-text",
+        "hdf-v2-role-body",
+        "hdf-v2-role-product",
+        "hdf-v2-role-comment-item",
+        "hdf-v2-role-comment-control",
+      ];
+      return rules.length === 13 && standard.length === 7 && extended.length === 6 &&
+        everyRuleIsV2 && projectionInBothEngines &&
+        requiredMarkerTokens.every((token) =>
+          standard.some((rule) => rule.selector.includes(token)) &&
+          extended.some((rule) => rule.selector.includes(token)));
+    })(),
   );
   const prelockGateCovered = markerDomains.every((domain) =>
-    markerRules.some(
-      (rule) =>
-        rule.domains.some((ruleDomain) => ruleDomain === domain) &&
-        rule.path === null &&
+    (() => {
+      const rules = domainGateRules(domain);
+      const rootLockRules = ["#$#", "#$?#"].map((operator) =>
+        rules.find((rule) =>
+          rule.operator === operator &&
+          rule.selector.includes(
+            `html:not(${READER_GATE_READY_SELECTOR.slice(4)})`,
+          ) &&
+          rule.selector.includes("html.hdf-v2-lock") &&
+          paintSafeLayoutPreservingLockDeclarations.every((declaration) =>
+            rule.declarations?.includes(declaration)) &&
+          !/display\s*:/u.test(
+            rule.declarations ?? "",
+          )),
+      );
+      const topLayerRule = rules.find((rule) =>
         rule.operator === "#$#" &&
-        /^html:not\(/u.test(rule.selector) &&
-        /data-hotdeal-focus-ready/u.test(rule.selector) &&
-        /html\[data-hotdeal-focus-lock=(?:"1"|'1')\]/u.test(rule.selector) &&
-        /dialog::backdrop/u.test(rule.selector) &&
-        /\[popover\]::backdrop/u.test(rule.selector) &&
-        /:fullscreen::backdrop/u.test(rule.selector) &&
-        /transition\s*:\s*none\s*!important/u.test(rule.selector) &&
-        /animation\s*:\s*none\s*!important/u.test(rule.selector) &&
-        /content-visibility\s*:\s*hidden\s*!important/u.test(rule.selector) &&
-        /visibility\s*:\s*hidden\s*!important/u.test(rule.selector) &&
-        /opacity\s*:\s*0\s*!important/u.test(rule.selector) &&
-        /pointer-events\s*:\s*none\s*!important/u.test(rule.selector) &&
-        /clip-path\s*:\s*inset\(50%\)\s*!important/u.test(rule.selector),
-    ),
+        rule.selector.includes("dialog::backdrop") &&
+        rule.selector.includes("[popover]::backdrop") &&
+        rule.selector.includes(":fullscreen::backdrop") &&
+        /display:\s*none\s*!important/u.test(rule.declarations ?? "") &&
+        /visibility:\s*hidden\s*!important/u.test(rule.declarations ?? ""));
+      return rootLockRules.every(Boolean) && Boolean(topLayerRule);
+    })(),
   );
   const userscriptContractCovered =
     !userscript?.missing &&
+    /^\/\/\s*@grant\s+GM_addElement\s*$/mu.test(userscript.content) &&
+    (userscript.content.match(/^\/\/\s*@grant\s+/gmu) ?? []).length === 1 &&
+    userscript.content.includes('const PROTOCOL_VERSION = "2"') &&
+    userscript.content.includes('GM_addElement(parent, "style", {') &&
+    userscript.content.includes('"data-hotdeal-focus-runtime-style": "2"') &&
+    userscript.content.includes("hdf-v2-lock") &&
+    userscript.content.includes("hdf-v2-ready") &&
     userscript.content.includes("data-hotdeal-focus-ready") &&
     userscript.content.includes("data-hotdeal-focus-keep") &&
     userscript.content.includes("__HOTDEAL_FOCUS_DIAGNOSTICS__");
@@ -1078,6 +2201,17 @@ async function buildIntegrityManifest(
     const entry = entries?.[artifactPath];
     return typeof entry === "string" ? entry : entry?.sha256 ?? null;
   };
+  const releaseGateEntry = releaseArtifactEntryFor("filter.txt");
+  const gateArtifactLockMatchesRelease = isDraftBundle || (
+    gateArtifactLockContract &&
+    releaseManifest?.protocolVersion === gateArtifactLock.protocolVersion &&
+    releaseManifest?.gateArtifactVersion === gateArtifactLock.gateArtifactVersion &&
+    releaseManifest?.filterSubscriptionUrl === gateArtifactLock.filterSubscriptionUrl &&
+    releaseGateEntry?.version === gateArtifactLock.gateArtifactVersion &&
+    releaseGateEntry?.bytes === gateLockEntry.bytes &&
+    releaseGateEntry?.sha256 === gateLockEntry.sha256 &&
+    releaseGateEntry?.installedRulesSha256 === gateLockEntry.installedRulesSha256
+  );
   const artifactHashesMatchRelease = [markerFilter, userscript].every(
     (artifact) =>
       !artifact?.missing && releaseHashFor(artifact.path) === artifact.sha256,
@@ -1123,10 +2257,15 @@ async function buildIntegrityManifest(
       : releaseManifest?.protocolVersion ?? releaseManifest?.protocol_version);
   const markerProtocolVersions = new Set(
     markerRules.flatMap((rule) => {
-      const match = rule.selector.match(/data-hotdeal-focus-protocol=["']([^"']+)["']/u);
-      return match ? [match[1]] : [];
+      return [...rule.selector.matchAll(
+        /data-hotdeal-focus-protocol=["']([^"']+)["']/gu,
+      )].map((match) => match[1]);
     }),
   );
+  const markerHeaderProtocolVersions = markerFilter?.missing
+    ? []
+    : [...markerFilter.content.matchAll(/^! Hotdeal-Focus-Protocol:\s*(\d+)\s*$/gmu)]
+        .map((match) => Number(match[1]));
   let behaviorBaseline = null;
   try {
     behaviorBaseline = JSON.parse(behaviorBaselineArtifact?.content ?? "null");
@@ -1134,8 +2273,8 @@ async function buildIntegrityManifest(
     behaviorBaseline = null;
   }
   const protocolMajorStable =
-    Number.isInteger(releaseProtocolVersion) &&
-    behaviorBaseline?.protocol_major === releaseProtocolVersion;
+    releaseProtocolVersion === READER_GATE_PROTOCOL_VERSION &&
+    behaviorBaseline?.protocol_major === READER_GATE_PROTOCOL_VERSION;
   const userscriptVersion = userscript?.content?.match(
     /^\/\/\s*@version\s+([^\s]+)\s*$/mu,
   )?.[1];
@@ -1185,7 +2324,10 @@ async function buildIntegrityManifest(
   const generatorVersion =
     releaseManifest?.generatorVersion ?? releaseManifest?.generator_version;
   const checks = {
-    requiredSevenSites: missingSiteIds.length === 0,
+    requiredSevenSites:
+      missingSiteIds.length === 0 &&
+      unexpectedSiteIds.length === 0 &&
+      actualSiteIds.length === REQUIRED_SITE_IDS.length,
     everySiteHasLayout: config.sites.every((site) => site.layouts.length > 0),
     everyLayoutHasDesktopOrMobile: layouts.every(
       (layout) => layout.desktop || layout.mobile,
@@ -1193,13 +2335,14 @@ async function buildIntegrityManifest(
     everyLayoutInStaticFilter: layouts.every((layout) => layout.staticCovered),
     markerGateContract: markerGateCovered,
     prelockGateContract: prelockGateCovered,
+    gateArtifactLockContract,
+    gateArtifactLockMatchesRelease,
     userscriptContract: userscriptContractCovered,
     releaseManifestContract:
       isDraftBundle
         ? draftManifestContract
         : Boolean(releaseManifest) &&
-          Number.isInteger(releaseProtocolVersion) &&
-          releaseProtocolVersion >= 1 &&
+          releaseProtocolVersion === READER_GATE_PROTOCOL_VERSION &&
           typeof generatorVersion === "string" &&
           generatorVersion.length > 0 &&
           canonicalJson(Object.keys(releaseManifest.artifacts ?? {}).sort()) ===
@@ -1213,7 +2356,12 @@ async function buildIntegrityManifest(
     protocolMajorStable,
     markerProtocolMajorStable:
       markerProtocolVersions.size === 1 &&
-      markerProtocolVersions.has(String(releaseProtocolVersion)),
+      markerProtocolVersions.has(String(READER_GATE_PROTOCOL_VERSION)) &&
+      markerHeaderProtocolVersions.length === 1 &&
+      markerHeaderProtocolVersions[0] === READER_GATE_PROTOCOL_VERSION &&
+      !markerFilter?.missing &&
+      !markerFilter.content.includes("hdf-v1-") &&
+      !/data-hotdeal-focus-protocol=["']1["']/u.test(markerFilter.content),
     userscriptVersionMatchesRelease:
       typeof userscriptVersion === "string" && userscriptVersion === releaseVersion,
     distinctStaticAndMarkerFilters:
@@ -1235,6 +2383,7 @@ async function buildIntegrityManifest(
       requiredSiteIds: REQUIRED_SITE_IDS,
       actualSiteIds,
       missingSiteIds,
+      unexpectedSiteIds,
     },
     artifacts: artifacts.map(({ content: _content, absolutePath: _absolutePath, ...item }) => item),
     releaseManifest: releaseManifest
@@ -1242,6 +2391,14 @@ async function buildIntegrityManifest(
           sha256: releaseManifestArtifact.sha256,
           protocolVersion: releaseProtocolVersion,
           generatorVersion,
+        }
+      : null,
+    gateArtifactLock: gateArtifactLock
+      ? {
+          sha256: gateArtifactLockArtifact.sha256,
+          protocolVersion: gateArtifactLock.protocolVersion,
+          gateArtifactVersion: gateArtifactLock.gateArtifactVersion,
+          filterSubscriptionUrl: gateArtifactLock.filterSubscriptionUrl,
         }
       : null,
     coverage: layouts,
@@ -1269,11 +2426,63 @@ async function importPlaywright() {
   }
 }
 
+function resolveRuntimeDeviceProfiles(devices) {
+  const profiles = {};
+  for (const [profileName, contract] of Object.entries(DEVICE_PROFILES)) {
+    const descriptor = devices?.[contract.descriptorName];
+    const chromeVersion = String(descriptor?.userAgent ?? "").match(
+      /\bChrome\/(\d+\.\d+\.\d+\.\d+)\b/u,
+    )?.[1];
+    if (
+      !descriptor ||
+      descriptor.defaultBrowserType !== "chromium" ||
+      descriptor.isMobile !== contract.expectedMobile ||
+      !chromeVersion ||
+      !descriptor.viewport ||
+      !descriptor.screen ||
+      !Number.isFinite(descriptor.deviceScaleFactor)
+    ) {
+      throw new Error(
+        `Playwright device descriptor is incomplete or incompatible: ${contract.descriptorName}`,
+      );
+    }
+    profiles[profileName] = Object.freeze({
+      descriptorName: contract.descriptorName,
+      userAgent: descriptor.userAgent,
+      viewport: Object.freeze({ ...descriptor.viewport }),
+      screen: Object.freeze({ ...descriptor.screen }),
+      deviceScaleFactor: descriptor.deviceScaleFactor,
+      isMobile: descriptor.isMobile,
+      hasTouch: descriptor.hasTouch,
+      chromeVersion,
+    });
+  }
+  return Object.freeze(profiles);
+}
+
+function assertBrowserMatchesDeviceProfiles(browserVersion, profiles) {
+  if (!/^\d+\.\d+\.\d+\.\d+$/u.test(browserVersion)) {
+    throw new Error(`Chromium reported an invalid browser version: ${browserVersion}`);
+  }
+  for (const [profileName, profile] of Object.entries(profiles)) {
+    if (profile.chromeVersion !== browserVersion) {
+      throw new Error(
+        `${profileName} UA ${profile.chromeVersion} does not match Chromium ${browserVersion}`,
+      );
+    }
+  }
+}
+
 function contextOptions(profileName) {
-  const profile = DEVICE_PROFILES[profileName];
+  const profile = RUNTIME_DEVICE_PROFILES?.[profileName];
+  if (!profile) {
+    throw new Error(`runtime device profile is not initialized: ${profileName}`);
+  }
   return {
     viewport: profile.viewport,
+    screen: profile.screen,
     userAgent: profile.userAgent,
+    deviceScaleFactor: profile.deviceScaleFactor,
     isMobile: profile.isMobile,
     hasTouch: profile.hasTouch,
     locale: "ko-KR",
@@ -1286,16 +2495,43 @@ function contextOptions(profileName) {
 async function settlePage(page, timeoutMs) {
   await page.waitForLoadState("domcontentloaded", { timeout: timeoutMs });
   await page.waitForLoadState("networkidle", { timeout: Math.min(timeoutMs, 8_000) }).catch(() => {});
-  await page.evaluate(async () => {
+  const scrollSettlement = await page.evaluate(async ({ maxSteps, deadlineMs }) => {
     const delay = (milliseconds) =>
       new Promise((resolve) => window.setTimeout(resolve, milliseconds));
-    const step = Math.max(400, Math.floor(window.innerHeight * 0.8));
-    for (let position = 0; position < document.documentElement.scrollHeight; position += step) {
+    const startedAt = performance.now();
+    let position = 0;
+    let stepCount = 0;
+    while (
+      position < document.documentElement.scrollHeight &&
+      stepCount < maxSteps &&
+      performance.now() - startedAt < deadlineMs
+    ) {
+      const step = Math.max(
+        600,
+        Math.floor(window.innerHeight * 0.8),
+        Math.ceil(document.documentElement.scrollHeight / maxSteps),
+      );
       window.scrollTo(0, position);
-      await delay(60);
+      await delay(40);
+      position += step;
+      stepCount += 1;
     }
+    const completed = position >= document.documentElement.scrollHeight;
     window.scrollTo(0, 0);
+    return {
+      completed,
+      stepCount,
+      finalScrollHeight: document.documentElement.scrollHeight,
+    };
+  }, {
+    maxSteps: 128,
+    deadlineMs: Math.min(timeoutMs, 7_000),
   });
+  if (scrollSettlement.completed !== true) {
+    throw new Error(
+      "source-or-infrastructure-failure: bounded scroll settlement exceeded its step or time budget",
+    );
+  }
   await page.waitForTimeout(250);
   await page.addStyleTag({
     content:
@@ -1303,34 +2539,807 @@ async function settlePage(page, timeoutMs) {
   });
 }
 
-async function navigate(page, targetUrl, timeoutMs) {
+function comparableDocumentUrl(urlText) {
+  try {
+    const parsed = new URL(urlText);
+    parsed.hash = "";
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
+function selectFinalMainDocumentResponse(responseChain, finalUrl) {
+  const comparableFinalUrl = comparableDocumentUrl(finalUrl);
+  const matchingResponses = (responseChain ?? []).filter(
+    (response) => comparableDocumentUrl(response.url) === comparableFinalUrl,
+  );
+  return matchingResponses.at(-1) ?? null;
+}
+
+function observeMainDocumentResponses(page) {
+  const responseChain = [];
+  const onResponse = (response) => {
+    const request = response.request();
+    let isMainDocument = false;
+    try {
+      isMainDocument =
+        request.isNavigationRequest() &&
+        request.resourceType() === "document" &&
+        request.frame() === page.mainFrame();
+    } catch {}
+    if (!isMainDocument) return;
+    responseChain.push({
+      sequence: responseChain.length,
+      url: response.url(),
+      status: response.status(),
+      contentType: response.headers()["content-type"] ?? "",
+    });
+  };
+  page.on("response", onResponse);
+  return {
+    responseChain,
+    stop() {
+      page.off("response", onResponse);
+    },
+  };
+}
+
+function navigationEvidenceFromObserver(observer, finalUrl, fallbackResponse = null) {
+  const responseChain = observer.responseChain.map((response) => ({ ...response }));
+  const selected =
+    selectFinalMainDocumentResponse(responseChain, finalUrl) ??
+    (fallbackResponse
+      ? {
+          sequence: responseChain.length,
+          url: fallbackResponse.url(),
+          status: fallbackResponse.status(),
+          contentType: fallbackResponse.headers()["content-type"] ?? "",
+        }
+      : null);
+  return {
+    finalUrl,
+    status: selected?.status ?? null,
+    contentType: selected?.contentType ?? "",
+    mainDocumentResponse: selected,
+    mainDocumentResponseChain: responseChain,
+  };
+}
+
+async function navigate(page, targetUrl, timeoutMs, externalResponseObserver = null) {
   let response = null;
+  const responseObserver = externalResponseObserver ?? observeMainDocumentResponses(page);
   const navigationProof = seededNavigationProof(targetUrl);
   try {
-    if (navigationProof) {
-      await page.goto("about:blank", {
-        waitUntil: "commit",
+    try {
+      if (navigationProof) {
+        await page.goto("about:blank", {
+          waitUntil: "commit",
+          timeout: timeoutMs,
+        });
+        await page.evaluate((name) => {
+          window.name = name;
+        }, `hdf-provenance:${navigationProof.navigationNonce}`);
+      }
+      response = await page.goto(targetUrl, {
+        waitUntil: "domcontentloaded",
         timeout: timeoutMs,
+        ...(navigationProof ? { referer: ALGUMON_GLOBAL_DISCOVERY_URL } : {}),
       });
-      await page.evaluate((name) => {
-        window.name = name;
-      }, `hdf-provenance:${navigationProof.navigationNonce}`);
+    } catch (error) {
+      if (page.url() === "about:blank") {
+        throw error;
+      }
     }
-    response = await page.goto(targetUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: timeoutMs,
-      ...(navigationProof ? { referer: ALGUMON_GLOBAL_DISCOVERY_URL } : {}),
+    await settlePage(page, timeoutMs);
+    return navigationEvidenceFromObserver(responseObserver, page.url(), response);
+  } finally {
+    if (!externalResponseObserver) responseObserver.stop();
+  }
+}
+
+function siteArticleIdentity(urlText, siteId) {
+  let parsed;
+  try {
+    parsed = new URL(urlText);
+  } catch {
+    return null;
+  }
+  const domain = ARTICLE_IDENTITY_DOMAINS[siteId];
+  if (
+    !domain ||
+    parsed.protocol !== "https:" ||
+    parsed.username ||
+    parsed.password ||
+    parsed.port ||
+    parsed.hash ||
+    !hostnameMatches(parsed.hostname, domain)
+  ) {
+    return null;
+  }
+  const numeric = (value) => /^\d{1,24}$/u.test(String(value ?? ""))
+    ? String(value)
+    : null;
+  const token = (value) => /^[a-z0-9_-]{1,48}$/iu.test(String(value ?? ""))
+    ? String(value).toLocaleLowerCase()
+    : null;
+  const uniqueQueryValue = (name) => {
+    const values = parsed.searchParams.getAll(name);
+    return values.length === 1 ? values[0] : null;
+  };
+  let route = null;
+  let board = null;
+  let articleId = null;
+  let match = null;
+  if (siteId === "clien") {
+    match = parsed.pathname.match(/^\/service\/board\/([a-z0-9_-]+)\/(\d{1,24})\/?$/iu);
+    route = match ? "service-board" : null;
+    board = token(match?.[1]);
+    articleId = numeric(match?.[2]);
+  } else if (siteId === "ppomppu") {
+    const idValues = parsed.searchParams.getAll("id");
+    const numberValues = parsed.searchParams.getAll("no");
+    if (idValues.length !== 1 || numberValues.length !== 1) return null;
+    route = ["/zboard/view.php", "/new/bbs_view.php"].includes(parsed.pathname)
+      ? "board-view"
+      : null;
+    board = token(uniqueQueryValue("id"));
+    articleId = numeric(uniqueQueryValue("no"));
+  } else if (siteId === "ruliweb") {
+    match = parsed.pathname.match(
+      /^\/(market|news)\/board\/(\d{1,24})\/read\/(\d{1,24})\/?$/u,
+    );
+    route = match ? `${match[1]}-board-read` : null;
+    board = numeric(match?.[2]);
+    articleId = numeric(match?.[3]);
+  } else if (siteId === "quasarzone") {
+    match = parsed.pathname.match(/^\/bbs\/([a-z0-9_-]+)\/views\/(\d{1,24})\/?$/iu);
+    route = match ? "bbs-views" : null;
+    board = token(match?.[1]);
+    articleId = numeric(match?.[2]);
+  } else if (siteId === "eomisae") {
+    match = parsed.pathname.match(/^\/(rt|os|fs)\/(\d{1,24})\/?$/u);
+    const documentValues = parsed.searchParams.getAll("document_srl");
+    const midValues = parsed.searchParams.getAll("mid");
+    if (documentValues.length > 1 || midValues.length > 1) return null;
+    if (match) {
+      const pathArticleId = numeric(match[2]);
+      const queryDocumentId = documentValues.length === 1
+        ? numeric(documentValues[0])
+        : null;
+      if (
+        (documentValues.length === 1 && queryDocumentId !== pathArticleId) ||
+        (midValues.length === 1 && !["rt", "os", "fs"].includes(token(midValues[0])))
+      ) {
+        return null;
+      }
+      route = "document";
+      board = "document";
+      articleId = pathArticleId;
+    } else if (parsed.pathname === "/index.php") {
+      if (
+        documentValues.length !== 1 ||
+        (midValues.length === 1 && !["rt", "os", "fs"].includes(token(midValues[0])))
+      ) {
+        return null;
+      }
+      route = "document";
+      board = "document";
+      articleId = numeric(uniqueQueryValue("document_srl"));
+    }
+  } else if (siteId === "zod") {
+    match = parsed.pathname.match(/^\/deal\/(\d{1,24})\/?$/u);
+    route = match ? "deal" : null;
+    board = "deal";
+    articleId = numeric(match?.[1]);
+  } else if (siteId === "arcalive") {
+    match = parsed.pathname.match(/^\/b\/([a-z0-9_-]+)\/(\d{1,24})\/?$/iu);
+    route = match ? "board-article" : null;
+    board = token(match?.[1]);
+    articleId = numeric(match?.[2]);
+  }
+  return route && board && articleId
+    ? `${siteId}:${domain}:${route}:${board}:${articleId}`
+    : null;
+}
+
+function canonicalArticleIdentity(urlText, siteId = null) {
+  let parsed;
+  try {
+    parsed = new URL(urlText);
+  } catch {
+    throw new Error("article identity requires a valid URL");
+  }
+  if (
+    parsed.protocol !== "https:" ||
+    parsed.username ||
+    parsed.password ||
+    parsed.port ||
+    parsed.hash
+  ) {
+    throw new Error("article identity requires an uncredentialed default-port HTTPS URL");
+  }
+  const semanticIdentity = siteId ? siteArticleIdentity(parsed.href, siteId) : null;
+  if (siteId && !semanticIdentity) {
+    throw new Error("article identity does not match one canonical site article route");
+  }
+  parsed.hostname = normalizedHostname(parsed.hostname);
+  const sortedQuery = [...parsed.searchParams.entries()].sort(
+    ([leftKey, leftValue], [rightKey, rightValue]) =>
+      leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue),
+  );
+  parsed.search = "";
+  for (const [key, value] of sortedQuery) parsed.searchParams.append(key, value);
+  const canonicalUrl = parsed.href;
+  return {
+    sha256: sha256(canonicalUrl),
+    routeFamily: routeFamily(canonicalUrl),
+    articleTokenSha256: semanticIdentity ? sha256(semanticIdentity) : null,
+  };
+}
+
+function articleIdentitiesLogicallyEquivalent(requestedIdentity, resolvedIdentity) {
+  return Boolean(
+    requestedIdentity?.sha256 === resolvedIdentity?.sha256 ||
+      (requestedIdentity?.articleTokenSha256 &&
+        requestedIdentity.articleTokenSha256 === resolvedIdentity?.articleTokenSha256),
+  );
+}
+
+async function destinationDocumentSnapshot(page) {
+  return evaluateInIsolatedWorld(page, () => ({
+    title: String(document.title ?? "").slice(0, 512),
+    bodyText: String(document.body?.textContent ?? "").slice(0, 8_192),
+    challengeSelectors: [
+      "main.captcha-wrapper",
+      "#challenge-running",
+      "#challenge-form",
+      ".cf-challenge-running",
+      "[id^='cf-chl']",
+      "iframe[src^='https://challenges.cloudflare.com/']",
+    ].filter((selector) => {
+      try {
+        return document.querySelector(selector) !== null;
+      } catch {
+        return false;
+      }
+    }),
+  }));
+}
+
+function fidelitySelectorsForLayout(layout) {
+  return [...new Set([
+    layout.page_root,
+    layout.pageRoot,
+    ...(layout.ancestor_markers ?? []),
+    ...(layout.preserve_deep ?? []),
+    ...(layout.preserve_shallow ?? []),
+    ...Object.values(layout.required_groups ?? {}).flat(),
+    ...(layout.comment_contract?.mount ?? []),
+    ...(layout.comment_contract?.items ?? []),
+    ...(layout.comment_contract?.controls ?? []),
+  ].filter((selector) => typeof selector === "string" && selector.length > 0))];
+}
+
+async function roleReferencedResourceHosts(page, selectors) {
+  return evaluateInIsolatedWorld(page, (roleSelectors) => {
+    const maximumRoots = 32;
+    const maximumNodes = 2_048;
+    const maximumUrls = 4_096;
+    const maximumHosts = 128;
+    const maximumElapsedMs = 2_000;
+    const startedAt = performance.now();
+    const roots = new Set();
+    let selectorErrorCount = 0;
+    let rootOverflowCount = 0;
+    let elapsedTimeOverflowCount = 0;
+    for (const selector of roleSelectors) {
+      try {
+        // The semantic oracle and runtime gate have already proved exact role
+        // cardinality.  Re-query only the first exact root here so an adversarial
+        // selector match cannot force querySelectorAll() to materialize an
+        // unbounded NodeList before our traversal budgets apply.
+        const element = document.querySelector(selector);
+        if (element && !roots.has(element) && roots.size >= maximumRoots) {
+          rootOverflowCount += 1;
+        } else if (element) {
+          roots.add(element);
+        }
+      } catch {
+        selectorErrorCount += 1;
+      }
+      if (performance.now() - startedAt > maximumElapsedMs) {
+        elapsedTimeOverflowCount += 1;
+        break;
+      }
+    }
+    const nodes = new Set();
+    let nodeOverflowCount = 0;
+    const queue = [...roots];
+    const queued = new Set(queue);
+    let queueIndex = 0;
+    const enqueue = (element) => {
+      if (!(element instanceof Element) || nodes.has(element) || queued.has(element)) return true;
+      if (nodes.size + queue.length - queueIndex >= maximumNodes) {
+        nodeOverflowCount += 1;
+        return false;
+      }
+      queued.add(element);
+      queue.push(element);
+      return true;
+    };
+    while (queueIndex < queue.length) {
+      const element = queue[queueIndex++];
+      queued.delete(element);
+      if (!(element instanceof Element) || nodes.has(element)) continue;
+      if (nodes.size >= maximumNodes) {
+        nodeOverflowCount += 1;
+        continue;
+      }
+      nodes.add(element);
+      for (const child of element.children) {
+        if (!enqueue(child)) break;
+      }
+      if (element.shadowRoot) {
+        for (const child of element.shadowRoot.children) {
+          if (!enqueue(child)) break;
+        }
+      }
+      if (performance.now() - startedAt > maximumElapsedMs) {
+        elapsedTimeOverflowCount += 1;
+        break;
+      }
+    }
+    const rawUrls = [];
+    let urlOverflowCount = 0;
+    const append = (value) => {
+      if (typeof value !== "string" || !value.trim()) return;
+      if (rawUrls.length >= maximumUrls) {
+        urlOverflowCount += 1;
+        return;
+      }
+      rawUrls.push(value.trim());
+    };
+    const appendSrcset = (value) => {
+      if (typeof value !== "string") return;
+      let index = 0;
+      while (index < value.length) {
+        while (index < value.length && /[\s,]/u.test(value[index])) index += 1;
+        if (index >= value.length) break;
+        const start = index;
+        while (index < value.length && !/\s/u.test(value[index])) index += 1;
+        let candidate = value.slice(start, index).replace(/,+$/u, "");
+        append(candidate);
+        let parenthesisDepth = 0;
+        while (index < value.length) {
+          const character = value[index];
+          if (character === "(") parenthesisDepth += 1;
+          if (character === ")" && parenthesisDepth > 0) parenthesisDepth -= 1;
+          index += 1;
+          if (character === "," && parenthesisDepth === 0) break;
+        }
+      }
+    };
+    const cssUnescape = (value) => value.replace(
+      /\\(?:([0-9a-f]{1,6})(?:\r\n|[\n\r\f\t ])?|([^\n\r\f0-9a-f]))/giu,
+      (_match, hexadecimal, escapedCharacter) => {
+        if (hexadecimal) {
+          const codePoint = Number.parseInt(hexadecimal, 16);
+          return codePoint === 0 || codePoint > 0x10ffff
+            ? "\uFFFD"
+            : String.fromCodePoint(codePoint);
+        }
+        return escapedCharacter ?? "";
+      },
+    );
+    const appendCssUrls = (cssText) => {
+      const text = String(cssText ?? "");
+      let index = 0;
+      while (index < text.length) {
+        const match = /url\s*\(/giu.exec(text.slice(index));
+        if (!match) break;
+        index += match.index + match[0].length;
+        while (index < text.length && /\s/u.test(text[index])) index += 1;
+        const quote = text[index] === "\"" || text[index] === "'" ? text[index++] : null;
+        let value = "";
+        let escaped = false;
+        while (index < text.length) {
+          const character = text[index++];
+          if (escaped) {
+            value += `\\${character}`;
+            escaped = false;
+            continue;
+          }
+          if (character === "\\") {
+            escaped = true;
+            continue;
+          }
+          if ((quote && character === quote) || (!quote && character === ")")) break;
+          value += character;
+        }
+        if (quote) {
+          while (index < text.length && /\s/u.test(text[index])) index += 1;
+          if (text[index] === ")") index += 1;
+        }
+        append(cssUnescape(value.trim()));
+      }
+    };
+    for (const element of nodes) {
+      const tagName = element.localName;
+      if (["img", "video", "audio"].includes(tagName)) {
+        append(element.currentSrc);
+      }
+      if (
+        [
+          "audio", "embed", "iframe", "img", "input", "script", "source", "track", "video",
+        ].includes(tagName)
+      ) {
+        append(element.getAttribute("src"));
+        append(element.getAttribute("data-src"));
+      }
+      if (["img", "source"].includes(tagName)) {
+        appendSrcset(element.getAttribute("srcset"));
+        appendSrcset(element.getAttribute("data-srcset"));
+      }
+      if (tagName === "video") append(element.getAttribute("poster"));
+      if (tagName === "object") append(element.getAttribute("data"));
+      if (["image", "use"].includes(tagName) && element.namespaceURI?.includes("svg")) {
+        append(element.getAttribute("href"));
+        append(element.getAttribute("xlink:href"));
+      }
+      appendCssUrls(element.style.backgroundImage);
+      appendCssUrls(element.style.listStyleImage);
+      appendCssUrls(element.style.content);
+      for (const pseudo of [null, "::before", "::after"]) {
+        try {
+          const style = window.getComputedStyle(element, pseudo);
+          appendCssUrls(style.backgroundImage);
+          appendCssUrls(style.listStyleImage);
+          appendCssUrls(style.content);
+        } catch {}
+      }
+      if (performance.now() - startedAt > maximumElapsedMs) {
+        elapsedTimeOverflowCount += 1;
+        break;
+      }
+    }
+    const hosts = new Set();
+    const unsafeReferencesByAuthority = new Map();
+    let hostOverflowCount = 0;
+    let unsafeReferenceOverflowCount = 0;
+    const recordUnsafeReference = (url, reason) => {
+      const hostname = url.hostname.toLowerCase();
+      const key = `${url.protocol}|${hostname}|${reason}`;
+      let entry = unsafeReferencesByAuthority.get(key);
+      if (!entry) {
+        if (unsafeReferencesByAuthority.size >= maximumHosts) {
+          unsafeReferenceOverflowCount += 1;
+          return;
+        }
+        entry = {
+          protocol: url.protocol,
+          hostname,
+          reason,
+          count: 0,
+        };
+        unsafeReferencesByAuthority.set(key, entry);
+      }
+      entry.count += 1;
+    };
+    for (const value of rawUrls) {
+      try {
+        const url = new URL(value, document.baseURI);
+        if (["http:", "https:", "ws:", "wss:"].includes(url.protocol)) {
+          const hostname = url.hostname.toLowerCase();
+          if (!hosts.has(hostname) && hosts.size >= maximumHosts) {
+            hostOverflowCount += 1;
+          } else {
+            hosts.add(hostname);
+          }
+          if (!["https:", "wss:"].includes(url.protocol)) {
+            recordUnsafeReference(url, "secure-transport-required");
+          } else if (url.username || url.password) {
+            recordUnsafeReference(url, "credentialed-authority");
+          } else if (url.port) {
+            recordUnsafeReference(url, "non-default-port");
+          } else if (/^\[|\]$/u.test(url.hostname) || /^\d+(?:\.\d+){3}$/u.test(url.hostname)) {
+            recordUnsafeReference(url, "literal-ip-authority");
+          }
+        }
+      } catch {}
+    }
+    return {
+      hosts: [...hosts].sort(),
+      rootCount: roots.size,
+      nodeCount: nodes.size,
+      urlCount: rawUrls.length,
+      selectorErrorCount,
+      rootOverflowCount,
+      nodeOverflowCount,
+      urlOverflowCount,
+      hostOverflowCount,
+      elapsedTimeOverflowCount,
+      unsafeReferences: [...unsafeReferencesByAuthority.values()].sort((left, right) => {
+        const leftKey = `${left.protocol}|${left.hostname}|${left.reason}`;
+        const rightKey = `${right.protocol}|${right.hostname}|${right.reason}`;
+        return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+      }),
+      unsafeReferenceOverflowCount,
+    };
+  }, selectors);
+}
+
+function classifyDestinationResponse(responseEvidence) {
+  const finalUrl = String(responseEvidence?.finalUrl ?? "");
+  const selectedChainResponse = selectFinalMainDocumentResponse(
+    responseEvidence?.mainDocumentResponseChain ?? [],
+    finalUrl,
+  );
+  const suppliedFinalResponse = responseEvidence?.mainDocumentResponse;
+  const finalResponse =
+    selectedChainResponse ??
+    (comparableDocumentUrl(suppliedFinalResponse?.url) === comparableDocumentUrl(finalUrl)
+      ? suppliedFinalResponse
+      : null);
+  const status = Number.isInteger(finalResponse?.status)
+    ? finalResponse.status
+    : Number.isInteger(responseEvidence?.status)
+      ? responseEvidence.status
+      : null;
+  const contentType = String(
+    finalResponse?.contentType ?? responseEvidence?.contentType ?? "",
+  );
+  const normalizedTitle = normalizeAlgumonSourceLabel(responseEvidence?.title ?? "");
+  const normalizedBody = normalizeAlgumonSourceLabel(responseEvidence?.bodyText ?? "");
+  const challengeSelectors = Array.isArray(responseEvidence?.challengeSelectors)
+    ? responseEvidence.challengeSelectors.filter((value) => typeof value === "string")
+    : [];
+  const challengePattern =
+    /(?:\bE002\b|access denied|request blocked|too many requests|attention required|just a moment|checking your browser|performing security verification|verify you are human|captcha|cloudflare ray id|접근.{0,8}차단|보안.{0,8}(?:검사|확인)|자동.{0,8}요청)/iu;
+  const challengeText =
+    challengePattern.test(normalizedTitle) ||
+    (/cloudflare ray id/iu.test(normalizedBody) && challengePattern.test(normalizedBody)) ||
+    (normalizedBody.length < 4_096 && challengePattern.test(normalizedBody));
+  const htmlResponse = /^(?:text\/html|application\/xhtml\+xml)(?:\s*;|$)/iu.test(
+    contentType,
+  );
+  const finalDocumentUrlMatches = Boolean(
+    finalResponse && comparableDocumentUrl(finalResponse.url) === comparableDocumentUrl(finalUrl),
+  );
+  const blockedStatus = status === 401 || status === 403 || status === 429 || status === 503;
+  const sourceFailure =
+    status === null ||
+    status < 200 ||
+    status >= 300 ||
+    !htmlResponse ||
+    !finalDocumentUrlMatches ||
+    blockedStatus ||
+    challengeSelectors.length > 0 ||
+    challengeText;
+  const evidence = {
+    kind: sourceFailure ? "source-or-infrastructure-failure" : "article-response",
+    subkind: sourceFailure
+      ? blockedStatus || challengeSelectors.length > 0 || challengeText
+        ? "waf-or-challenge"
+        : status === null || !finalDocumentUrlMatches
+          ? "missing-final-main-document-response"
+          : !htmlResponse
+            ? "non-html-response"
+            : "http-status"
+      : "accepted-final-main-document",
+    candidateEligible: !sourceFailure,
+    status,
+    contentType: contentType.slice(0, 160),
+    finalDocumentUrlMatches,
+    challengeSelectorCount: challengeSelectors.length,
+    challengeText,
+    titleSha256: sha256(String(responseEvidence?.title ?? "")),
+    bodyTextSha256: sha256(String(responseEvidence?.bodyText ?? "")),
+  };
+  return evidence;
+}
+
+function validateArticleAccessCookies(cookies, allowedCookieDomains, nowMs = Date.now()) {
+  if (!Array.isArray(cookies) || cookies.length > ARTICLE_ACCESS_LEASE_MAX_COOKIES) {
+    throw new Error("article access lease cookie count exceeded its bound");
+  }
+  if (Buffer.byteLength(JSON.stringify(cookies), "utf8") > ARTICLE_ACCESS_LEASE_MAX_COOKIE_BYTES) {
+    throw new Error("article access lease cookie bytes exceeded their bound");
+  }
+  const normalizedAllowedDomains = new Set(
+    allowedCookieDomains.map((domain) => normalizedHostname(domain)),
+  );
+  const accepted = [];
+  for (const cookie of cookies) {
+    if (!cookie || typeof cookie !== "object" || Array.isArray(cookie)) {
+      throw new Error("article access lease contains an invalid cookie record");
+    }
+    const domain = normalizedHostname(String(cookie.domain ?? "").replace(/^\./u, ""));
+    const domainAllowed = [...normalizedAllowedDomains].some((allowedDomain) =>
+      hostnameMatches(domain, allowedDomain),
+    );
+    const validShape =
+      typeof cookie.name === "string" &&
+      cookie.name.length >= 1 &&
+      cookie.name.length <= 256 &&
+      !/[\u0000-\u001f\u007f;]/u.test(cookie.name) &&
+      typeof cookie.value === "string" &&
+      cookie.value.length <= 4_096 &&
+      !/[\u0000\r\n]/u.test(cookie.value) &&
+      typeof cookie.path === "string" &&
+      cookie.path.startsWith("/") &&
+      cookie.path.length <= 1_024 &&
+      typeof cookie.secure === "boolean" &&
+      typeof cookie.httpOnly === "boolean" &&
+      ["Strict", "Lax", "None"].includes(cookie.sameSite) &&
+      Number.isFinite(cookie.expires);
+    if (!validShape) {
+      throw new Error("article access lease contains an invalid cookie record");
+    }
+    const unexpired = cookie.expires === -1 || cookie.expires * 1_000 > nowMs;
+    if (!domainAllowed || cookie.secure !== true || !unexpired) continue;
+    accepted.push({
+      name: cookie.name,
+      value: cookie.value,
+      domain: cookie.domain,
+      path: cookie.path,
+      expires: cookie.expires,
+      httpOnly: cookie.httpOnly,
+      secure: cookie.secure,
+      sameSite: cookie.sameSite,
     });
-  } catch (error) {
-    if (page.url() === "about:blank") {
-      throw error;
+  }
+  return accepted;
+}
+
+function createArticleAccessLease(cookies, binding, allowedCookieDomains, nowMs = Date.now()) {
+  const normalizedBinding = {
+    siteId: String(binding?.siteId ?? ""),
+    profileName: String(binding?.profileName ?? ""),
+    requestedArticleIdentitySha256: String(
+      binding?.requestedArticleIdentitySha256 ?? "",
+    ),
+    resolvedArticleIdentitySha256: String(binding?.resolvedArticleIdentitySha256 ?? ""),
+    resolvedRouteFamily: String(binding?.resolvedRouteFamily ?? ""),
+  };
+  if (
+    !/^[a-z0-9][a-z0-9_-]{0,79}$/u.test(normalizedBinding.siteId) ||
+    !/^(?:desktop|mobile)$/u.test(normalizedBinding.profileName) ||
+    !/^[0-9a-f]{64}$/u.test(normalizedBinding.requestedArticleIdentitySha256) ||
+    !/^[0-9a-f]{64}$/u.test(normalizedBinding.resolvedArticleIdentitySha256) ||
+    normalizedBinding.resolvedRouteFamily.length < 1
+  ) {
+    throw new Error("article access lease binding is invalid");
+  }
+  const acceptedCookies = validateArticleAccessCookies(
+    cookies,
+    allowedCookieDomains,
+    nowMs,
+  );
+  const expiresAtMs = nowMs + ARTICLE_ACCESS_LEASE_TTL_MS;
+  const bindingSha256 = sha256(canonicalJson(normalizedBinding));
+  return {
+    schemaVersion: ARTICLE_ACCESS_LEASE_SCHEMA_VERSION,
+    issuedAtMs: nowMs,
+    expiresAtMs,
+    consumed: false,
+    binding: normalizedBinding,
+    bindingSha256,
+    storageState: { cookies: acceptedCookies, origins: [] },
+    evidence: {
+      schemaVersion: ARTICLE_ACCESS_LEASE_SCHEMA_VERSION,
+      kind: "validated-cookies-only-one-use",
+      issuedAt: new Date(nowMs).toISOString(),
+      expiresAt: new Date(expiresAtMs).toISOString(),
+      ttlMs: ARTICLE_ACCESS_LEASE_TTL_MS,
+      cookieCount: acceptedCookies.length,
+      originsCount: 0,
+      bindingSha256,
+    },
+  };
+}
+
+async function acquireArticleAccessLease(
+  context,
+  site,
+  profileName,
+  requestedUrl,
+  resolvedUrl,
+  nowMs = Date.now(),
+) {
+  const requestedIdentity = canonicalArticleIdentity(requestedUrl, site.id);
+  const resolvedIdentity = canonicalArticleIdentity(resolvedUrl, site.id);
+  if (!articleIdentitiesLogicallyEquivalent(requestedIdentity, resolvedIdentity)) {
+    throw new Error("article access lease refused a different requested/resolved article identity");
+  }
+  const allowedCookieDomains = [
+    ...new Set([
+      ...site.layouts.map((layout) => layout.domain),
+      new URL(resolvedUrl).hostname,
+    ]),
+  ];
+  return createArticleAccessLease(
+    await context.cookies(),
+    {
+      siteId: site.id,
+      profileName,
+      requestedArticleIdentitySha256: requestedIdentity.sha256,
+      resolvedArticleIdentitySha256: resolvedIdentity.sha256,
+      resolvedRouteFamily: resolvedIdentity.routeFamily,
+    },
+    allowedCookieDomains,
+    nowMs,
+  );
+}
+
+function consumeArticleAccessLease(lease, expectedBinding, nowMs = Date.now()) {
+  if (
+    !lease ||
+    lease.schemaVersion !== ARTICLE_ACCESS_LEASE_SCHEMA_VERSION ||
+    lease.consumed !== false ||
+    !Number.isSafeInteger(lease.issuedAtMs) ||
+    !Number.isSafeInteger(lease.expiresAtMs) ||
+    nowMs < lease.issuedAtMs ||
+    nowMs > lease.expiresAtMs
+  ) {
+    throw new Error("article access lease is stale, invalid, or already consumed");
+  }
+  const normalizedExpectedBinding = {
+    siteId: String(expectedBinding?.siteId ?? ""),
+    profileName: String(expectedBinding?.profileName ?? ""),
+    requestedArticleIdentitySha256: String(
+      expectedBinding?.requestedArticleIdentitySha256 ?? "",
+    ),
+    resolvedArticleIdentitySha256: String(
+      expectedBinding?.resolvedArticleIdentitySha256 ?? "",
+    ),
+    resolvedRouteFamily: String(expectedBinding?.resolvedRouteFamily ?? ""),
+  };
+  if (
+    sha256(canonicalJson(normalizedExpectedBinding)) !== lease.bindingSha256 ||
+    canonicalJson(normalizedExpectedBinding) !== canonicalJson(lease.binding)
+  ) {
+    throw new Error("article access lease binding mismatch");
+  }
+  const storageState = structuredClone(lease.storageState);
+  lease.consumed = true;
+  lease.storageState = null;
+  return storageState;
+}
+
+function staticRuntimeConsistencyFailures(
+  staticEvidence,
+  runtimeNavigation,
+  runtimeGate,
+  runtimeLayoutId,
+) {
+  const failures = [];
+  if (!staticEvidence || staticEvidence.provenanceOnly === true) return failures;
+  const runtimeIdentity = canonicalArticleIdentity(
+    runtimeNavigation.finalUrl,
+    staticEvidence.siteId,
+  );
+  if (
+    staticEvidence.resolvedArticleIdentitySha256 !== runtimeIdentity.sha256 ||
+    staticEvidence.resolvedRouteFamily !== runtimeIdentity.routeFamily
+  ) {
+    failures.push("static/runtime route and canonical article identity diverged");
+  }
+  if (staticEvidence.layoutId !== runtimeLayoutId) {
+    failures.push("static/runtime layout identity diverged");
+  }
+  if (Array.isArray(staticEvidence.projectionAliases)) {
+    const runtimeAliases = [...(runtimeGate?.diagnostics?.layoutAliases ?? [])].sort();
+    const staticAliases = [...staticEvidence.projectionAliases].sort();
+    if (
+      runtimeGate?.diagnostics?.semanticProjectionCount !==
+        staticEvidence.semanticProjectionCount ||
+      canonicalJson(runtimeAliases) !== canonicalJson(staticAliases)
+    ) {
+      failures.push("static/runtime semantic projection identity diverged");
     }
   }
-  await settlePage(page, timeoutMs);
-  return {
-    finalUrl: page.url(),
-    status: response?.status() ?? null,
-  };
+  return failures;
 }
 
 async function navigateThroughAlgumon(page, target, timeoutMs, expectedDomain = null) {
@@ -1340,9 +3349,18 @@ async function navigateThroughAlgumon(page, target, timeoutMs, expectedDomain = 
       target.algumon.redirectUrl,
       target.algumon.dealId,
     );
+    const useTimeAcquisition = target.source === "algumon-latest"
+      ? signedRelayAcquisitionEvidence(
+          target.algumon.redirectUrl,
+          target.algumon.dealId,
+        )
+      : null;
     const resolution = target.algumon.verifiedResolution;
     if (
       !signedUrl ||
+      (target.source === "algumon-latest" &&
+        (!target.relayAcquisition ||
+          useTimeAcquisition?.signedUrl !== target.relayAcquisition.signedUrl)) ||
       resolution.relayFetchUrl !== signedUrl.href ||
       resolution.resolvedDestination !== target.url ||
       !/^[0-9a-f]{64}$/u.test(resolution.responseSha256 ?? "") ||
@@ -1500,7 +3518,7 @@ async function selectorCandidates(page) {
         style.display !== "none" &&
         style.visibility !== "hidden" &&
         Number(style.opacity) !== 0 &&
-        element.getClientRects().length > 0
+        [...element.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0)
       );
     };
     const escapeCss = (value) => {
@@ -1779,19 +3797,25 @@ async function semanticOracle(
         }
         return tag;
       };
-      const roleNodes = Object.fromEntries(
-        rolesRequired.map((role) => [role, resolution.roles?.[role]?.node ?? null]),
+      const proposedProductCardinality = resolution.policyProposal?.product?.cardinality;
+      const observedRoles = ["title", "body", "comments"].concat(
+        proposedProductCardinality === "required" ? ["product"] : [],
       );
-      const nodes = rolesRequired.map((role) => roleNodes[role]).filter(Boolean);
+      const roleNodes = Object.fromEntries(
+        observedRoles.map((role) => [role, resolution.roles?.[role]?.node ?? null]),
+      );
+      const nodes = observedRoles.map((role) => roleNodes[role]).filter(Boolean);
       const pageRoot =
-        nodes.length === rolesRequired.length
+        nodes.length === observedRoles.length
           ? api.lowestCommonAncestor(nodes)
           : null;
-      const pageRootSelector = pageRoot ? stableSelector(pageRoot) : null;
+      const pageRootSelector = resolution.policyProposal?.pageRoot ?? null;
       const roleSelectors = Object.fromEntries(
-        rolesRequired.map((role) => [
+        observedRoles.map((role) => [
           role,
-          roleNodes[role] ? stableSelector(roleNodes[role]) : null,
+          role === "product"
+            ? resolution.policyProposal?.product?.selectors?.[0] ?? null
+            : roleNodes[role] ? stableSelector(roleNodes[role]) : null,
         ]),
       );
       const cardinality = Object.fromEntries(
@@ -1811,7 +3835,7 @@ async function semanticOracle(
       } catch {}
       const commentMount = roleNodes.comments;
       const commentIgnored = [
-        ...new Set(oracleLayout.hints?.commentIgnored ?? []),
+        ...new Set(resolution.policyProposal?.commentIgnored ?? []),
       ].sort();
       const ignoredCommentNodes = [];
       if (commentMount) {
@@ -1995,7 +4019,7 @@ async function semanticOracle(
           })
         : true;
       const metrics = Object.fromEntries(
-        rolesRequired.map((role) => {
+        observedRoles.map((role) => {
           const evidence = resolution.roles?.[role];
           return [
             role,
@@ -2010,7 +4034,7 @@ async function semanticOracle(
       );
       const containment =
         Boolean(pageRoot) &&
-        nodes.length === rolesRequired.length &&
+        nodes.length === observedRoles.length &&
         nodes.every(
           (node) => node === pageRoot || pageRoot.contains(node),
         );
@@ -2019,8 +4043,12 @@ async function semanticOracle(
           resolution.ok === true &&
           pageRoot !== document.documentElement &&
           pageRoot !== document.body &&
+          resolution.policyProposal?.complete === true &&
+          resolution.policyProposal?.pageRootEvidence ===
+            "all-role-lowest-common-ancestor" &&
           pageRootSelector !== null &&
           pageRootCount === 1 &&
+          document.querySelector(pageRootSelector) === pageRoot &&
           containment &&
           Object.values(roleSelectors).every(Boolean) &&
           Object.values(cardinality).every((count) => count === 1),
@@ -2056,6 +4084,9 @@ async function semanticOracle(
           resolution.seedConsistency?.metadataSourceCount ?? 0,
         seedTitleMetadataSourceKinds:
           resolution.seedConsistency?.metadataSourceKinds ?? [],
+        productOrder: resolution.productOrder ?? null,
+        existingPolicy: resolution.existingPolicy ?? null,
+        policyProposal: resolution.policyProposal ?? null,
         oracleSource: "verified-userscript-export",
       };
     },
@@ -2149,21 +4180,75 @@ function projectionCardinalityEvidence(structuralOk, semanticProjectionCount) {
   };
 }
 
+function commentLowerBoundConsistency(observedCount, lowerBound) {
+  if (
+    !Number.isInteger(observedCount) ||
+    observedCount < 0 ||
+    !Number.isInteger(lowerBound) ||
+    lowerBound < 0
+  ) {
+    return null;
+  }
+  return observedCount >= lowerBound ? 1 : 0;
+}
+
+function committedProjectionEvidence(approvedProjection) {
+  const count = approvedProjection?.semanticProjectionCount;
+  if (!Number.isInteger(count) || count < 0) {
+    throw new Error("committed projection count must be a non-negative integer");
+  }
+  return {
+    count,
+    exactCount: count === 1 ? 1 : 0,
+    coMatchCount: Math.max(0, count - 1),
+    aliases: (approvedProjection.classes ?? []).map(
+      (projectionClass) => projectionClass.aliases,
+    ),
+    oracleExecutionWorld: approvedProjection.oracleExecutionWorld,
+  };
+}
+
 function candidateOracleLayout(layout, oracle, targetUrl) {
   const parsed = new URL(targetUrl);
-  const roleProjection = structuredClone(layout.role_projection);
+  const proposal = oracle.policyProposal;
+  const productCardinality = proposal?.product?.cardinality;
   if (
-    ["required", "optional"].includes(roleProjection.product.cardinality) &&
-    typeof oracle.roles?.product === "string"
+    proposal?.complete !== true ||
+    !["required", "zero"].includes(productCardinality)
   ) {
-    roleProjection.product.selectors = [oracle.roles.product];
+    throw new Error("candidate oracle requires one complete independent policy proposal");
   }
+  const roleProjection = {
+    title: { mode: "seeded-shallow" },
+    body: {
+      mode: "atomic-boundary",
+      ignored: [...proposal.bodyIgnored],
+    },
+    product: productCardinality === "required"
+      ? {
+          mode: "atomic-boundary",
+          cardinality: "required",
+          order: proposal.product.order,
+          selectors: [...proposal.product.selectors],
+          ignored: [...proposal.productIgnored],
+        }
+      : {
+          mode: "absent",
+          cardinality: "zero",
+          selectors: [],
+          ignored: [],
+        },
+    comments: { mode: "classified-children" },
+  };
+  const requiredRoles = ["title", "body", "comments"].concat(
+    productCardinality === "required" ? ["product"] : [],
+  );
   return {
     id: `${layout.id}--candidate-oracle`,
     paths: [`|${parsed.pathname}${parsed.search}^`],
-    pageRoot: oracle.pageRoot,
-    requiredRoles: requiredRolesForLayout(layout),
-    allowEmptyComments: layout.comment_contract?.allow_empty === true,
+    pageRoot: proposal.pageRoot,
+    requiredRoles,
+    allowEmptyComments: true,
     roleProjection,
     hints: {
       ...Object.fromEntries(
@@ -2171,7 +4256,7 @@ function candidateOracleLayout(layout, oracle, targetUrl) {
       ),
       commentItems: [...(oracle.commentItems ?? [])],
       commentControls: [...(oracle.commentControls ?? [])],
-      commentIgnored: [...(oracle.commentIgnored ?? [])],
+      commentIgnored: [...proposal.commentIgnored],
     },
   };
 }
@@ -2401,17 +4486,13 @@ async function auditCandidateOverlay(
       const commentComparable =
         Number.isInteger(algumon?.commentCount) && commentMounts.length === 1;
       const countConsistency = commentComparable
-        ? Math.max(
-            0,
-            1 -
-              Math.abs(commentItems.length - algumon.commentCount) /
-                Math.max(1, commentItems.length, algumon.commentCount),
-          )
+        ? commentLowerBoundConsistency(commentItems.length, algumon.commentCount)
         : null;
       const visible = (element) => {
         const style = getComputedStyle(element);
         return style.display !== "none" && style.visibility !== "hidden" &&
-          Number(style.opacity) !== 0 && element.getClientRects().length > 0;
+          Number(style.opacity) !== 0 &&
+          [...element.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0);
       };
       const bodyNode = roleNodes.body?.length === 1 ? roleNodes.body[0] : null;
       const productNodes = pageRoot
@@ -2433,6 +4514,15 @@ async function auditCandidateOverlay(
         (productCardinality === "zero" && productNodes.length === 0) ||
         (productCardinality === "required" && productNodes.length === 1) ||
         (productCardinality === "optional" && productNodes.length <= 1);
+      const observedProductOrder = productNode && bodyNode
+        ? bodyNode.compareDocumentPosition(productNode) & Node.DOCUMENT_POSITION_FOLLOWING
+          ? "after-body"
+          : productNode.compareDocumentPosition(bodyNode) & Node.DOCUMENT_POSITION_FOLLOWING
+            ? "before-body"
+            : null
+        : null;
+      const productOrderOk = !productNode ||
+        observedProductOrder === payload.roleProjection.product.order;
       return {
         pageRootCount: pageRoots.length,
         roles: roleEvidence,
@@ -2459,10 +4549,12 @@ async function auditCandidateOverlay(
         countConsistency:
           commentComparable ? Number(countConsistency.toFixed(3)) : null,
         countConsistent:
-          !commentComparable || countConsistency >= 0.95,
+          !commentComparable || countConsistency === 1,
         roleProjection: payload.roleProjection,
         productCount: productNodes.length,
         productCardinalityOk,
+        productOrder: observedProductOrder,
+        productOrderOk,
         contentIgnoredCount: bodyIgnored.length + productIgnored.length,
         contentIgnoredVisibleCount: [...bodyIgnored, ...productIgnored].filter(visible).length,
         ignoredContentOverlapCount,
@@ -2542,6 +4634,9 @@ function candidateOverlayFailures(
   if (overlay.productCardinalityOk !== true) {
     failures.push("candidate product cardinality violates RoleProjection");
   }
+  if (overlay.productOrderOk !== true) {
+    failures.push("candidate product order violates RoleProjection");
+  }
   if (overlay.contentIgnoredVisibleCount !== 0) {
     failures.push("candidate ignored body/product UI remained visible");
   }
@@ -2564,25 +4659,16 @@ function semanticOracleEvidence(oracle, target) {
   const titleComparable = Boolean(oracle.titleNormalized && algumonTitle);
   const commentComparable =
     Number.isInteger(oracle.commentItemCount) && Number.isInteger(algumonCommentCount);
-  const commentTolerance = commentComparable
-    ? Math.max(2, algumonCommentCount * 0.35)
-    : null;
+  const commentTolerance = commentComparable ? 0 : null;
   const titleConsistency = titleComparable
     ? Number(titleSimilarity.toFixed(3))
     : 0;
   const countConsistency = commentComparable
-    ? Number(
-        Math.max(
-          0,
-          1 -
-            Math.abs(oracle.commentItemCount - algumonCommentCount) /
-              Math.max(1, oracle.commentItemCount, algumonCommentCount),
-        ).toFixed(3),
-      )
+    ? commentLowerBoundConsistency(oracle.commentItemCount, algumonCommentCount)
     : null;
   const titleConsistent = oracle.seedTitleConsistencyOk === true;
   const commentConsistent =
-    !commentComparable || countConsistency >= 0.95;
+    !commentComparable || countConsistency === 1;
   const commentStructure = {
     mountSelector: oracle.roles.comments,
     mountCount: oracle.cardinality.comments,
@@ -2632,6 +4718,9 @@ function semanticOracleEvidence(oracle, target) {
     commentIgnored: oracle.commentIgnored,
     commentItemCount: oracle.commentItemCount,
     commentStructure,
+    productOrder: oracle.productOrder ?? null,
+    existingPolicy: oracle.existingPolicy ?? null,
+    policyProposal: oracle.policyProposal ?? null,
     containment: oracle.containment,
     titleSha256: oracle.titleNormalized ? sha256(oracle.titleNormalized) : null,
     algumon: {
@@ -2648,11 +4737,32 @@ function semanticOracleEvidence(oracle, target) {
       titleConsistent,
       commentComparable,
       commentCount: algumonCommentCount,
+      commentCountRelation: commentComparable ? "algumon-lower-bound" : null,
       commentTolerance,
       countConsistency,
       commentConsistent,
     },
   };
+}
+
+function semanticOracleContractFailures(evidence) {
+  const failures = [];
+  if (evidence?.oracleSource !== "verified-userscript-export") {
+    failures.push("semantic oracle source is not the verified userscript export");
+  }
+  if (evidence?.oracleExecutionWorld !== ORACLE_EXECUTION_WORLD) {
+    failures.push("semantic oracle did not run in the isolated execution world");
+  }
+  if (evidence?.structuralOk !== true) {
+    failures.push("semantic oracle could not prove one complete projection tuple");
+  }
+  if (!independentPolicyProposalIsComplete(evidence)) {
+    failures.push("semantic oracle policy proposal is incomplete or not independently bounded");
+  }
+  if (evidence?.ok !== true) {
+    failures.push("semantic oracle title/comment completeness contract failed");
+  }
+  return failures;
 }
 
 async function auditStaticProjection(page, layout) {
@@ -2666,7 +4776,7 @@ async function auditStaticProjection(page, layout) {
           style.display !== "none" &&
           style.visibility !== "hidden" &&
           Number(style.opacity) !== 0 &&
-          element.getClientRects().length > 0
+          [...element.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0)
         );
       };
       const matchesAny = (element, selectors) =>
@@ -2825,14 +4935,17 @@ function validateDiagnostics(diagnostics, requiredRoles) {
     "roles",
     "layoutAliases",
     "semanticProjectionCount",
+    "commentControlProjection",
     "visibleLeakCount",
   ]);
   const unexpectedTopKeys = Object.keys(diagnostics).filter((key) => !allowedTopKeys.has(key));
   if (unexpectedTopKeys.length > 0) {
     failures.push(`diagnostics contains non-contract keys: ${unexpectedTopKeys.join(", ")}`);
   }
-  if (!Number.isInteger(diagnostics.protocolVersion) || diagnostics.protocolVersion < 1) {
-    failures.push("diagnostics.protocolVersion must be a positive integer");
+  if (diagnostics.protocolVersion !== READER_GATE_PROTOCOL_VERSION) {
+    failures.push(
+      `diagnostics.protocolVersion must equal reader gate protocol ${READER_GATE_PROTOCOL_VERSION}`,
+    );
   }
   if (diagnostics.state !== "ready") failures.push(`diagnostics.state is ${diagnostics.state ?? "missing"}`);
   if (
@@ -2894,26 +5007,74 @@ function validateDiagnostics(diagnostics, requiredRoles) {
   return failures;
 }
 
-async function auditUserscriptGate(page, requiredRoles, timeoutMs, markerSelectors) {
+async function auditUserscriptGate(
+  page,
+  requiredRoles,
+  timeoutMs,
+  markerSelectors,
+  runtimeExpectation = "relay-positive",
+  allowedCommentControlSelectorDigests = [],
+) {
   await page
-    .waitForSelector(
-      'html[data-hotdeal-focus-ready="1"][data-hotdeal-focus-state="ready"]',
-      { state: "attached", timeout: timeoutMs },
+    .waitForFunction(
+      ({ expectation, protocolVersion }) => {
+        const html = document.documentElement;
+        const state = html.getAttribute("data-hotdeal-focus-state");
+        const status = html.getAttribute("data-hotdeal-focus-status");
+        const paintProbe = window.__HOTDEAL_FOCUS_PAINT_PROBE__;
+        const sampled = Number.isInteger(paintProbe?.sampleCount) &&
+          paintProbe.sampleCount >= 1;
+        const terminal = state === "blocked" &&
+          String(status ?? "").startsWith("terminal-");
+        if (terminal) return sampled;
+        if (expectation === "direct-negative") return false;
+        const diagnostics = window.__HOTDEAL_FOCUS_DIAGNOSTICS__;
+        const preauthorized = window.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__;
+        return sampled &&
+          paintProbe.firstReadyFrame !== null &&
+          html.classList.contains("hdf-v2-ready") &&
+          html.getAttribute("data-hotdeal-focus-ready") === "1" &&
+          html.getAttribute("data-hotdeal-focus-protocol") === String(protocolVersion) &&
+          state === "ready" &&
+          status === "ready" &&
+          !html.classList.contains("hdf-v2-lock") &&
+          !html.hasAttribute("data-hotdeal-focus-lock") &&
+          diagnostics?.state === "ready" &&
+          diagnostics?.semanticProjectionCount === 1 &&
+          Array.isArray(diagnostics?.layoutAliases) &&
+          diagnostics.layoutAliases.length >= 1 &&
+          preauthorized?.kind === "preauthorized-nonce-control" &&
+          preauthorized?.schemaVersion === protocolVersion &&
+          preauthorized?.gmAddElementCalls === 1 &&
+          preauthorized?.extendedCssCallbacks >= 2 &&
+          document.querySelectorAll(
+            'style[data-hotdeal-focus-runtime-style="2"]',
+          ).length === 1;
+      },
+      {
+        expectation: runtimeExpectation,
+        protocolVersion: READER_GATE_PROTOCOL_VERSION,
+      },
+      { timeout: timeoutMs },
     )
     .catch(() => {});
 
-  return page.evaluate(({ rolesToRequire, selectors }) => {
+  return page.evaluate(({ rolesToRequire, selectors, allowedControlSelectorDigests }) => {
     const visible = (element) => {
       const style = window.getComputedStyle(element);
       return (
         style.display !== "none" &&
         style.visibility !== "hidden" &&
         Number(style.opacity) !== 0 &&
-        element.getClientRects().length > 0
+        [...element.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0)
       );
     };
+    const exactlyOwned = (element) =>
+      element.classList.contains("hdf-v2-keep") &&
+      element.hasAttribute("data-hotdeal-focus-keep");
     const hasVisibleOwnedDescendant = (element) =>
-      [...element.querySelectorAll("[data-hotdeal-focus-keep]")].some(visible);
+      [...element.querySelectorAll(".hdf-v2-keep[data-hotdeal-focus-keep]")]
+        .some(visible);
     const logicallyVisible = (element) =>
       visible(element) || hasVisibleOwnedDescendant(element);
     const html = document.documentElement;
@@ -2922,8 +5083,35 @@ async function auditUserscriptGate(page, requiredRoles, timeoutMs, markerSelecto
       .filter((content) => content && content !== "none" && content !== "normal" && content !== '""')
       .join("").length;
     const state = html.getAttribute("data-hotdeal-focus-state");
+    const status = html.getAttribute("data-hotdeal-focus-status");
     const ready =
-      html.getAttribute("data-hotdeal-focus-ready") === "1" && state === "ready";
+      html.classList.contains("hdf-v2-ready") &&
+      html.getAttribute("data-hotdeal-focus-ready") === "1" &&
+      html.getAttribute("data-hotdeal-focus-protocol") === "2" &&
+      state === "ready" &&
+      status === "ready" &&
+      !html.classList.contains("hdf-v2-lock") &&
+      !html.hasAttribute("data-hotdeal-focus-lock");
+    const rootStyle = window.getComputedStyle(html);
+    const globalPaintLockIntact =
+      !ready &&
+      html.classList.contains("hdf-v2-lock") &&
+      html.getAttribute("data-hotdeal-focus-lock") === "1" &&
+      rootStyle.transitionProperty === "none" &&
+      rootStyle.animationName === "none" &&
+      rootStyle.visibility === "hidden" &&
+      rootStyle.contentVisibility === "hidden" &&
+      Number(rootStyle.opacity) === 0 &&
+      rootStyle.clipPath === "inset(50%)" &&
+      rootStyle.pointerEvents === "none" &&
+      html.style.getPropertyValue("opacity") === "0" &&
+      html.style.getPropertyPriority("opacity") === "important" &&
+      html.style.getPropertyValue("clip-path") === "inset(50%)" &&
+      html.style.getPropertyPriority("clip-path") === "important" &&
+      html.style.getPropertyValue("visibility") === "hidden" &&
+      html.style.getPropertyPriority("visibility") === "important" &&
+      html.style.getPropertyValue("content-visibility") === "hidden" &&
+      html.style.getPropertyPriority("content-visibility") === "important";
     const markerMatchedNodes = new Set();
     const markerSelectorErrors = [];
     for (const selector of selectors) {
@@ -2938,22 +5126,17 @@ async function auditUserscriptGate(page, requiredRoles, timeoutMs, markerSelecto
     const bodyElements = [...document.body.querySelectorAll("*")];
     const uncoveredUnmarkedNodes = bodyElements.filter(
       (element) =>
-        !element.hasAttribute("data-hotdeal-focus-keep") &&
+        !exactlyOwned(element) &&
         !markerMatchedNodes.has(element),
     );
     const coveredKeptNodes = bodyElements.filter(
       (element) =>
-        element.hasAttribute("data-hotdeal-focus-keep") &&
+        exactlyOwned(element) &&
         markerMatchedNodes.has(element),
     );
-    const style = document.createElement("style");
-    style.id = "hotdeal-audit-marker-projection";
-    style.textContent = `${selectors.join(",\n")}{display:none!important}`;
-    html.append(style);
-
     const visibleWithoutKeep = [...document.body.querySelectorAll("*")]
       .filter(visible)
-      .filter((element) => !element.hasAttribute("data-hotdeal-focus-keep"))
+      .filter((element) => !exactlyOwned(element))
       .map((element) => ({
         tag: element.tagName.toLowerCase(),
         id: element.id || null,
@@ -2962,7 +5145,9 @@ async function auditUserscriptGate(page, requiredRoles, timeoutMs, markerSelecto
     const roleStats = Object.fromEntries(
       rolesToRequire.map((role) => {
         const nodes = [
-          ...document.querySelectorAll(`[data-hotdeal-focus-role="${role}"]`),
+          ...document.querySelectorAll(
+            `.hdf-v2-role-${role}[data-hotdeal-focus-role="${role}"]`,
+          ),
         ];
         return [
           role,
@@ -2971,25 +5156,29 @@ async function auditUserscriptGate(page, requiredRoles, timeoutMs, markerSelecto
             selfVisibleCount: nodes.filter(visible).length,
             visibleOwnedDescendantCount: nodes.filter(hasVisibleOwnedDescendant).length,
             visibleCount: nodes.filter(logicallyVisible).length,
-            allKept: nodes.every((node) => node.hasAttribute("data-hotdeal-focus-keep")),
+            allKept: nodes.every(exactlyOwned),
           },
         ];
       }),
     );
     const summarizeProjectedRole = (role) => {
       const nodes = [
-        ...document.querySelectorAll(`[data-hotdeal-focus-role="${role}"]`),
+        ...document.querySelectorAll(
+          `.hdf-v2-role-${role}[data-hotdeal-focus-role="${role}"]`,
+        ),
       ];
       return {
         count: nodes.length,
         visibleCount: nodes.filter(visible).length,
-        allKept: nodes.every((node) => node.hasAttribute("data-hotdeal-focus-keep")),
+        allKept: nodes.every(exactlyOwned),
       };
     };
     const commentItemStats = summarizeProjectedRole("comment-item");
     const commentControlStats = summarizeProjectedRole("comment-control");
     const directTextLeaks = [];
-    const keptNodes = [...document.body.querySelectorAll("[data-hotdeal-focus-keep]")];
+    const keptNodes = [
+      ...document.body.querySelectorAll(".hdf-v2-keep[data-hotdeal-focus-keep]"),
+    ];
     for (const element of [document.body, ...keptNodes]) {
       if (!visible(element)) continue;
       const insideRole = Boolean(element.closest("[data-hotdeal-focus-role]"));
@@ -3020,30 +5209,234 @@ async function auditUserscriptGate(page, requiredRoles, timeoutMs, markerSelecto
     } catch {
       paintProbe = null;
     }
+    const preauthorized = window.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__;
+    const testOnlyAdguardControl = preauthorized
+      ? {
+          kind: preauthorized.kind,
+          schemaVersion: preauthorized.schemaVersion,
+          gmAddElementCalls: preauthorized.gmAddElementCalls,
+          extendedCssCallbacks: preauthorized.extendedCssCallbacks,
+        }
+      : null;
+    const runtimeStyleCount = document.querySelectorAll(
+      'style[data-hotdeal-focus-runtime-style="2"]',
+    ).length;
+    const zeroFlash = paintProbe?.flashFrameCount === 0;
+    const zeroVisibleContent = globalPaintLockIntact || (
+      visibleWithoutKeep.length === 0 && directTextLeaks.length === 0
+    );
+    const blockedStateSafety = {
+      applicable: !ready,
+      terminal: state === "blocked" && String(status ?? "").startsWith("terminal-"),
+      globalPaintLockIntact,
+      zeroVisibleContent,
+      zeroFlash,
+      passed:
+        !ready &&
+        state === "blocked" &&
+        String(status ?? "").startsWith("terminal-") &&
+        globalPaintLockIntact &&
+        zeroVisibleContent &&
+        zeroFlash,
+    };
+    const readyMarkerCoverage = {
+      applicable: ready,
+      selectorCount: selectors.length,
+      selectorErrorCount: markerSelectorErrors.length,
+      uncoveredUnmarkedCount: uncoveredUnmarkedNodes.length,
+      coveredKeptCount: coveredKeptNodes.length,
+      passed:
+        ready &&
+        selectors.length > 0 &&
+        markerSelectorErrors.length === 0 &&
+        uncoveredUnmarkedNodes.length === 0 &&
+        coveredKeptNodes.length === 0,
+    };
     return {
       ready,
       state,
-      status: html.getAttribute("data-hotdeal-focus-status"),
+      status,
+      globalPaintLockIntact,
+      blockedStateSafety,
+      readyMarkerCoverage,
       markerSelectorCount: selectors.length,
       markerSelectorErrors,
       uncoveredUnmarkedCount: uncoveredUnmarkedNodes.length,
       coveredKeptCount: coveredKeptNodes.length,
       diagnostics,
       paintProbe,
+      testOnlyAdguardControl,
+      runtimeStyleCount,
       roleStats,
       commentItemStats,
       commentControlStats,
+      commentControlProjection: diagnostics?.commentControlProjection ?? null,
+      allowedCommentControlSelectorDigests: allowedControlSelectorDigests,
       visibleWithoutKeep: visibleWithoutKeep.slice(0, 50),
       visibleWithoutKeepCount: visibleWithoutKeep.length,
       directTextLeaks: directTextLeaks.slice(0, 50),
       directVisibleTextLeakCount: directTextLeaks.length,
     };
-  }, { rolesToRequire: requiredRoles, selectors: markerSelectors });
+  }, {
+    rolesToRequire: requiredRoles,
+    selectors: markerSelectors,
+    allowedControlSelectorDigests: allowedCommentControlSelectorDigests,
+  });
+}
+
+function commentControlProjectionFailures(gate) {
+  const failures = [];
+  const projection = gate?.commentControlProjection;
+  const stats = gate?.commentControlStats;
+  const allowedDigests = gate?.allowedCommentControlSelectorDigests;
+  const exactKeys = [
+    "selectors",
+    "count",
+    "initiallyVisibleCount",
+    "initiallyDormantCount",
+    "initialShapeFingerprint",
+    "selectorDigest",
+    "projectionEpoch",
+    "currentCount",
+    "currentVisibleCount",
+    "currentShapeFingerprint",
+    "currentDormantApprovedCount",
+    "currentProjectionValid",
+  ];
+  if (!projection || typeof projection !== "object" || Array.isArray(projection)) {
+    return ["comment-control projection diagnostics are missing or invalid"];
+  }
+  if (
+    canonicalJson(Object.keys(projection).sort()) !== canonicalJson(exactKeys.sort())
+  ) {
+    failures.push("comment-control projection diagnostics do not have the exact schema");
+  }
+  const selectorsAreStringArray =
+    Array.isArray(projection.selectors) &&
+    projection.selectors.every((selector) => typeof selector === "string");
+  if (!selectorsAreStringArray) {
+    failures.push("comment-control selectors must be an array of strings");
+  } else {
+    if (new Set(projection.selectors).size !== projection.selectors.length) {
+      failures.push("comment-control selectors contain duplicate values");
+    }
+    if (
+      canonicalJson(projection.selectors) !==
+      canonicalJson([...projection.selectors].sort())
+    ) {
+      failures.push("comment-control selectors are not canonical sorted");
+    }
+    if (
+      commentControlSelectorDigest(projection.selectors) !== projection.selectorDigest
+    ) {
+      failures.push("comment-control selector digest does not match its selectors");
+    }
+  }
+  for (const field of [
+    "count",
+    "initiallyVisibleCount",
+    "initiallyDormantCount",
+    "projectionEpoch",
+    "currentCount",
+    "currentVisibleCount",
+    "currentDormantApprovedCount",
+  ]) {
+    if (!Number.isInteger(projection[field]) || projection[field] < 0) {
+      failures.push(`comment-control ${field} must be a non-negative integer`);
+    }
+  }
+  if (
+    Number.isInteger(projection.initiallyVisibleCount) &&
+    Number.isInteger(projection.initiallyDormantCount) &&
+    Number.isInteger(projection.count) &&
+    projection.initiallyVisibleCount + projection.initiallyDormantCount !==
+      projection.count
+  ) {
+    failures.push("comment-control initial visible and dormant counts do not equal total");
+  }
+  if (
+    Number.isInteger(projection.currentVisibleCount) &&
+    Number.isInteger(projection.currentDormantApprovedCount) &&
+    Number.isInteger(projection.currentCount) &&
+    projection.currentVisibleCount + projection.currentDormantApprovedCount !==
+      projection.currentCount
+  ) {
+    failures.push("comment-control current visible and dormant counts do not equal total");
+  }
+  if (
+    typeof projection.initialShapeFingerprint !== "string" ||
+    !/^comment-control-shape-v1-[0-9a-f]{8}$/u.test(projection.initialShapeFingerprint)
+  ) {
+    failures.push("comment-control initial shape fingerprint is invalid");
+  }
+  if (
+    typeof projection.currentShapeFingerprint !== "string" ||
+    !/^comment-control-shape-v1-[0-9a-f]{8}$/u.test(projection.currentShapeFingerprint)
+  ) {
+    failures.push("comment-control current shape fingerprint is invalid");
+  }
+  if (
+    !Array.isArray(allowedDigests) ||
+    allowedDigests.length < 1 ||
+    new Set(allowedDigests).size !== allowedDigests.length ||
+    !allowedDigests.includes(projection.selectorDigest)
+  ) {
+    failures.push("comment-control selector digest is not owned by the exact route contract");
+  }
+  if (projection.currentProjectionValid !== true) {
+    failures.push("comment-control current projection is not exact and approved");
+  }
+  if (!stats || typeof stats !== "object" || Array.isArray(stats)) {
+    failures.push("comment-control DOM statistics are missing");
+    return failures;
+  }
+  if (stats.count !== projection.currentCount) {
+    failures.push("comment-control diagnostics count differs from the current DOM");
+  }
+  if (stats.visibleCount !== projection.currentVisibleCount) {
+    failures.push("comment-control DOM visible count differs from projection diagnostics");
+  }
+  if (stats.allKept !== true) {
+    failures.push("comment control lacks keep marker");
+  }
+  if (
+    Number.isInteger(projection.count) &&
+    Number.isInteger(projection.initiallyDormantCount) &&
+    projection.initiallyDormantCount > projection.count
+  ) {
+    failures.push("initial dormant comment-control count exceeds the initial total");
+  }
+  if (projection.projectionEpoch === 0) {
+    if (projection.currentCount !== projection.count) {
+      failures.push("comment-control count changed without a projection epoch");
+    }
+    if (projection.currentShapeFingerprint !== projection.initialShapeFingerprint) {
+      failures.push("comment-control shape changed without a projection epoch");
+    }
+    if (projection.currentDormantApprovedCount !== projection.initiallyDormantCount) {
+      failures.push("comment-control dormant state changed without a projection epoch");
+    }
+  }
+  return failures;
 }
 
 function userscriptGateFailures(gate, requiredRoles) {
   const failures = [];
   if (!gate.ready) failures.push(`userscript gate is not ready (state=${gate.state ?? "missing"})`);
+  if (gate.diagnostics?.protocolVersion !== READER_GATE_PROTOCOL_VERSION) {
+    failures.push("userscript diagnostics are not exact reader-gate protocol 2");
+  }
+  if (
+    gate.testOnlyAdguardControl?.kind !== "preauthorized-nonce-control" ||
+    gate.testOnlyAdguardControl?.schemaVersion !== READER_GATE_PROTOCOL_VERSION ||
+    gate.testOnlyAdguardControl?.gmAddElementCalls !== 1 ||
+    !(gate.testOnlyAdguardControl?.extendedCssCallbacks >= 2)
+  ) {
+    failures.push("preauthorized AdGuard test control did not prove the two-frame fixture callback");
+  }
+  if (gate.runtimeStyleCount !== 1) {
+    failures.push(`runtime stylesheet cardinality is ${gate.runtimeStyleCount ?? "missing"}`);
+  }
   if (gate.markerSelectorCount < 1) failures.push("no manifest-matched marker filter selector applies");
   if (gate.markerSelectorErrors.length > 0) {
     failures.push(`marker filter selector errors: ${gate.markerSelectorErrors.join(" | ")}`);
@@ -3093,16 +5486,50 @@ function userscriptGateFailures(gate, requiredRoles) {
       );
     }
   }
-  const commentControlStats = gate.commentControlStats;
-  if (commentControlStats?.count > 0) {
-    if (!commentControlStats.allKept) failures.push("comment control lacks keep marker");
-    if (commentControlStats.visibleCount !== commentControlStats.count) {
-      failures.push(
-        `${commentControlStats.count - commentControlStats.visibleCount} comment controls are not visible`,
-      );
+  failures.push(...commentControlProjectionFailures(gate));
+  failures.push(...validateDiagnostics(gate.diagnostics, requiredRoles));
+  return failures;
+}
+
+function blockedUserscriptGateFailures(gate) {
+  const failures = [];
+  if (gate.ready) failures.push("direct navigation unexpectedly became reader-ready");
+  if (gate.state !== "blocked") {
+    failures.push(`direct navigation did not remain blocked (state=${gate.state ?? "missing"})`);
+  }
+  if (gate.status !== "terminal-algumon-seed-required") {
+    failures.push(
+      `direct navigation did not terminate at the provenance gate (status=${gate.status ?? "missing"})`,
+    );
+  }
+  if (gate.blockedStateSafety?.globalPaintLockIntact !== true) {
+    failures.push("blocked-state global paint lock is not intact");
+  }
+  if (gate.blockedStateSafety?.zeroVisibleContent !== true) {
+    failures.push("blocked-state content is visible");
+  }
+  if (!gate.paintProbe || gate.paintProbe.sampleCount < 1) {
+    failures.push("document-start first-paint probe is missing");
+  } else {
+    if (gate.paintProbe.flashFrameCount !== 0) {
+      failures.push(`${gate.paintProbe.flashFrameCount} blocked-state frames exposed content`);
+    }
+    if (gate.paintProbe.firstReadyFrame !== null) {
+      failures.push("direct navigation emitted a ready frame");
+    }
+    const contentSamples = (gate.paintProbe.samples ?? []).filter(
+      (sample) => sample.bodyElementCount > 0 && sample.ready !== true,
+    );
+    if (
+      contentSamples.length < 1 ||
+      contentSamples.some((sample) => sample.paintLockIntact !== true)
+    ) {
+      failures.push("blocked-state paint lock was not intact for every sampled content frame");
     }
   }
-  failures.push(...validateDiagnostics(gate.diagnostics, requiredRoles));
+  if (gate.visibleWithoutKeepCount !== 0 || gate.directVisibleTextLeakCount !== 0) {
+    failures.push("blocked-state visible content count is not zero");
+  }
   return failures;
 }
 
@@ -3112,35 +5539,85 @@ async function createPageContext(
   userscriptContent = null,
   allowedNavigationDomains = [],
   allowedResourceDomains = allowedNavigationDomains,
+  contextPolicy = {},
 ) {
-  const context = await browser.newContext({
-    ...contextOptions(profileName),
-    bypassCSP: true,
-    serviceWorkers: "block",
-  });
+  const storageState = contextPolicy.storageState ?? null;
   const navigationDomains = new Set(allowedNavigationDomains.map((domain) => domain.toLowerCase()));
   const resourceDomains = new Set(allowedResourceDomains.map((domain) => domain.toLowerCase()));
-  const dnsCache = new Map();
-  const resolvesOnlyToPublicAddresses = async (hostname) => {
-    const normalized = normalizedHostname(hostname);
-    if (forbiddenInfrastructureHostname(normalized)) return false;
-    const cached = dnsCache.get(normalized);
-    if (cached && Date.now() - cached.checkedAt < 300_000) return cached.allowed;
-    let addresses;
-    try {
-      addresses = isIP(normalized)
-        ? [{ address: normalized }]
-        : await lookup(normalized, { all: true, verbatim: true });
-    } catch {
-      dnsCache.set(normalized, { allowed: false, checkedAt: Date.now() });
-      return false;
-    }
-    const allowed =
-      addresses.length > 0 &&
-      addresses.every(({ address }) => !isPrivateOrSpecialIp(address));
-    dnsCache.set(normalized, { allowed, checkedAt: Date.now() });
-    return allowed;
+  const exactResourceHosts = new Set(
+    (contextPolicy.exactResourceHosts ?? []).map((hostname) => normalizedHostname(hostname)),
+  );
+  const allowPublicHttpsSubresources = contextPolicy.allowPublicHttpsSubresources === true;
+  const networkEvidenceRecorder = createNetworkPolicyEvidenceRecorder({
+    allowPublicHttpsSubresources,
+  });
+  const pinnedTransport = await createPinnedPublicHttpsProxy();
+  let context;
+  try {
+    context = await browser.newContext({
+      ...contextOptions(profileName),
+      serviceWorkers: "block",
+      proxy: { server: pinnedTransport.serverUrl },
+      ...(storageState ? { storageState } : {}),
+    });
+  } catch (error) {
+    await pinnedTransport.close();
+    throw error;
+  }
+  const nativeContextClose = context.close.bind(context);
+  let contextClosePromise = null;
+  Object.defineProperty(context, "close", {
+    configurable: true,
+    value: (...arguments_) => {
+      if (!contextClosePromise) {
+        contextClosePromise = (async () => {
+          try {
+            return await nativeContextClose(...arguments_);
+          } finally {
+            await pinnedTransport.close();
+          }
+        })();
+      }
+      return contextClosePromise;
+    },
+  });
+  context.once("close", () => {
+    void pinnedTransport.close();
+  });
+  const inFlightReservations = new WeakMap();
+  const finishInFlightReservation = (request) => {
+    const lifecycle = inFlightReservations.get(request);
+    if (!lifecycle) return;
+    inFlightReservations.delete(request);
+    lifecycle.reservation.finish();
   };
+  const failInFlightReservation = (request) => {
+    const lifecycle = inFlightReservations.get(request);
+    if (!lifecycle) return;
+    const failureText = String(request.failure()?.errorText ?? "network-request-failed")
+      .replace(/[^\w .:+-]/gu, "")
+      .slice(0, 64) || "network-request-failed";
+    networkEvidenceRecorder.recordAllowedRequestFailure(
+      lifecycle.hostname,
+      lifecycle.requestType,
+      failureText,
+      lifecycle.isMainNavigation,
+    );
+    finishInFlightReservation(request);
+  };
+  context.on("requestfinished", finishInFlightReservation);
+  context.on("requestfailed", failInFlightReservation);
+  context.on("response", (response) => {
+    const request = response.request();
+    const lifecycle = inFlightReservations.get(request);
+    if (!lifecycle || response.status() < 400) return;
+    networkEvidenceRecorder.recordAllowedResponseFailure(
+      lifecycle.hostname,
+      lifecycle.requestType,
+      response.status(),
+      lifecycle.isMainNavigation,
+    );
+  });
   await context.route("**/*", async (route) => {
     const request = route.request();
     let parsed;
@@ -3150,40 +5627,208 @@ async function createPageContext(
       await route.abort("blockedbyclient");
       return;
     }
-    if (["about:", "blob:", "data:"].includes(parsed.protocol)) {
+    const isMainNavigation = isTopLevelNavigationRequest(request);
+    const decision = networkRequestDecision(
+      parsed.href,
+      isMainNavigation,
+      [...navigationDomains],
+      [...resourceDomains],
+      [...exactResourceHosts],
+      allowPublicHttpsSubresources,
+    );
+    if (decision.reason === "local-browser-scheme") {
       await route.continue();
       return;
     }
-    if (parsed.protocol !== "https:") {
-      await route.abort("blockedbyclient");
+    const reservation = networkEvidenceRecorder.reserveRemoteRequest(parsed.hostname);
+    let handedToNetworkLifecycle = false;
+    try {
+      if (!reservation.allowed) {
+        networkEvidenceRecorder.recordBlocked(
+          parsed.hostname,
+          request.resourceType(),
+          reservation.reason,
+          isMainNavigation,
+        );
+        await route.abort("blockedbyclient");
+        return;
+      }
+      const approvedAddresses = decision.allowed
+        ? await pinnedTransport.approvePublicHost(parsed.hostname)
+        : [];
+      if (!decision.allowed || approvedAddresses.length < 1) {
+        networkEvidenceRecorder.recordBlocked(
+          parsed.hostname,
+          request.resourceType(),
+          decision.allowed ? "dns-not-public" : decision.reason,
+          isMainNavigation,
+        );
+        await route.abort("blockedbyclient");
+        return;
+      }
+      if (decision.reason === "exact-challenge-subresource") {
+        networkEvidenceRecorder.recordExactChallenge(
+          parsed.hostname,
+          request.resourceType(),
+          decision.reason,
+          isMainNavigation,
+        );
+      }
+      networkEvidenceRecorder.recordAllowedPublic(
+        parsed.hostname,
+        request.resourceType(),
+        decision.reason,
+        isMainNavigation,
+      );
+      inFlightReservations.set(request, {
+        reservation,
+        hostname: parsed.hostname,
+        requestType: request.resourceType(),
+        isMainNavigation,
+      });
+      handedToNetworkLifecycle = true;
+      try {
+        await route.continue();
+      } catch (error) {
+        inFlightReservations.delete(request);
+        handedToNetworkLifecycle = false;
+        throw error;
+      }
+    } finally {
+      if (!handedToNetworkLifecycle) reservation.finish();
+    }
+  });
+  await context.routeWebSocket("**/*", async (webSocketRoute) => {
+    let parsed;
+    try {
+      parsed = new URL(webSocketRoute.url());
+    } catch {
+      await webSocketRoute.close({ code: 1008, reason: "invalid-url" });
       return;
     }
-    const allowedRequest = [...resourceDomains].some((domain) =>
-      hostnameMatches(parsed.hostname, domain),
+    const decision = networkRequestDecision(
+      parsed.href,
+      false,
+      [...navigationDomains],
+      [...resourceDomains],
+      [...exactResourceHosts],
+      allowPublicHttpsSubresources,
     );
-    const isMainNavigation =
-      request.isNavigationRequest() && request.frame().parentFrame() === null;
-    const allowedNavigation = [...navigationDomains].some((domain) =>
-      hostnameMatches(parsed.hostname, domain),
-    );
-    if (
-      !allowedRequest ||
-      (isMainNavigation && !allowedNavigation) ||
-      forbiddenInfrastructureHostname(parsed.hostname) ||
-      !(await resolvesOnlyToPublicAddresses(parsed.hostname))
-    ) {
-      await route.abort("blockedbyclient");
-      return;
+    const reservation = networkEvidenceRecorder.reserveRemoteRequest(parsed.hostname);
+    try {
+      if (!reservation.allowed || !decision.allowed) {
+        const reason = reservation.allowed ? decision.reason : reservation.reason;
+        networkEvidenceRecorder.recordBlocked(
+          parsed.hostname,
+          "websocket",
+          reason,
+          false,
+        );
+        await webSocketRoute.close({ code: 1008, reason: "network-policy" });
+        return;
+      }
+      const approvedAddresses = await pinnedTransport.approvePublicHost(parsed.hostname);
+      if (approvedAddresses.length < 1) {
+        networkEvidenceRecorder.recordBlocked(
+          parsed.hostname,
+          "websocket",
+          "dns-not-public",
+          false,
+        );
+        await webSocketRoute.close({ code: 1008, reason: "network-policy" });
+        return;
+      }
+      if (decision.reason === "exact-challenge-subresource") {
+        networkEvidenceRecorder.recordExactChallenge(
+          parsed.hostname,
+          "websocket",
+          decision.reason,
+          false,
+        );
+      }
+      networkEvidenceRecorder.recordAllowedPublic(
+        parsed.hostname,
+        "websocket",
+        decision.reason,
+        false,
+      );
+      webSocketRoute.connectToServer();
+    } catch {
+      networkEvidenceRecorder.recordBlocked(
+        parsed.hostname,
+        "websocket",
+        "websocket-connect-failed",
+        false,
+      );
+      await webSocketRoute.close({ code: 1011, reason: "connect-failed" }).catch(() => {});
+    } finally {
+      reservation.finish();
     }
-    await route.continue();
   });
   if (userscriptContent !== null) {
     await context.addInitScript({
-      content: `${FIRST_PAINT_PROBE_SOURCE}\n${userscriptContent}`,
+      content: userscriptAuditInitSource(userscriptContent),
     });
   }
-  const page = await context.newPage();
-  return { context, page };
+  const validateMainDocumentUrl = (urlText) => {
+    const decision = networkRequestDecision(
+      urlText,
+      true,
+      [...navigationDomains],
+      [...resourceDomains],
+      [...exactResourceHosts],
+      allowPublicHttpsSubresources,
+    );
+    if (decision.allowed) return;
+    let parsed = null;
+    try {
+      parsed = new URL(urlText);
+    } catch {}
+    networkEvidenceRecorder.recordNavigationViolation(
+      parsed?.protocol,
+      parsed?.hostname,
+      decision.reason,
+    );
+  };
+  const validateAllMainDocumentUrls = () => {
+    for (const observedPage of context.pages()) {
+      validateMainDocumentUrl(observedPage.mainFrame().url());
+    }
+  };
+  const navigationGuardedPages = new WeakSet();
+  const attachNavigationGuard = (observedPage) => {
+    if (navigationGuardedPages.has(observedPage)) return;
+    navigationGuardedPages.add(observedPage);
+    observedPage.on("framenavigated", (frame) => {
+      if (frame.parentFrame() !== null) return;
+      validateMainDocumentUrl(frame.url());
+    });
+  };
+  context.on("page", attachNavigationGuard);
+  let page;
+  try {
+    page = await context.newPage();
+  } catch (error) {
+    await context.close();
+    throw error;
+  }
+  attachNavigationGuard(page);
+  return {
+    context,
+    page,
+    sealNetworkPolicyEvidence: async () => {
+      validateAllMainDocumentUrls();
+      await networkEvidenceRecorder.sealAndDrain({
+        onSeal: () => pinnedTransport.seal(),
+      });
+      validateAllMainDocumentUrls();
+      await context.close();
+      return {
+        ...networkEvidenceRecorder.snapshot(),
+        pinnedTransport: pinnedTransport.snapshot(),
+      };
+    },
+  };
 }
 
 async function auditOneTarget({
@@ -3198,124 +5843,397 @@ async function auditOneTarget({
   runtimeOnly,
   runDirectory,
   timeoutMs,
+  transitionBudget,
 }) {
+  const runtimeExpectation = runtimeExpectationForTarget(target);
+  let auditedTarget = target;
+  let auditedLayout = layout;
+  let relayRefreshError = null;
+  if (runtimeExpectation === "relay-positive") {
+    try {
+      if (!transitionBudget) {
+        throw new Error("relay-contract-failure: transition budget is missing");
+      }
+      auditedTarget = await refreshLatestTargetRelayProof(
+        browser,
+        site,
+        profileName,
+        target,
+        timeoutMs,
+        transitionBudget,
+      );
+    } catch (error) {
+      relayRefreshError = error;
+    }
+  }
   const stem = safeFileStem([
     site.id,
     layout.id,
     profileName,
-    target.source,
-    sha256(target.url).slice(0, 10),
+    auditedTarget.source,
+    sha256(auditedTarget.url).slice(0, 10),
   ]);
   const result = {
     siteId: site.id,
     layoutId: layout.id,
     profile: profileName,
-    source: target.source,
-    requestedUrl: target.url,
-    routeFamily: target.routeFamily ?? null,
-    approvedRouteMatched: target.approvedRouteMatched !== false,
-    matchedApprovedPath: target.matchedApprovedPath ?? null,
-    routeObservation: target.routeObservation ?? null,
+    source: auditedTarget.source,
+    runtimeExpectation,
+    requestedUrl: auditedTarget.url,
+    relayDestinationUrl: auditedTarget.algumon?.verifiedResolution?.resolvedDestination ?? null,
+    relayAcquisition: auditedTarget.relayAcquisition ?? null,
+    routeFamily: auditedTarget.routeFamily ?? null,
+    configuredPathMatchCount: auditedTarget.configuredPathMatchCount ?? null,
+    approvedRouteMatched: auditedTarget.approvedRouteMatched !== false,
+    matchedApprovedPath: auditedTarget.matchedApprovedPath ?? null,
+    routeObservation: auditedTarget.routeObservation ?? null,
+    profileLanding: null,
+    committedProjection: null,
     static: null,
     userscript: null,
     failures: [],
   };
   let candidates = [];
 
-  if (!runtimeOnly) {
+  if (relayRefreshError) {
+    result.failures.push(
+      `relay-positive proof refresh error: ${relayRefreshError?.stack ?? String(relayRefreshError)}`,
+    );
+    result.capturedAt = new Date().toISOString().replace(/\.\d{3}Z$/u, "Z");
+    result.passed = false;
+    return { result, candidates };
+  }
+
+  const navigationDomains = [...new Set(site.layouts.map((candidate) => candidate.domain))];
+  const exactChallengeResourceHosts = exactChallengeResourceHostsForSite(site.id);
+  let accessLease = null;
+  let staticConsistency = null;
+  let candidateExtractionAllowed = false;
+  let storageState = null;
+  if (runtimeExpectation === "direct-negative") {
+    result.static = {
+      provenanceOnly: true,
+      skipped:
+        "direct-negative provenance-only; bootstrap, lease, and static semantic audit omitted",
+    };
+    storageState = { cookies: [], origins: [] };
+  } else {
     const staticSession = await createPageContext(
       browser,
       profileName,
       null,
-      [layout.domain],
-      resourceDomainsForLayout(site, layout),
+      navigationDomains,
+      resourceDomainsForSite(site),
+      {
+        exactResourceHosts: exactChallengeResourceHosts,
+        allowPublicHttpsSubresources: true,
+      },
     );
     try {
-      const navigation = await navigate(staticSession.page, target.url, timeoutMs);
-      result.static = { navigation };
-      if (!urlMatchesLayout(navigation.finalUrl, layout)) {
+    const responseObserver = observeMainDocumentResponses(staticSession.page);
+    let navigation;
+    let sourceSnapshot;
+    let sourceClassification;
+    try {
+      navigation = await navigate(
+        staticSession.page,
+        auditedTarget.url,
+        timeoutMs,
+        responseObserver,
+      );
+      sourceSnapshot = await destinationDocumentSnapshot(staticSession.page);
+      sourceClassification = classifyDestinationResponse({
+        ...navigation,
+        ...sourceSnapshot,
+      });
+      const challengeObserved = sourceClassification.subkind === "waf-or-challenge";
+      const challengeDeadline =
+        Date.now() + Math.min(timeoutMs, DESTINATION_CHALLENGE_SETTLE_MAX_MS);
+      while (
+        runtimeExpectation === "relay-positive" &&
+        sourceClassification.subkind === "waf-or-challenge" &&
+        Date.now() < challengeDeadline
+      ) {
+        await staticSession.page.waitForTimeout(250);
+        navigation = navigationEvidenceFromObserver(
+          responseObserver,
+          staticSession.page.url(),
+        );
+        sourceSnapshot = await destinationDocumentSnapshot(staticSession.page);
+        sourceClassification = classifyDestinationResponse({
+          ...navigation,
+          ...sourceSnapshot,
+        });
+      }
+      if (challengeObserved && sourceClassification.kind === "article-response") {
+        await settlePage(staticSession.page, timeoutMs);
+        navigation = navigationEvidenceFromObserver(
+          responseObserver,
+          staticSession.page.url(),
+        );
+        sourceSnapshot = await destinationDocumentSnapshot(staticSession.page);
+        sourceClassification = classifyDestinationResponse({
+          ...navigation,
+          ...sourceSnapshot,
+        });
+      }
+    } finally {
+      responseObserver.stop();
+    }
+    result.static = {
+      navigation,
+      sourceClassification,
+      networkPolicy: null,
+      provenanceOnly: false,
+    };
+    result.sourceClassification = sourceClassification;
+    if (
+      runtimeExpectation === "relay-positive" &&
+      sourceClassification.kind !== "article-response"
+    ) {
+      result.failures.push(
+        `source-or-infrastructure-failure: ${sourceClassification.subkind}`,
+      );
+      await captureBoundedScreenshot(
+        staticSession.page,
+        path.join(runDirectory, `${stem}-source-failure.png`),
+      ).catch(() => {});
+      result.capturedAt = new Date().toISOString().replace(/\.\d{3}Z$/u, "Z");
+      result.passed = false;
+      return { result, candidates: [] };
+    }
+    candidateExtractionAllowed = candidateGenerationAllowed(
+      runtimeExpectation,
+      sourceClassification,
+    );
+    const landing = classifyProfileLandingRoute(
+      site,
+      profileName,
+      navigation.finalUrl,
+      promotionCandidate,
+    );
+    const landedLayout = site.layouts.find(
+      (candidate) => candidate.id === landing.layoutId,
+    ) ?? null;
+    if (landedLayout) auditedLayout = landedLayout;
+    result.layoutId = auditedLayout.id;
+    result.requestedUrl = navigation.finalUrl;
+    result.routeFamily = routeFamily(navigation.finalUrl);
+    result.configuredPathMatchCount = landing.configuredPathMatchCount;
+    result.approvedRouteMatched = landing.approvedRouteMatched;
+    result.matchedApprovedPath = landing.matchedApprovedPath;
+    result.profileLanding = {
+      evidenceKind: "profile-user-agent-final-landing",
+      finalUrl: navigation.finalUrl,
+      ...landing,
+    };
+    if (result.routeObservation) {
+      result.routeObservation = {
+        ...result.routeObservation,
+        finalResolvedUrl: navigation.finalUrl,
+        resolvedDestination: auditedTarget.url,
+        algumonEntryUrl:
+          auditedTarget.algumon?.redirectUrl ?? result.routeObservation.algumonEntryUrl,
+        relayFetchUrl:
+          auditedTarget.algumon?.verifiedResolution?.relayFetchUrl ??
+          result.routeObservation.relayFetchUrl,
+        relayResolutionSha256: auditedTarget.algumon?.verifiedResolution
+          ? sha256(canonicalJson(auditedTarget.algumon.verifiedResolution))
+          : result.routeObservation.relayResolutionSha256,
+        provenanceSha256: sha256(
+          canonicalJson({
+            algumonDealId: auditedTarget.algumon?.dealId ?? null,
+            algumonEntryUrl: auditedTarget.algumon?.redirectUrl ?? null,
+            finalResolvedUrl: navigation.finalUrl,
+            profile: profileName,
+          }),
+        ),
+      };
+    }
+    let staticRoleResourceEvidence = {
+      hosts: [],
+      rootCount: 0,
+      nodeCount: 0,
+      urlCount: 0,
+      selectorErrorCount: 0,
+      nodeOverflowCount: 0,
+      urlOverflowCount: 0,
+      hostOverflowCount: 0,
+      skipped: "runtime-only exact role resources are verified after userscript projection",
+    };
+    if (runtimeOnly) {
+      result.static.skipped =
+        "runtime-only candidate verification; source and access lease still verified";
+    } else {
+      if (landing.configuredPathMatchCount !== 1 || !landedLayout) {
         result.failures.push(
           `static path gate mismatch: ${new URL(navigation.finalUrl).hostname}${new URL(navigation.finalUrl).pathname}`,
         );
       }
+      try {
+        await captureBoundedScreenshot(
+          staticSession.page,
+          path.join(runDirectory, `${stem}-static-before.png`),
+        );
+        const approvedProjection = await countExistingApprovedLayoutMatches(
+          staticSession.page,
+          auditedLayout,
+          userscriptContent,
+          targetAlgumonSeed(site.id, auditedTarget),
+        );
+        result.committedProjection = committedProjectionEvidence(approvedProjection);
+        const oracle = await semanticOracle(
+          staticSession.page,
+          userscriptContent,
+          site.id,
+          auditedLayout.id,
+          requiredRolesForLayout(auditedLayout),
+          auditedTarget,
+        );
+        result.semanticOracle = semanticOracleEvidence(oracle, auditedTarget);
+        staticRoleResourceEvidence = await roleReferencedResourceHosts(
+          staticSession.page,
+          Object.values(result.semanticOracle.roles ?? {}).filter(Boolean),
+        );
+        const candidateProjection = await candidateOracleProjectionEvidence(
+          staticSession.page,
+          auditedLayout,
+          result.semanticOracle,
+          userscriptContent,
+          targetAlgumonSeed(site.id, auditedTarget),
+          navigation.finalUrl,
+        );
+        const cardinality = projectionCardinalityEvidence(
+          result.semanticOracle.structuralOk,
+          approvedProjection.semanticProjectionCount,
+        );
+        result.semanticOracle.semanticProjectionCount = cardinality.semanticProjectionCount;
+        result.semanticOracle.coMatchCount = cardinality.coMatchCount;
+        result.semanticOracle.coMatchIds = approvedProjection.classes.flatMap(
+          (projectionClass) => projectionClass.aliases,
+        );
+        result.semanticOracle.projectionAliases = approvedProjection.classes.map(
+          (projectionClass) => projectionClass.aliases,
+        );
+        result.semanticOracle.exactApprovedCount = cardinality.exactApprovedCount;
+        result.semanticOracle.candidateProjection = candidateProjection;
+        result.failures.push(
+          ...semanticOracleContractFailures(result.semanticOracle).map(
+            (item) => `semantic: ${item}`,
+          ),
+        );
+        const preProjectionCandidates = await selectorCandidates(staticSession.page);
+        const approvedMatchId = approvedProjection.semanticProjectionCount === 1
+          ? approvedProjection.classes[0].canonicalId
+          : auditedLayout.id;
+        const projectionLayout = staticProjectionContract(auditedLayout, approvedMatchId);
+        const projection = await auditStaticProjection(staticSession.page, projectionLayout);
+        result.static.projectionContractId = approvedMatchId;
+        await staticSession.page.waitForTimeout(100);
+        await captureBoundedScreenshot(
+          staticSession.page,
+          path.join(runDirectory, `${stem}-static-projected.png`),
+        );
+        result.static.projection = projection;
+        result.failures.push(
+          ...staticProjectionFailures(projection).map((item) => `static: ${item}`),
+        );
+        if (result.failures.length > 0) candidates = preProjectionCandidates;
+        staticConsistency = {
+          siteId: site.id,
+          layoutId: auditedLayout.id,
+          resolvedArticleIdentitySha256:
+            canonicalArticleIdentity(navigation.finalUrl, site.id).sha256,
+          resolvedRouteFamily: canonicalArticleIdentity(navigation.finalUrl, site.id).routeFamily,
+          semanticProjectionCount: result.committedProjection.count,
+          projectionAliases: result.committedProjection.aliases.flat(),
+        };
+      } catch (error) {
+        result.failures.push(`static audit error: ${error?.stack ?? String(error)}`);
+        if (candidateExtractionAllowed) {
+          candidates = await selectorCandidates(staticSession.page).catch(() => []);
+        }
+        await captureBoundedScreenshot(
+          staticSession.page,
+          path.join(runDirectory, `${stem}-static-error.png`),
+        ).catch(() => {});
+      }
+    }
+    if (!staticConsistency && runtimeExpectation === "relay-positive") {
+      const identity = canonicalArticleIdentity(navigation.finalUrl, site.id);
+      staticConsistency = {
+        siteId: site.id,
+        layoutId: auditedLayout.id,
+        resolvedArticleIdentitySha256: identity.sha256,
+        resolvedRouteFamily: identity.routeFamily,
+        semanticProjectionCount: null,
+        projectionAliases: null,
+      };
+    }
+    accessLease = await acquireArticleAccessLease(
+      staticSession.context,
+      site,
+      profileName,
+      auditedTarget.url,
+      navigation.finalUrl,
+    );
+    result.articleAccessLease = accessLease.evidence;
+    const staticNetworkPolicy = await staticSession.sealNetworkPolicyEvidence();
+    staticNetworkPolicy.roleReferencedResourceEvidence = staticRoleResourceEvidence;
+    staticNetworkPolicy.roleReferencedResourceHosts = staticRoleResourceEvidence.hosts;
+    result.static.networkPolicy = staticNetworkPolicy;
+    const staticNetworkFailures = networkFidelityFailures(
+      staticNetworkPolicy,
+      resourceDomainsForSite(site),
+      staticRoleResourceEvidence,
+    );
+    if (staticNetworkFailures.length > 0) {
+      candidateExtractionAllowed = false;
+      candidates = [];
+      result.failures.push(
+        ...staticNetworkFailures.map((failure) => `network-fidelity: ${failure}`),
+      );
       await captureBoundedScreenshot(
         staticSession.page,
-        path.join(runDirectory, `${stem}-static-before.png`),
-      );
-      const oracle = await semanticOracle(
-        staticSession.page,
-        userscriptContent,
-        site.id,
-        layout.id,
-        requiredRolesForLayout(layout),
-        target,
-      );
-      result.semanticOracle = semanticOracleEvidence(oracle, target);
-      const approvedProjection = await countExistingApprovedLayoutMatches(
-        staticSession.page,
-        layout,
-        userscriptContent,
-        targetAlgumonSeed(site.id, target),
-      );
-      const candidateProjection = await candidateOracleProjectionEvidence(
-        staticSession.page,
-        layout,
-        result.semanticOracle,
-        userscriptContent,
-        targetAlgumonSeed(site.id, target),
-        navigation.finalUrl,
-      );
-      const cardinality = projectionCardinalityEvidence(
-        result.semanticOracle.structuralOk,
-        approvedProjection.semanticProjectionCount,
-      );
-      result.semanticOracle.semanticProjectionCount =
-        cardinality.semanticProjectionCount;
-      result.semanticOracle.coMatchCount = cardinality.coMatchCount;
-      result.semanticOracle.coMatchIds = approvedProjection.classes.flatMap(
-        (projectionClass) => projectionClass.aliases,
-      );
-      result.semanticOracle.projectionAliases = approvedProjection.classes.map(
-        (projectionClass) => projectionClass.aliases,
-      );
-      result.semanticOracle.exactApprovedCount = cardinality.exactApprovedCount;
-      result.semanticOracle.candidateProjection = candidateProjection;
-      const preProjectionCandidates = await selectorCandidates(staticSession.page);
-      const approvedMatchId = approvedProjection.semanticProjectionCount === 1
-        ? approvedProjection.classes[0].canonicalId
-        : layout.id;
-      const projectionLayout = staticProjectionContract(layout, approvedMatchId);
-      const projection = await auditStaticProjection(staticSession.page, projectionLayout);
-      result.static.projectionContractId = approvedMatchId;
-      await staticSession.page.waitForTimeout(100);
-      await captureBoundedScreenshot(
-        staticSession.page,
-        path.join(runDirectory, `${stem}-static-projected.png`),
-      );
-      result.static.projection = projection;
-      result.failures.push(...staticProjectionFailures(projection).map((item) => `static: ${item}`));
-      if (result.failures.length > 0) candidates = preProjectionCandidates;
+        path.join(runDirectory, `${stem}-network-fidelity-failure.png`),
+      ).catch(() => {});
+      result.capturedAt = new Date().toISOString().replace(/\.\d{3}Z$/u, "Z");
+      result.passed = false;
+      return { result, candidates: [] };
+    }
     } catch (error) {
-      result.failures.push(`static audit error: ${error?.stack ?? String(error)}`);
-      candidates = await selectorCandidates(staticSession.page).catch(() => []);
+      result.failures.push(`article access acquisition error: ${error?.stack ?? String(error)}`);
       await captureBoundedScreenshot(
         staticSession.page,
-        path.join(runDirectory, `${stem}-static-error.png`),
-      )
-        .catch(() => {});
+        path.join(runDirectory, `${stem}-access-error.png`),
+      ).catch(() => {});
     } finally {
       await staticSession.context.close();
     }
-  } else {
-    result.static = { skipped: "runtime-only candidate verification" };
-  }
 
+    if (!accessLease) {
+      result.capturedAt = new Date().toISOString().replace(/\.\d{3}Z$/u, "Z");
+      result.passed = false;
+      return { result, candidates: [] };
+    }
+    storageState = consumeArticleAccessLease(accessLease, accessLease.binding);
+  }
   const userscriptSession = await createPageContext(
     browser,
     profileName,
     userscriptContent,
-    target.algumon ? [layout.domain, "algumon.com"] : [layout.domain],
-    resourceDomainsForLayout(site, layout, Boolean(target.algumon)),
+    [
+      ...new Set([
+        ...navigationDomains,
+        ...(auditedTarget.algumon ? ["algumon.com"] : []),
+      ]),
+    ],
+    resourceDomainsForSite(site, Boolean(auditedTarget.algumon)),
+    {
+      exactResourceHosts: exactChallengeResourceHosts,
+      storageState,
+      allowPublicHttpsSubresources: true,
+    },
   );
   const consoleErrors = [];
   const capturePageErrors = (observedPage) => {
@@ -3329,25 +6247,114 @@ async function auditOneTarget({
   userscriptSession.context.on("page", capturePageErrors);
   capturePageErrors(userscriptSession.page);
   let auditedPage = userscriptSession.page;
+  let runtimeCandidateExtractionAllowed = false;
   try {
     const navigation = await navigateThroughAlgumon(
       userscriptSession.page,
-      target,
+      auditedTarget,
       timeoutMs,
-      layout.domain,
+      auditedLayout.domain,
     );
     auditedPage = navigation.page ?? userscriptSession.page;
     const { page: _destinationPage, ...navigationEvidence } = navigation;
-    result.userscript = { navigation: navigationEvidence };
-    if (!urlMatchesLayout(navigation.finalUrl, layout)) {
+    result.userscript = {
+      expectation: runtimeExpectation,
+      navigation: navigationEvidence,
+      networkPolicy: null,
+    };
+    const runtimeSnapshot = await destinationDocumentSnapshot(auditedPage);
+    const runtimeSourceClassification = classifyDestinationResponse({
+      ...navigationEvidence,
+      ...runtimeSnapshot,
+    });
+    result.userscript.sourceClassification = runtimeSourceClassification;
+    if (
+      runtimeExpectation === "relay-positive" &&
+      runtimeSourceClassification.kind !== "article-response"
+    ) {
+      candidateExtractionAllowed = false;
+      candidates = [];
+      result.failures.push(
+        `userscript source-or-infrastructure-failure: ${runtimeSourceClassification.subkind}`,
+      );
+      await captureBoundedScreenshot(
+        auditedPage,
+        path.join(runDirectory, `${stem}-userscript-source-failure.png`),
+      ).catch(() => {});
+      throw Object.assign(new Error("runtime destination response was not an article"), {
+        sourceClassified: true,
+      });
+    }
+    runtimeCandidateExtractionAllowed = candidateGenerationAllowed(
+      runtimeExpectation,
+      runtimeSourceClassification,
+      0,
+    );
+    const runtimeLanding = classifyProfileLandingRoute(
+      site,
+      profileName,
+      navigation.finalUrl,
+      promotionCandidate,
+    );
+    const runtimeLayout = site.layouts.find(
+      (candidate) => candidate.id === runtimeLanding.layoutId,
+    ) ?? null;
+    if (
+      runtimeExpectation === "relay-positive" &&
+      runtimeLayout &&
+      runtimeLayout.id !== auditedLayout.id
+    ) {
+      result.failures.push(
+        `profile landing layout changed between static and userscript audit (${auditedLayout.id} -> ${runtimeLayout.id})`,
+      );
+      auditedLayout = runtimeLayout;
+    }
+    result.layoutId = auditedLayout.id;
+    result.requestedUrl = navigation.finalUrl;
+    result.routeFamily = routeFamily(navigation.finalUrl);
+    result.configuredPathMatchCount = runtimeLanding.configuredPathMatchCount;
+    result.approvedRouteMatched = runtimeLanding.approvedRouteMatched;
+    result.matchedApprovedPath = runtimeLanding.matchedApprovedPath;
+    result.profileLanding = {
+      evidenceKind: "profile-user-agent-final-landing",
+      finalUrl: navigation.finalUrl,
+      ...runtimeLanding,
+    };
+    if (result.routeObservation) {
+      result.routeObservation = {
+        ...result.routeObservation,
+        finalResolvedUrl: navigation.finalUrl,
+        resolvedDestination: auditedTarget.url,
+        algumonEntryUrl:
+          auditedTarget.algumon?.redirectUrl ?? result.routeObservation.algumonEntryUrl,
+        relayFetchUrl:
+          auditedTarget.algumon?.verifiedResolution?.relayFetchUrl ??
+          result.routeObservation.relayFetchUrl,
+        relayResolutionSha256: auditedTarget.algumon?.verifiedResolution
+          ? sha256(canonicalJson(auditedTarget.algumon.verifiedResolution))
+          : result.routeObservation.relayResolutionSha256,
+        provenanceSha256: sha256(
+          canonicalJson({
+            algumonDealId: auditedTarget.algumon?.dealId ?? null,
+            algumonEntryUrl: auditedTarget.algumon?.redirectUrl ?? null,
+            finalResolvedUrl: navigation.finalUrl,
+            profile: profileName,
+          }),
+        ),
+      };
+    }
+    if (
+      runtimeExpectation === "relay-positive" &&
+      (runtimeLanding.configuredPathMatchCount !== 1 || !runtimeLayout)
+    ) {
       result.failures.push(
         `userscript path gate mismatch: ${new URL(navigation.finalUrl).hostname}${new URL(navigation.finalUrl).pathname}`,
       );
     }
-    const requiredRoles = requiredRolesForLayout(layout);
+    const requiredRoles = requiredRolesForLayout(auditedLayout);
     const markerSelectors = markerSelectorsForUrl(
       markerFilterContent,
-      layout,
+      auditedLayout,
       navigation.finalUrl,
     );
     const gate = await auditUserscriptGate(
@@ -3355,6 +6362,8 @@ async function auditOneTarget({
       requiredRoles,
       timeoutMs,
       markerSelectors,
+      runtimeExpectation,
+      commentControlSelectorDigestsForUrl(auditedLayout, navigation.finalUrl),
     );
     await auditedPage.waitForTimeout(100);
     await captureBoundedScreenshot(
@@ -3362,17 +6371,27 @@ async function auditOneTarget({
       path.join(runDirectory, `${stem}-userscript-gated.png`),
     );
     result.userscript.gate = gate;
+    if (runtimeExpectation === "relay-positive") {
+      result.failures.push(
+        ...staticRuntimeConsistencyFailures(
+          staticConsistency,
+          navigation,
+          gate,
+          runtimeLayout?.id ?? auditedLayout.id,
+        ).map((item) => `consistency: ${item}`),
+      );
+    }
     if (
       promotionCandidate &&
       promotionCandidate.siteId === site.id &&
-      promotionCandidate.layoutId === layout.id &&
-      target.source === "algumon-latest"
+      promotionCandidate.layoutId === auditedLayout.id &&
+      auditedTarget.source === "algumon-latest"
     ) {
       result.candidateOverlay = await auditCandidateOverlay(
         auditedPage,
-        layout,
+        auditedLayout,
         promotionCandidate,
-        target,
+        auditedTarget,
         userscriptContent,
       );
       result.failures.push(
@@ -3384,13 +6403,75 @@ async function auditOneTarget({
       );
     }
     result.userscript.consoleErrors = consoleErrors;
-    result.failures.push(...userscriptGateFailures(gate, requiredRoles).map((item) => `userscript: ${item}`));
-    if (result.failures.length > 0 && candidates.length === 0) {
+    const runtimeFailures = runtimeExpectation === "direct-negative"
+      ? blockedUserscriptGateFailures(gate)
+      : userscriptGateFailures(gate, requiredRoles);
+    result.failures.push(...runtimeFailures.map((item) => `userscript: ${item}`));
+    if (
+      runtimeExpectation === "relay-positive" &&
+      runtimeCandidateExtractionAllowed &&
+      result.failures.length > 0 &&
+      candidates.length === 0
+    ) {
       candidates = await selectorCandidates(auditedPage);
     }
+    const runtimeRoleResourceEvidence = runtimeExpectation === "relay-positive"
+      ? await roleReferencedResourceHosts(
+          auditedPage,
+          [
+            "[data-hotdeal-focus-role='title']",
+            "[data-hotdeal-focus-role='body']",
+            "[data-hotdeal-focus-role='product']",
+            "[data-hotdeal-focus-role='comments']",
+          ],
+        )
+      : {
+          hosts: [],
+          rootCount: 0,
+          nodeCount: 0,
+          urlCount: 0,
+          selectorErrorCount: 0,
+          nodeOverflowCount: 0,
+          urlOverflowCount: 0,
+          hostOverflowCount: 0,
+          skipped: "direct-negative has no approved semantic role surface",
+        };
+    const runtimeNetworkPolicy = await userscriptSession.sealNetworkPolicyEvidence();
+    runtimeNetworkPolicy.roleReferencedResourceEvidence = runtimeRoleResourceEvidence;
+    runtimeNetworkPolicy.roleReferencedResourceHosts = runtimeRoleResourceEvidence.hosts;
+    result.userscript.networkPolicy = runtimeNetworkPolicy;
+    const runtimeNetworkFailures = networkFidelityFailures(
+      runtimeNetworkPolicy,
+      resourceDomainsForSite(site, Boolean(auditedTarget.algumon)),
+      runtimeRoleResourceEvidence,
+    );
+    if (runtimeNetworkFailures.length > 0) {
+      runtimeCandidateExtractionAllowed = false;
+      candidateExtractionAllowed = false;
+      candidates = [];
+      result.failures.push(
+        ...runtimeNetworkFailures.map((failure) => `userscript network-fidelity: ${failure}`),
+      );
+      await captureBoundedScreenshot(
+        auditedPage,
+        path.join(runDirectory, `${stem}-userscript-network-fidelity-failure.png`),
+      ).catch(() => {});
+    }
   } catch (error) {
-    result.failures.push(`userscript audit error: ${error?.stack ?? String(error)}`);
-    if (candidates.length === 0) {
+    if (error?.sourceClassified !== true) {
+      result.failures.push(`userscript audit error: ${error?.stack ?? String(error)}`);
+    }
+    if (
+      runtimeExpectation === "relay-positive" &&
+      runtimeCandidateExtractionAllowed !== true
+    ) {
+      candidates = [];
+    }
+    if (
+      runtimeExpectation === "relay-positive" &&
+      runtimeCandidateExtractionAllowed &&
+      candidates.length === 0
+    ) {
       candidates = await selectorCandidates(auditedPage).catch(() => []);
     }
     await captureBoundedScreenshot(
@@ -3399,6 +6480,27 @@ async function auditOneTarget({
     )
       .catch(() => {});
   } finally {
+    if (result.userscript && !result.userscript.networkPolicy) {
+      const runtimeNetworkPolicy = await userscriptSession
+        .sealNetworkPolicyEvidence()
+        .catch(() => null);
+      if (runtimeNetworkPolicy) {
+        result.userscript.networkPolicy = runtimeNetworkPolicy;
+        const runtimeNetworkFailures = networkFidelityFailures(
+          runtimeNetworkPolicy,
+          resourceDomainsForSite(site, Boolean(auditedTarget.algumon)),
+          [],
+        );
+        if (runtimeNetworkFailures.length > 0) {
+          candidates = [];
+          result.failures.push(
+            ...runtimeNetworkFailures.map(
+              (failure) => `userscript network-fidelity: ${failure}`,
+            ),
+          );
+        }
+      }
+    }
     await userscriptSession.context.close();
   }
 
@@ -3462,6 +6564,8 @@ window.setTimeout(() => {
       [...REQUIRED_ROLE_NAMES],
       timeoutMs,
       markerSelectorsForUrl(markerFilterContent, clienLayout, fixtureUrl),
+      "relay-positive",
+      commentControlSelectorDigestsForUrl(clienLayout, fixtureUrl),
     );
     result.gate = gate;
     result.failures.push(...userscriptGateFailures(gate, REQUIRED_ROLE_NAMES));
@@ -3561,11 +6665,10 @@ async function auditSyntheticAlgumonRelayFixtures(
     const fixture = { id, failures: [] };
     const context = await browser.newContext({
       ...contextOptions("desktop"),
-      bypassCSP: true,
       serviceWorkers: "block",
     });
     await context.addInitScript({
-      content: `${FIRST_PAINT_PROBE_SOURCE}\n${userscriptContent}`,
+      content: userscriptAuditInitSource(userscriptContent),
     });
     let signedRequestCount = 0;
     let destinationRequestCount = 0;
@@ -3753,16 +6856,16 @@ async function auditSyntheticEdgeFixtures(
   );
   const clienPaintGateCss = clienGateRules
     .filter((rule) => rule.operator === "#$#")
-    .map((rule) => rule.selector)
+    .map((rule) => rule.cssText)
     .join("\n");
   const clienGateCss = clienGateRules
     .flatMap((rule) => {
-      if (rule.operator === "#$#") return [rule.selector];
+      if (rule.operator === "#$#") return [rule.cssText];
       if (
         rule.operator === "#?#" &&
         rule.selector.includes("data-hotdeal-focus-keep")
       ) {
-        return [`${rule.selector}{display:none!important}`];
+        return [rule.cssText];
       }
       return [];
     })
@@ -3857,6 +6960,33 @@ async function auditSyntheticEdgeFixtures(
       id: "empty-comments",
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"></div>`,
+      checkSelectors: [],
+    },
+    {
+      id: "pre-ready-content-visibility-tamper-is-terminal",
+      expectFailClosed: true,
+      expectedStatusPrefix:
+        "terminal-bootstrap-inline-lock-tamper-content-visibility",
+      body: `<article class="post_article"><p>${longBody}</p></article>` +
+        `<div class="post_comment"><div class="comment">` +
+        `<div class="comment_row">comment</div></div></div>`,
+      script: `document.documentElement.style.setProperty(` +
+        `'content-visibility','visible','important');`,
+      checkSelectors: [],
+    },
+    {
+      id: "unauthorized-measurement-marker-is-terminal",
+      expectFailClosed: true,
+      expectedStatusPrefix: "terminal-protocol-marker-tamper",
+      headHtml: `<style>` +
+        `html[data-hotdeal-focus-measure="1"]{visibility:visible!important;` +
+        `content-visibility:visible!important;opacity:1!important;` +
+        `clip-path:none!important}</style>`,
+      body: `<article class="post_article"><p>${longBody}</p></article>` +
+        `<div class="post_comment"><div class="comment">` +
+        `<div class="comment_row">comment</div></div></div>`,
+      script: `document.documentElement.setAttribute(` +
+        `'data-hotdeal-focus-measure','1');`,
       checkSelectors: [],
     },
     {
@@ -4048,7 +7178,7 @@ async function auditSyntheticEdgeFixtures(
     {
       id: "comment-item-unknown-class-flip-is-terminal",
       expectFailClosed: true,
-      expectedStatusPrefix: "terminal-role-projection-attribute-mutation",
+      expectedStatusPrefix: "terminal-protocol-marker-tamper",
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"><div class="comment">` +
         `<div class="comment_row" data-edge="class-flip">comment</div></div></div>`,
@@ -4123,7 +7253,7 @@ async function auditSyntheticEdgeFixtures(
     {
       id: "owned-wrapper-marker-shape-spoof-is-terminal",
       expectFailClosed: true,
-      expectedStatusPrefix: "terminal-role-projection-marker-mutation",
+      expectedStatusPrefix: "terminal-protocol-marker-tamper",
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"><div class="comment"><div class="comment_row">comment</div></div></div>`,
       script: `const attack = window.setInterval(() => {
@@ -4152,7 +7282,7 @@ async function auditSyntheticEdgeFixtures(
     {
       id: "terminal-guardian-rejects-ready-and-marker-forgery",
       expectFailClosed: true,
-      expectedStatusPrefix: "terminal-role-projection-marker-mutation",
+      expectedStatusPrefix: "terminal-protocol-marker-tamper",
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"><div class="comment"><div class="comment_row">comment</div></div></div>`,
       script: `const attack = window.setInterval(() => {
@@ -4317,10 +7447,10 @@ async function auditSyntheticEdgeFixtures(
           contentType: "text/html; charset=utf-8",
           body: `<!doctype html><html lang="ko"${protocolSpoof}><head><meta charset="utf-8">` +
             `<title>${title}</title><meta property="og:title" content="${title}">` +
+            (fixture.headHtml ?? "") +
             (fixture.includeMarkerGate
               ? `<style data-edge-marker-gate>${clienPaintGateCss}</style>`
-              : "") +
-            (fixture.headHtml ?? "") + `</head>` +
+              : "") + `</head>` +
             `<body${fixture.bodyAttributes ?? ""}>` +
             `<header data-edge-noise="initial">outside navigation noise</header>` +
             `<section class="content_view"><h1 class="post_subject">${title}</h1>` +
@@ -4376,11 +7506,13 @@ async function auditSyntheticEdgeFixtures(
             rootPointerEvents: rootStyle.pointerEvents,
             rootClipPath: rootStyle.clipPath,
             dialogOpen: Boolean(dialog?.open),
+            dialogDisplay: dialogStyle?.display ?? null,
             dialogTransitionProperty: dialogStyle?.transitionProperty ?? null,
             dialogAnimationName: dialogStyle?.animationName ?? null,
             dialogContentVisibility: dialogStyle?.contentVisibility ?? null,
             dialogVisibility: dialogStyle?.visibility ?? null,
             dialogOpacity: dialogStyle?.opacity ?? null,
+            dialogPointerEvents: dialogStyle?.pointerEvents ?? null,
             dialogClipPath: dialogStyle?.clipPath ?? null,
           };
         });
@@ -4397,18 +7529,18 @@ async function auditSyntheticEdgeFixtures(
         if (
           lockedState.rootTransitionProperty !== "none" ||
           lockedState.rootAnimationName !== "none" ||
-          lockedState.rootContentVisibility !== "hidden" ||
           lockedState.rootVisibility !== "hidden" ||
+          lockedState.rootContentVisibility !== "hidden" ||
           Number(lockedState.rootOpacity) !== 0 ||
-          lockedState.rootPointerEvents !== "none" ||
           lockedState.rootClipPath !== "inset(50%)" ||
+          lockedState.rootPointerEvents !== "none" ||
           lockedState.dialogOpen !== true ||
+          lockedState.dialogDisplay !== "none" ||
           lockedState.dialogTransitionProperty !== "none" ||
           lockedState.dialogAnimationName !== "none" ||
-          lockedState.dialogContentVisibility !== "hidden" ||
           lockedState.dialogVisibility !== "hidden" ||
           Number(lockedState.dialogOpacity) !== 0 ||
-          lockedState.dialogClipPath !== "inset(50%)" ||
+          lockedState.dialogPointerEvents !== "none" ||
           (!fixture.fixedGateOnly && lockedState.runtimeLock !== "1")
         ) {
           fixtureResult.failures.push(
@@ -4443,6 +7575,8 @@ async function auditSyntheticEdgeFixtures(
           REQUIRED_ROLE_NAMES,
           timeoutMs,
           markerSelectorsForUrl(markerFilterContent, clienLayout, fixtureUrl),
+          "relay-positive",
+          commentControlSelectorDigestsForUrl(clienLayout, fixtureUrl),
         );
         fixtureResult.gate = gate;
         fixtureResult.failures.push(
@@ -4459,7 +7593,8 @@ async function auditSyntheticEdgeFixtures(
         const visible = (element) => {
           const style = getComputedStyle(element);
           return style.display !== "none" && style.visibility !== "hidden" &&
-            Number(style.opacity) !== 0 && element.getClientRects().length > 0;
+            Number(style.opacity) !== 0 &&
+            [...element.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0);
         };
         const html = document.documentElement;
         const ready = html.getAttribute("data-hotdeal-focus-ready") === "1" &&
@@ -4485,11 +7620,27 @@ async function auditSyntheticEdgeFixtures(
         const visibleNoiseCount = [...document.querySelectorAll("[data-edge-noise]")]
           .filter(visible).length;
         const paintFlashCount = observedPaintFlashCount;
+        const rootStyle = getComputedStyle(html);
         const failClosed =
           !ready &&
+          html.classList.contains("hdf-v2-lock") &&
           html.getAttribute("data-hotdeal-focus-lock") === "1" &&
-          getComputedStyle(html).visibility === "hidden" &&
-          visibleNoiseCount === 0 &&
+          rootStyle.transitionProperty === "none" &&
+          rootStyle.animationName === "none" &&
+          rootStyle.visibility === "hidden" &&
+          rootStyle.contentVisibility === "hidden" &&
+          Number(rootStyle.opacity) === 0 &&
+          rootStyle.clipPath === "inset(50%)" &&
+          rootStyle.pointerEvents === "none" &&
+          html.style.getPropertyValue("opacity") === "0" &&
+          html.style.getPropertyPriority("opacity") === "important" &&
+          html.style.getPropertyValue("clip-path") === "inset(50%)" &&
+          html.style.getPropertyPriority("clip-path") === "important" &&
+          html.style.getPropertyValue("visibility") === "hidden" &&
+          html.style.getPropertyPriority("visibility") === "important" &&
+          html.style.getPropertyValue("content-visibility") === "hidden" &&
+          html.style.getPropertyPriority("content-visibility") === "important" &&
+          !html.hasAttribute("data-hotdeal-focus-measure") &&
           paintFlashCount === 0;
         return {
           ready,
@@ -4499,6 +7650,7 @@ async function auditSyntheticEdgeFixtures(
           visibleNoiseCount,
           paintFlashCount,
           status: html.getAttribute("data-hotdeal-focus-status"),
+          measurementMarker: html.getAttribute("data-hotdeal-focus-measure"),
           path: location.pathname,
           backAttempted: html.getAttribute("data-edge-spa-back") === "attempted",
           bodyBackgroundColor: getComputedStyle(document.body).backgroundColor,
@@ -4528,16 +7680,19 @@ async function auditSyntheticEdgeFixtures(
         }
         if (
           fixture.expectedStatusPrefix &&
-          edgeState.status !== fixture.expectedStatusPrefix
+          !String(edgeState.status ?? "").startsWith(fixture.expectedStatusPrefix)
         ) {
           fixtureResult.failures.push(
             `terminal status was ${edgeState.status ?? "missing"}`,
           );
         }
       } else if (fixture.tamper) {
+        const tamperAttempted = edgeState.selected.some(
+          (selected) => selected.selector.includes("data-edge-tamper") && selected.exists,
+        );
         const safelyRecovered =
           (edgeState.ready && edgeState.visibleNoiseCount === 0) || edgeState.failClosed;
-        if (!safelyRecovered) {
+        if (!tamperAttempted || !safelyRecovered) {
           fixtureResult.failures.push("marker/style tamper neither recovered nor failed closed");
         }
       } else {
@@ -4611,7 +7766,7 @@ async function auditSyntheticEdgeFixtures(
       id: "path-only-drift-seeded-exact-remains-blank",
       seed: true,
       expectedState: "blocked",
-      expectedStatus: "terminal-article-identity-required",
+      expectedStatus: "terminal-algumon-seed-required",
       body: pathDriftBody,
     },
     {
@@ -4633,7 +7788,7 @@ async function auditSyntheticEdgeFixtures(
       seed: true,
       requestPath: "/fresh-hotdeal/no-article-token",
       expectedState: "blocked",
-      expectedStatus: "terminal-article-identity-required",
+      expectedStatus: "terminal-algumon-seed-required",
       body: pathDriftBody,
     },
     {
@@ -4723,7 +7878,8 @@ async function auditSyntheticEdgeFixtures(
         const visible = (element) => {
           const style = getComputedStyle(element);
           return style.display !== "none" && style.visibility !== "hidden" &&
-            Number(style.opacity) !== 0 && element.getClientRects().length > 0;
+            Number(style.opacity) !== 0 &&
+            [...element.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0);
         };
         const hasVisibleOwnedDescendant = (element) =>
           [...element.querySelectorAll("[data-hotdeal-focus-keep]")].some(visible);
@@ -5247,6 +8403,8 @@ async function runRegressionFixtures(
         requiredRoles,
         timeoutMs,
         markerSelectorsForUrl(markerFilterContent, layout, fixture.url),
+        "relay-positive",
+        commentControlSelectorDigestsForUrl(layout, fixture.url),
       );
       fixtureResult.gate = gate;
       fixtureResult.failures.push(...userscriptGateFailures(gate, requiredRoles));
@@ -5257,7 +8415,7 @@ async function runRegressionFixtures(
             style.display !== "none" &&
             style.visibility !== "hidden" &&
             Number(style.opacity) !== 0 &&
-            element.getClientRects().length > 0
+            [...element.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0)
           );
         };
         const logicallyProjected = (element) =>
@@ -5348,6 +8506,29 @@ function exactSignedAlgumonDealUrl(urlLike, expectedDealId = null) {
     return null;
   }
   return url;
+}
+
+function signedRelayAcquisitionEvidence(urlLike, expectedDealId, acquiredAtMs = Date.now()) {
+  const signedUrl = exactSignedAlgumonDealUrl(urlLike, expectedDealId);
+  if (!signedUrl) {
+    throw new Error("relay-contract-failure: fresh acquisition was not one exact signed deal URL");
+  }
+  const issuedAtMs = Number(signedUrl.searchParams.get("t"));
+  const ageMs = acquiredAtMs - issuedAtMs;
+  if (
+    !Number.isSafeInteger(acquiredAtMs) ||
+    !Number.isSafeInteger(issuedAtMs) ||
+    ageMs > ALGUMON_FRESH_RELAY_MAX_AGE_MS ||
+    ageMs < -ALGUMON_FRESH_RELAY_FUTURE_SKEW_MS
+  ) {
+    throw new Error("relay-contract-failure: just-in-time signed relay is not fresh");
+  }
+  return {
+    signedUrl: signedUrl.href,
+    acquiredAt: new Date(acquiredAtMs).toISOString(),
+    issuedAt: new Date(issuedAtMs).toISOString(),
+    ageMs,
+  };
 }
 
 function classifyAlgumonSourceResponse(responseEvidence) {
@@ -5811,6 +8992,79 @@ function createAlgumonRelayResolver(context, parserPage, timeoutMs, transitionBu
   };
 }
 
+async function refreshLatestTargetRelayProof(
+  browser,
+  site,
+  profileName,
+  target,
+  timeoutMs,
+  transitionBudget,
+) {
+  if (target?.source !== "algumon-latest" || !target.algumon?.dealId) {
+    throw new Error("relay-contract-failure: only an Algumon latest target can be refreshed");
+  }
+  transitionBudget.actual.justInTimeRelayAcquisitions += 1;
+  const discovery = await collectAlgumonRedirectLinks(browser, site, timeoutMs);
+  if (discovery.status !== "ok") {
+    const error = new Error(
+      `source-or-infrastructure-failure: just-in-time Algumon acquisition failed (${discovery.status})`,
+    );
+    error.failureKind = "source-or-infrastructure-failure";
+    throw error;
+  }
+  const exactCards = discovery.links.filter(
+    (card) =>
+      card.dealId === String(target.algumon.dealId) &&
+      card.siteType === site.id,
+  );
+  if (exactCards.length !== 1) {
+    throw new Error(
+      "relay-contract-failure: just-in-time Algumon page did not contain one exact deal identity",
+    );
+  }
+  const freshCard = exactCards[0];
+  const acquisition = signedRelayAcquisitionEvidence(
+    freshCard.href,
+    target.algumon.dealId,
+  );
+  const relaySession = await createPageContext(
+    browser,
+    profileName,
+    null,
+    ["algumon.com"],
+    ["algumon.com"],
+  );
+  try {
+    transitionBudget.actual.justInTimeSignedRelayFetches += 1;
+    const resolveAlgumonRedirect = createAlgumonRelayResolver(
+      relaySession.context,
+      relaySession.page,
+      timeoutMs,
+      transitionBudget,
+    );
+    const resolution = await resolveAlgumonRedirect(site, acquisition.signedUrl);
+    if (resolution.relayFetchUrl !== acquisition.signedUrl) {
+      throw new Error("relay-contract-failure: refreshed relay resolution changed the exact signed URL");
+    }
+    return {
+      ...target,
+      url: resolution.resolvedDestination,
+      relayAcquisition: acquisition,
+      algumon: {
+        discoveryUrl: discovery.discoveryUrl,
+        redirectUrl: acquisition.signedUrl,
+        dealId: freshCard.dealId,
+        siteId: site.id,
+        title: freshCard.title,
+        commentCount: freshCard.commentCount,
+        verifiedResolution: resolution,
+      },
+    };
+  } finally {
+    await relaySession.context.close();
+  }
+}
+
 function routeFamily(urlText) {
   try {
     const parsed = new URL(urlText);
@@ -5943,17 +9197,23 @@ async function discoverLatestTargets(
       globalInventoryNavigations: 1,
       siteDiscoveryNavigationsPerSite: 1,
       signedRelayFetchesPerSite: ALGUMON_SITE_LINK_SCAN_LIMIT,
+      justInTimeRelayAcquisitionsPerTarget: 1,
+      justInTimeSignedRelayFetchesPerTarget: 1,
       proofUrlsPerRouteProfile: ALGUMON_PROOF_REPRESENTATIVES_PER_ROUTE_PROFILE,
     },
     maximum: {
       globalInventoryNavigations: 1,
       siteDiscoveryNavigations: sites.length,
       signedRelayFetches: sites.length * ALGUMON_SITE_LINK_SCAN_LIMIT,
+      justInTimeRelayAcquisitions: 0,
+      justInTimeSignedRelayFetches: 0,
     },
     actual: {
       globalInventoryNavigations: 1,
       siteDiscoveryNavigations: 0,
       signedRelayFetches: 0,
+      justInTimeRelayAcquisitions: 0,
+      justInTimeSignedRelayFetches: 0,
       routeProfileProofTargets: 0,
       destinationAuditNavigationStartsMaximum: 0,
       totalNetworkStartsMaximum: 1,
@@ -6063,46 +9323,28 @@ async function discoverLatestTargets(
           const clusterTargets = new Map();
           for (const { redirect, resolution } of resolved) {
             const finalUrl = resolution.resolvedDestination;
-            const applicableLayouts = site.layouts.filter((candidate) =>
-              profilesForLayout(site, candidate).includes(profileName),
+            const landing = classifyProfileLandingRoute(
+              site,
+              profileName,
+              finalUrl,
+              promotionCandidate,
             );
-            const approvedLayouts = applicableLayouts.filter((candidate) =>
-              urlMatchesLayout(finalUrl, candidate),
-            );
-            const sameDomainLayouts = applicableLayouts.filter((candidate) => {
-              try {
-                return hostnameMatches(new URL(finalUrl).hostname, candidate.domain);
-              } catch {
-                return false;
-              }
-            });
-            const layout = approvedLayouts.length === 1
-              ? approvedLayouts[0]
-              : sameDomainLayouts.length === 1
-                ? sameDomainLayouts[0]
-                : null;
-            const excludedVariantId =
-              promotionCandidate?.siteId === site.id &&
-              promotionCandidate?.layoutId === layout?.id
-                ? promotionCandidate.variantId
-                : null;
-            const approvedPathMatches = layout
-              ? matchingApprovedPaths(finalUrl, layout, excludedVariantId)
-              : [];
-            const approvedRouteMatched = approvedPathMatches.length > 0;
-            const matchedApprovedPath = approvedPathMatches.length === 1
-              ? approvedPathMatches[0]
-              : null;
+            const layout = site.layouts.find(
+              (candidate) => candidate.id === landing.layoutId,
+            ) ?? null;
             const family = routeFamily(finalUrl);
             attempts.push({
+              evidenceKind: "relay-destination-inventory",
               redirectPath: new URL(redirect.href).pathname,
               finalHost: new URL(finalUrl).hostname,
               finalPath: new URL(finalUrl).pathname,
               routeFamily: family,
               matchedLayoutId: layout?.id ?? null,
-              approvedRouteMatched,
-              matchedApprovedPath,
-              approvedPathMatchCount: approvedPathMatches.length,
+              routeClassification: landing.classification,
+              configuredPathMatchCount: landing.configuredPathMatchCount,
+              approvedRouteMatched: landing.approvedRouteMatched,
+              matchedApprovedPath: landing.matchedApprovedPath,
+              approvedPathMatchCount: landing.baselineApprovedPathMatchCount,
               relayResolutionSha256: sha256(canonicalJson(resolution)),
               titleSha256: redirect.title ? sha256(redirect.title) : null,
               commentCount: redirect.commentCount,
@@ -6138,9 +9380,10 @@ async function discoverLatestTargets(
               redirect,
               resolution,
               routeFamily: family,
-              approvedRouteMatched,
-              matchedApprovedPath,
-              approvedPathMatchCount: approvedPathMatches.length,
+              configuredPathMatchCount: landing.configuredPathMatchCount,
+              approvedRouteMatched: landing.approvedRouteMatched,
+              matchedApprovedPath: landing.matchedApprovedPath,
+              approvedPathMatchCount: landing.baselineApprovedPathMatchCount,
               routeObservation,
             });
             clusterTargets.set(clusterKey, representatives);
@@ -6148,18 +9391,26 @@ async function discoverLatestTargets(
           const unmatchedAttempts = attempts.filter(
             (attempt) =>
               !attempt.matchedLayoutId ||
-              attempt.approvedRouteMatched === false ||
-              attempt.approvedPathMatchCount !== 1,
+              attempt.configuredPathMatchCount !== 1,
           );
           record.profiles[profileName] = {
-            matched: clusterTargets.size > 0,
-            allObservedRoutesCovered: unmatchedAttempts.length === 0,
-            clusterCount: new Set(attempts.map((attempt) => attempt.routeFamily)).size,
-            matchedClusters: [...clusterTargets.keys()].sort(),
-            unmatchedClusters: [
+            matched: false,
+            allObservedRoutesCovered: null,
+            coverageState: "pending-profile-user-agent-final-landings",
+            clusterCount: 0,
+            matchedClusters: [],
+            unmatchedClusters: [],
+            attempts: [],
+            relayInventory: {
+              candidateClusterCount: new Set(
+                attempts.map((attempt) => attempt.routeFamily),
+              ).size,
+              candidateMatchedClusters: [...clusterTargets.keys()].sort(),
+              candidateUnmatchedClusters: [
               ...new Set(unmatchedAttempts.map((attempt) => attempt.routeFamily)),
-            ].sort(),
-            attempts,
+              ].sort(),
+              attempts,
+            },
           };
           for (const representatives of clusterTargets.values()) {
             for (const match of representatives) {
@@ -6169,8 +9420,10 @@ async function discoverLatestTargets(
                 profileName,
                 target: {
                   source: "algumon-latest",
+                  runtimeExpectation: "relay-positive",
                   url: match.finalUrl,
-                  routeFamily: match.routeFamily,
+                   routeFamily: match.routeFamily,
+                  configuredPathMatchCount: match.configuredPathMatchCount,
                   approvedRouteMatched: match.approvedRouteMatched,
                   matchedApprovedPath: match.matchedApprovedPath,
                   routeObservation: match.routeObservation,
@@ -6215,6 +9468,9 @@ async function discoverLatestTargets(
   );
   transitionBudget.maximum.routeProfileProofTargets =
     proofGroupCounts.size * ALGUMON_PROOF_REPRESENTATIVES_PER_ROUTE_PROFILE;
+  transitionBudget.maximum.justInTimeRelayAcquisitions = targets.length;
+  transitionBudget.maximum.justInTimeSignedRelayFetches = targets.length;
+  transitionBudget.maximum.signedRelayFetches += targets.length;
   transitionBudget.actual.destinationAuditNavigationStartsMaximum = targets.length * 2;
   transitionBudget.actual.totalNetworkStartsMaximum =
     transitionBudget.actual.globalInventoryNavigations +
@@ -6234,7 +9490,11 @@ function sampleTargets(sites) {
             site,
             layout,
             profileName,
-            target: { source: "sample", url: sampleUrl },
+            target: {
+              source: "sample",
+              runtimeExpectation: "direct-negative",
+              url: sampleUrl,
+            },
           });
         }
       }
@@ -6245,18 +9505,24 @@ function sampleTargets(sites) {
 
 function resultHasZeroLeak(result) {
   const gate = result.userscript?.gate;
+  if (!gate) return false;
+  if (gate.ready !== true) {
+    return Boolean(
+      gate.state === "blocked" &&
+      gate.blockedStateSafety?.passed === true &&
+      gate.paintProbe?.flashFrameCount === 0,
+    );
+  }
   const commentItemsProjected = Boolean(
     gate?.commentItemStats &&
     gate.commentItemStats.allKept === true &&
     gate.commentItemStats.visibleCount === gate.commentItemStats.count,
   );
   const commentControlsProjected = Boolean(
-    gate?.commentControlStats &&
-    gate.commentControlStats.allKept === true &&
-    gate.commentControlStats.visibleCount === gate.commentControlStats.count,
+    commentControlProjectionFailures(gate).length === 0,
   );
   return Boolean(
-    gate &&
+    gate.readyMarkerCoverage?.passed === true &&
     gate.uncoveredUnmarkedCount === 0 &&
     gate.visibleWithoutKeepCount === 0 &&
     gate.directVisibleTextLeakCount === 0 &&
@@ -6353,11 +9619,73 @@ function discoveryFailuresRequiredForPromotion(failures, scope) {
   );
 }
 
+function finalizeProfileLandingCoverage(discoveryRecords, results) {
+  for (const record of discoveryRecords) {
+    for (const [profileName, profile] of Object.entries(record.profiles ?? {})) {
+      const profileResults = results.filter(
+        (result) =>
+          result.siteId === record.siteId &&
+          result.profile === profileName &&
+          result.source === "algumon-latest",
+      );
+      const attempts = profileResults.map((result) => {
+        let finalHost = null;
+        let finalPath = null;
+        try {
+          const finalUrl = new URL(result.profileLanding?.finalUrl ?? result.requestedUrl);
+          finalHost = finalUrl.hostname;
+          finalPath = finalUrl.pathname;
+        } catch {}
+        return {
+          evidenceKind: "profile-user-agent-final-landing",
+          finalHost,
+          finalPath,
+          routeFamily: result.routeFamily,
+          matchedLayoutId: result.profileLanding?.layoutId ?? null,
+          routeClassification: result.profileLanding?.classification ?? null,
+          configuredPathMatchCount:
+            result.profileLanding?.configuredPathMatchCount ?? null,
+          approvedRouteMatched: result.approvedRouteMatched === true,
+          matchedApprovedPath: result.matchedApprovedPath ?? null,
+          baselineApprovedPathMatchCount:
+            result.profileLanding?.baselineApprovedPathMatchCount ?? null,
+          relayAcquisitionAgeMs: result.relayAcquisition?.ageMs ?? null,
+          relayProofRefreshed: Boolean(result.relayAcquisition),
+          algumonDealId: result.routeObservation?.algumonDealId ?? null,
+        };
+      });
+      const unmatchedAttempts = attempts.filter(
+        (attempt) =>
+          !attempt.matchedLayoutId ||
+          attempt.configuredPathMatchCount !== 1,
+      );
+      const matchedClusters = new Set(
+        attempts
+          .filter((attempt) => !unmatchedAttempts.includes(attempt))
+          .map((attempt) => `${attempt.matchedLayoutId}\u0000${attempt.routeFamily}`),
+      );
+      profile.matched = attempts.length > 0 && matchedClusters.size > 0;
+      profile.allObservedRoutesCovered =
+        attempts.length > 0 && unmatchedAttempts.length === 0;
+      profile.coverageState = "profile-user-agent-final-landings";
+      profile.clusterCount = new Set(
+        attempts.map((attempt) => attempt.routeFamily),
+      ).size;
+      profile.matchedClusters = [...matchedClusters].sort();
+      profile.unmatchedClusters = [
+        ...new Set(unmatchedAttempts.map((attempt) => attempt.routeFamily)),
+      ].sort();
+      profile.attempts = attempts;
+    }
+  }
+}
+
 function discoveryFailures(
   sites,
   discoveryRecords,
   inventory = null,
   transitionBudget = null,
+  results = [],
 ) {
   const recordsBySite = new Map(discoveryRecords.map((record) => [record.siteId, record]));
   const failures = [];
@@ -6382,6 +9710,12 @@ function discoveryFailures(
     }
     if (actual.signedRelayFetches > maximum.signedRelayFetches) {
       failures.push("Algumon signed relay fetch budget was exceeded");
+    }
+    if (
+      actual.justInTimeRelayAcquisitions > maximum.justInTimeRelayAcquisitions ||
+      actual.justInTimeSignedRelayFetches > maximum.justInTimeSignedRelayFetches
+    ) {
+      failures.push("Algumon just-in-time relay proof budget was exceeded");
     }
     if (
       Object.values(actual.routeProfileProofGroups ?? {}).some(
@@ -6420,10 +9754,36 @@ function discoveryFailures(
       site.layouts.flatMap((layout) => profilesForLayout(site, layout)),
     );
     for (const profileName of desiredProfiles) {
-      if (!record?.profiles?.[profileName]?.matched) {
+      const profile = record?.profiles?.[profileName];
+      if (!profile?.matched) {
         failures.push(`${site.id}/${profileName}: Algumon latest redirect did not match a path gate`);
       }
+      if (
+        profile?.allObservedRoutesCovered !== true ||
+        (profile?.unmatchedClusters ?? []).length > 0 ||
+        (profile?.attempts ?? []).some(
+          (attempt) =>
+            attempt.evidenceKind !== "profile-user-agent-final-landing" ||
+            !attempt.matchedLayoutId ||
+            attempt.configuredPathMatchCount !== 1,
+        )
+      ) {
+        failures.push(
+          `${site.id}/${profileName}: profile-UA final landing coverage has unmatched or non-exact configured paths`,
+        );
+      }
     }
+  }
+  const latestResults = results.filter((result) => result.source === "algumon-latest");
+  if (
+    latestResults.some(
+      (result) =>
+        result.runtimeExpectation !== "relay-positive" ||
+        !result.relayAcquisition ||
+        result.profileLanding?.evidenceKind !== "profile-user-agent-final-landing",
+    )
+  ) {
+    failures.push("Algumon latest audit lacks just-in-time relay or profile landing evidence");
   }
   return failures;
 }
@@ -6476,18 +9836,31 @@ async function nextPromotionVersion(config) {
 
 function promotionShape(result) {
   const oracle = result.semanticOracle;
+  const proposal = oracle.policyProposal;
   return {
-    pageRoot: oracle.pageRoot,
+    pageRoot: proposal.pageRoot,
     roles: Object.fromEntries(
-      Object.entries(oracle.roles).map(([role, selector]) => [role, [selector]]),
+      ["title", "body", "comments"].map((role) => [role, [oracle.roles[role]]]),
     ),
     commentItems: [...oracle.commentItems].sort(),
     commentControls: [...(oracle.commentControls ?? [])].sort(),
-    commentIgnored: [...(oracle.commentIgnored ?? [])].sort(),
+    commentIgnored: [...proposal.commentIgnored].sort(),
+    bodyIgnored: [...proposal.bodyIgnored].sort(),
   };
 }
 
-function discoveryObservation(result, roleProjection) {
+function productObservation(result) {
+  const oracle = result.semanticOracle;
+  const product = oracle.policyProposal.product;
+  return {
+    cardinality: product.cardinality,
+    selector: product.cardinality === "required" ? product.selectors[0] : null,
+    count: product.cardinality === "required" ? oracle.cardinality.product : 0,
+    order: product.order,
+  };
+}
+
+function discoveryObservation(result, roleProjection, requiredRoles) {
   const oracle = result.semanticOracle;
   return {
     url: result.requestedUrl,
@@ -6495,16 +9868,17 @@ function discoveryObservation(result, roleProjection) {
     capturedAt: result.capturedAt,
     pageRoot: { selector: oracle.pageRoot, count: oracle.pageRootCount },
     roles: Object.fromEntries(
-      Object.entries(oracle.roles).map(([role, selector]) => [
+      requiredRoles.map((role) => [
         role,
         {
-          selector,
+          selector: oracle.roles[role],
           count: oracle.cardinality[role],
           containedInPageRoot: oracle.containment === true,
         },
       ]),
     ),
     roleProjection,
+    productObservation: productObservation(result),
     algumon: {
       titleConsistency: oracle.algumon.titleConsistency,
       titleConsistencyOk: oracle.algumon.titleConsistencyOk,
@@ -6532,6 +9906,63 @@ function promotionRouteGroup(result) {
     : null;
 }
 
+function independentPolicyProposalIsComplete(oracle) {
+  const proposal = oracle?.policyProposal;
+  const product = proposal?.product;
+  const promotionGate = proposal?.promotionGate;
+  const exactUniqueStrings = (values) =>
+    Array.isArray(values) &&
+    new Set(values).size === values.length &&
+    values.every((value) => typeof value === "string" && value.length > 0);
+  if (
+    !proposal ||
+    proposal.schemaVersion !== 1 ||
+    proposal.source !== "independent-projection-tuple" ||
+    proposal.complete !== true ||
+    ![
+      "all-role-lowest-common-ancestor",
+      "nearest-unique-stable-all-role-ancestor",
+    ].includes(proposal.pageRootEvidence) ||
+    typeof proposal.pageRoot !== "string" ||
+    proposal.pageRoot !== oracle.pageRoot ||
+    !product ||
+    !["required", "zero"].includes(product.cardinality) ||
+    !exactUniqueStrings(proposal.bodyIgnored) ||
+    !exactUniqueStrings(proposal.productIgnored) ||
+    !exactUniqueStrings(proposal.commentIgnored) ||
+    proposal.safety?.strictDescendantsOnly !== true ||
+    proposal.safety?.strongStructuralNoiseOnly !== true ||
+    proposal.safety?.meaningfulTextPriceAndPurchaseLinksExcluded !== true ||
+    typeof proposal.shapeFingerprint !== "string" ||
+    !/^projection-policy-v1-[0-9a-f]{8}$/u.test(proposal.shapeFingerprint) ||
+    promotionGate?.promotable !== false ||
+    promotionGate?.requiredDistinctUrlsPerProfile !== 3 ||
+    promotionGate?.requiredProfilesSource !== "auditor-layout-contract" ||
+    promotionGate?.requiredMatchingShapeFingerprint !== true
+  ) {
+    return false;
+  }
+  if (product.cardinality === "required") {
+    return (
+      ["before-body", "after-body"].includes(product.order) &&
+      exactUniqueStrings(product.selectors) &&
+      product.selectors.length === 1 &&
+      oracle.roles?.product === product.selectors[0] &&
+      oracle.cardinality?.product === 1 &&
+      oracle.productOrder === product.order
+    );
+  }
+  return (
+    product.order === null &&
+    Array.isArray(product.selectors) &&
+    product.selectors.length === 0 &&
+    proposal.productIgnored.length === 0 &&
+    !("product" in (oracle.roles ?? {})) &&
+    !("product" in (oracle.cardinality ?? {})) &&
+    oracle.productOrder === null
+  );
+}
+
 function qualifiedDiscoveryResult(result) {
   const oracle = result.semanticOracle;
   return (
@@ -6547,11 +9978,12 @@ function qualifiedDiscoveryResult(result) {
     oracle.candidateProjection?.exactCandidateCount === 1 &&
     oracle.candidateProjection?.coMatchCount === 0 &&
     oracle.candidateProjection?.oracleExecutionWorld === ORACLE_EXECUTION_WORLD &&
+    independentPolicyProposalIsComplete(oracle) &&
     (result.approvedRouteMatched === false || result.passed === false) &&
     oracle.algumon?.titleConsistencyOk === true &&
     (oracle.algumon?.commentComparable === false
       ? oracle.algumon.countConsistency === null
-      : oracle.algumon?.countConsistency >= 0.95) &&
+      : oracle.algumon?.countConsistency === 1) &&
     oracle.commentStructure?.mountSelector === oracle.roles?.comments &&
     oracle.commentStructure?.mountCount === 1 &&
     oracle.commentStructure?.classificationOverlapCount === 0 &&
@@ -6580,7 +10012,7 @@ function selectCommentProofResults(results) {
   const comparable = distinct.filter(
     (result) =>
       result.semanticOracle?.algumon?.commentComparable === true &&
-      result.semanticOracle.algumon.countConsistency >= 0.95,
+      result.semanticOracle.algumon.countConsistency === 1,
   );
   if (comparable.length >= 3) return comparable.slice(0, 3);
   const structural = distinct.filter(
@@ -6603,6 +10035,54 @@ function selectCommentProofResults(results) {
   return exactEmpty.length >= 3 ? exactEmpty.slice(0, 3) : [];
 }
 
+function threeResultsHaveStrongCommentProof(results) {
+  if (results.length !== 3) return false;
+  if (!results.every((result) => {
+    const algumon = result.semanticOracle?.algumon;
+    return algumon?.commentComparable === false
+      ? algumon.countConsistency === null
+      : algumon?.commentComparable === true && algumon.countConsistency === 1;
+  })) {
+    return false;
+  }
+  if (results.every(
+    (result) => result.semanticOracle.algumon.commentComparable === true,
+  )) {
+    return true;
+  }
+  const nonemptyCount = results.filter(
+    (result) => result.semanticOracle?.commentStructure?.itemCount > 0,
+  ).length;
+  return nonemptyCount >= 2 || results.every(
+    (result) => exactEmptyCommentStructure(result.semanticOracle?.commentStructure),
+  );
+}
+
+function selectPromotionProofResults(results, productCardinality) {
+  const distinct = [...new Map(
+    results
+      .slice()
+      .sort((left, right) => left.requestedUrl.localeCompare(right.requestedUrl))
+      .map((result) => [result.requestedUrl, result]),
+  ).values()];
+  for (let first = 0; first < distinct.length - 2; first += 1) {
+    for (let second = first + 1; second < distinct.length - 1; second += 1) {
+      for (let third = second + 1; third < distinct.length; third += 1) {
+        const selected = [distinct[first], distinct[second], distinct[third]];
+        if (!threeResultsHaveStrongCommentProof(selected)) continue;
+        if (productCardinality === "optional") {
+          const cardinalities = new Set(selected.map(
+            (result) => result.semanticOracle.policyProposal.product.cardinality,
+          ));
+          if (!cardinalities.has("required") || !cardinalities.has("zero")) continue;
+        }
+        return selected;
+      }
+    }
+  }
+  return [];
+}
+
 function observationsHaveStrongCommentProof(observations, profiles) {
   return profiles.every((profile) => {
     const profileObservations = observations.filter(
@@ -6623,7 +10103,7 @@ function observationsHaveStrongCommentProof(observations, profiles) {
       profileObservations.every(
         (observation) =>
           observation.algumon?.countComparable === true &&
-          observation.algumon.countConsistency >= 0.95,
+          observation.algumon.countConsistency === 1,
       )
     ) {
       return true;
@@ -6633,7 +10113,7 @@ function observationsHaveStrongCommentProof(observations, profiles) {
         observation.algumon?.countComparable === false
           ? observation.algumon.countConsistency === null
           : observation.algumon?.countComparable === true &&
-            observation.algumon.countConsistency >= 0.95,
+            observation.algumon.countConsistency === 1,
       )
     ) {
       return false;
@@ -6648,6 +10128,43 @@ function observationsHaveStrongCommentProof(observations, profiles) {
       )
     );
   });
+}
+
+function observationsHaveProductProof(observations, roleProjection, profiles) {
+  const productPolicy = roleProjection?.product;
+  if (
+    !productPolicy ||
+    !["required", "optional", "zero"].includes(productPolicy.cardinality) ||
+    !profiles.every(
+      (profile) => observations.filter((observation) => observation.profile === profile).length >= 3,
+    )
+  ) {
+    return false;
+  }
+  const valid = observations.every((observation) => {
+    const product = observation.productObservation;
+    if (!product || !["required", "zero"].includes(product.cardinality)) return false;
+    if (product.cardinality === "zero") {
+      return product.selector === null && product.count === 0 && product.order === null;
+    }
+    return (
+      product.count === 1 &&
+      typeof product.selector === "string" &&
+      productPolicy.selectors.includes(product.selector) &&
+      product.order === productPolicy.order
+    );
+  });
+  if (!valid) return false;
+  const observed = new Set(
+    observations.map((observation) => observation.productObservation.cardinality),
+  );
+  if (productPolicy.cardinality === "zero") {
+    return observed.size === 1 && observed.has("zero");
+  }
+  if (productPolicy.cardinality === "required") {
+    return observed.size === 1 && observed.has("required");
+  }
+  return observed.size === 2 && observed.has("required") && observed.has("zero");
 }
 
 function selectStableDiscoveryGroups(report, config) {
@@ -6693,18 +10210,100 @@ function selectStableDiscoveryGroups(report, config) {
       const site = config.sites.find((candidate) => candidate.id === group.siteId);
       const layout = site?.layouts.find((candidate) => candidate.id === group.layoutId);
       if (!site || !layout) return false;
-      group.roleProjection = structuredClone(layout.role_projection);
-      if (group.roleProjection.product.cardinality === "required") {
-        group.roleProjection.product.selectors = [
-          ...(group.shape.roles.product ?? []),
-        ].sort();
+      const presentProductShapes = [...new Map(
+        group.results
+          .filter(
+            (result) => result.semanticOracle.policyProposal.product.cardinality === "required",
+          )
+          .map((result) => {
+            const proposal = result.semanticOracle.policyProposal;
+            const shape = {
+              order: proposal.product.order,
+              selectors: [...proposal.product.selectors].sort(),
+              ignored: [...proposal.productIgnored].sort(),
+            };
+            return [canonicalJson(shape), shape];
+          }),
+      ).values()];
+      if (presentProductShapes.length > 1) return false;
+      const observedCardinalities = new Set(group.results.map(
+        (result) => result.semanticOracle.policyProposal.product.cardinality,
+      ));
+      if (
+        [...observedCardinalities].some(
+          (cardinality) => !["required", "zero"].includes(cardinality),
+        ) ||
+        (observedCardinalities.has("required") && presentProductShapes.length !== 1)
+      ) {
+        return false;
+      }
+      const productCardinality = observedCardinalities.size === 2
+        ? "optional"
+        : observedCardinalities.has("required") ? "required" : "zero";
+      const presentProduct = presentProductShapes[0] ?? null;
+      group.roleProjection = {
+        title: { mode: "seeded-shallow" },
+        body: {
+          mode: "atomic-boundary",
+          ignored: [...group.shape.bodyIgnored],
+        },
+        product: productCardinality === "zero"
+          ? {
+              mode: "absent",
+              cardinality: "zero",
+              selectors: [],
+              ignored: [],
+            }
+          : {
+              mode: "atomic-boundary",
+              cardinality: productCardinality,
+              order: presentProduct.order,
+              selectors: [...presentProduct.selectors],
+              ignored: [...presentProduct.ignored],
+            },
+        comments: { mode: "classified-children" },
+      };
+      group.requiredRoles = ["title", "body", "comments"].concat(
+        productCardinality === "required" ? ["product"] : [],
+      ).sort();
+      if (productCardinality === "required") {
+        group.shape.roles.product = [...presentProduct.selectors];
       }
       group.proofProfiles = profilesForLayout(site, layout).filter(
         (profile) =>
-          selectCommentProofResults(
+          selectPromotionProofResults(
             group.results.filter((result) => result.profile === profile),
+            "unconstrained",
           ).length === 3,
       );
+      group.selectedResults = group.proofProfiles.flatMap((profile) =>
+        selectPromotionProofResults(
+          group.results.filter((result) => result.profile === profile),
+          "unconstrained",
+        ));
+      if (productCardinality === "optional") {
+        const selectedCardinalities = new Set(group.selectedResults.map(
+          (result) => result.semanticOracle.policyProposal.product.cardinality,
+        ));
+        if (selectedCardinalities.size !== 2) {
+          for (const profile of group.proofProfiles) {
+            const mixed = selectPromotionProofResults(
+              group.results.filter((result) => result.profile === profile),
+              "optional",
+            );
+            if (mixed.length !== 3) continue;
+            group.selectedResults = [
+              ...group.selectedResults.filter((result) => result.profile !== profile),
+              ...mixed,
+            ];
+            break;
+          }
+        }
+        const finalCardinalities = new Set(group.selectedResults.map(
+          (result) => result.semanticOracle.policyProposal.product.cardinality,
+        ));
+        if (finalCardinalities.size !== 2) return false;
+      }
       group.fingerprint = sha256(canonicalJson({
         siteId: group.siteId,
         layoutId: group.layoutId,
@@ -6712,7 +10311,7 @@ function selectStableDiscoveryGroups(report, config) {
         shape: group.shape,
         roleProjection: group.roleProjection,
       })).slice(0, 24);
-      return group.proofProfiles.length > 0;
+      return group.proofProfiles.length > 0 && group.selectedResults.length >= 3;
     });
 }
 
@@ -6744,20 +10343,13 @@ async function synthesizePromotionDraftForGroup(
 ) {
   const site = config.sites.find((candidate) => candidate.id === group.siteId);
   const layout = site.layouts.find((candidate) => candidate.id === group.layoutId);
-  const selectedResults = [];
-  for (const profile of group.proofProfiles) {
-    selectedResults.push(
-      ...selectCommentProofResults(
-        group.results.filter((candidate) => candidate.profile === profile),
-      ),
-    );
-  }
+  const selectedResults = [...group.selectedResults];
   const observations = selectedResults.map((result) =>
-    discoveryObservation(result, group.roleProjection));
+    discoveryObservation(result, group.roleProjection, group.requiredRoles));
   observations.sort((left, right) =>
     left.profile.localeCompare(right.profile) || left.url.localeCompare(right.url),
   );
-  const requiredRoles = [...requiredRolesForLayout(layout)].sort();
+  const requiredRoles = [...group.requiredRoles];
   const routeEvidence = routeEvidenceForResults(selectedResults);
   if (routeEvidence === null) {
     return {
@@ -6897,6 +10489,17 @@ function provenObservation(result, fixturePassed, baselineNoNewExposure) {
       count: overlay.pageRootCount,
     },
     roles: overlay.roles,
+    roleProjection: overlay.roleProjection,
+    productObservation: {
+      cardinality: overlay.productCount === 1 ? "required" : "zero",
+      selector: overlay.productCount === 1
+        ? overlay.roleProjection.product.selectors[0]
+        : null,
+      count: overlay.productCount,
+      order: overlay.productCount === 1
+        ? overlay.productOrder
+        : null,
+    },
     algumon: {
       titleConsistency: overlay.titleConsistency,
       titleConsistencyOk: overlay.titleConsistencyOk,
@@ -6978,6 +10581,11 @@ function synthesizePromotionProof(report, config, draftEnvelope, draftManifest) 
         ).size >= 3,
     ) &&
     observationsHaveStrongCommentProof(observations, expectedProfiles) &&
+    observationsHaveProductProof(
+      observations,
+      candidate.roleProjection,
+      expectedProfiles,
+    ) &&
     observations.every(
       (observation) =>
         observation.livePassed === true &&
@@ -6990,7 +10598,7 @@ function synthesizePromotionProof(report, config, draftEnvelope, draftManifest) 
         observation.algumon.titleConsistencyOk === true &&
         (observation.algumon.countComparable === false
           ? observation.algumon.countConsistency === null
-          : observation.algumon.countConsistency >= 0.95) &&
+          : observation.algumon.countConsistency === 1) &&
         observation.commentStructure.mountCount === 1 &&
         observation.commentStructure.classificationOverlapCount === 0 &&
         observation.commentStructure.unclassifiedContentCount === 0 &&
@@ -7073,7 +10681,8 @@ async function main() {
 
   const userscriptContent = await fs.readFile(options.userscriptPath, "utf8");
   const markerFilterContent = await fs.readFile(options.markerFilterPath, "utf8");
-  const { chromium } = await importPlaywright();
+  const { chromium, devices } = await importPlaywright();
+  RUNTIME_DEVICE_PROFILES = resolveRuntimeDeviceProfiles(devices);
   const runId = startedAt.toISOString().replace(/[:.]/gu, "-");
   const runDirectory = path.join(options.evidencePath, runId);
   await fs.mkdir(runDirectory, { recursive: true });
@@ -7084,7 +10693,8 @@ async function main() {
     completedAt: null,
     configSha256: sha256(JSON.stringify(config)),
     userscriptSha256: sha256(userscriptContent),
-    profiles: DEVICE_PROFILES,
+    profiles: RUNTIME_DEVICE_PROFILES,
+    browser: null,
     integrity,
     discovery: { enabled: options.discoverAlgumon, required: options.requireAlgumonDiscovery },
     promotionRetestScope: promotionScope,
@@ -7092,19 +10702,7 @@ async function main() {
     failures: [],
     summary: null,
   };
-  const isGitHubHostedRunner =
-    process.env.GITHUB_ACTIONS === "true" &&
-    process.env.RUNNER_ENVIRONMENT === "github-hosted";
-  const liveSites = sites.filter(
-    (site) =>
-      options.fixtureOnly || site.id !== "arcalive" || isGitHubHostedRunner,
-  );
-  if (!options.fixtureOnly && liveSites.length !== sites.length) {
-    report.failures.push(
-      "arcalive: live navigation is CI-only and was refused outside a GitHub-hosted runner",
-    );
-    report.safetySkips = ["arcalive"];
-  }
+  const liveSites = sites;
   const candidateReport = {
     schemaVersion: 1,
     generatedAt: null,
@@ -7115,6 +10713,11 @@ async function main() {
   const browser = await chromium.launch({
     headless: !options.headed,
     args: [
+      "--disable-blink-features=AutomationControlled",
+      "--disable-background-networking",
+      "--disable-quic",
+      "--dns-prefetch-disable",
+      "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
       "--host-resolver-rules=" +
         "MAP localhost ~NOTFOUND, " +
         "MAP *.localhost ~NOTFOUND, " +
@@ -7122,6 +10725,13 @@ async function main() {
         "MAP *.internal ~NOTFOUND",
     ],
   });
+  assertBrowserMatchesDeviceProfiles(browser.version(), RUNTIME_DEVICE_PROFILES);
+  report.browser = {
+    engine: "chromium",
+    version: browser.version(),
+    headed: options.headed,
+    profileSource: "playwright-pinned-device-descriptors",
+  };
   try {
     const fixtureTimeoutMs = Math.min(options.timeoutMs, FIXTURE_TIMEOUT_MS);
     const edgeFixtureOnly = options.tamperFixtureOnly || options.edgeFixtureIds.size > 0;
@@ -7197,8 +10807,9 @@ async function main() {
       );
     }
     let targets = options.fixtureOnly ? [] : sampleTargets(liveSites);
+    let discovery = null;
     if (!options.fixtureOnly && options.discoverAlgumon) {
-      const discovery = await discoverLatestTargets(
+      discovery = await discoverLatestTargets(
         browser,
         liveSites,
         options.timeoutMs,
@@ -7208,18 +10819,6 @@ async function main() {
       report.discovery.records = discovery.records;
       report.discovery.transitionBudget = discovery.transitionBudget;
       targets = targets.concat(discovery.targets);
-      const failures = discoveryFailures(
-        liveSites,
-        discovery.records,
-        discovery.inventory,
-        discovery.transitionBudget,
-      );
-      report.discovery.failures = failures;
-      if (options.requireAlgumonDiscovery) {
-        report.failures.push(
-          ...discoveryFailuresRequiredForPromotion(failures, promotionScope),
-        );
-      }
     }
     targets = deduplicateTargets(targets);
     for (const targetContract of targets) {
@@ -7236,6 +10835,7 @@ async function main() {
         runtimeOnly: options.runtimeOnly,
         runDirectory,
         timeoutMs: options.timeoutMs,
+        transitionBudget: discovery?.transitionBudget ?? null,
       });
       report.results.push(result);
       if (!result.passed) {
@@ -7247,6 +10847,29 @@ async function main() {
           reasons: result.failures,
           candidates,
         });
+      }
+    }
+    if (discovery) {
+      const transitionActual = discovery.transitionBudget.actual;
+      transitionActual.totalNetworkStartsMaximum =
+        transitionActual.globalInventoryNavigations +
+        transitionActual.siteDiscoveryNavigations +
+        transitionActual.justInTimeRelayAcquisitions +
+        transitionActual.signedRelayFetches +
+        transitionActual.destinationAuditNavigationStartsMaximum;
+      finalizeProfileLandingCoverage(discovery.records, report.results);
+      const failures = discoveryFailures(
+        liveSites,
+        discovery.records,
+        discovery.inventory,
+        discovery.transitionBudget,
+        report.results,
+      );
+      report.discovery.failures = failures;
+      if (options.requireAlgumonDiscovery) {
+        report.failures.push(
+          ...discoveryFailuresRequiredForPromotion(failures, promotionScope),
+        );
       }
     }
   } finally {
@@ -7278,6 +10901,30 @@ async function main() {
     targetCount: report.results.length,
     passedCount: report.results.filter((result) => result.passed).length,
     failedCount: report.results.filter((result) => !result.passed).length,
+    directNegativeCount: report.results.filter(
+      (result) => result.runtimeExpectation === "direct-negative",
+    ).length,
+    directNegativePassedCount: report.results.filter(
+      (result) =>
+        result.runtimeExpectation === "direct-negative" && result.passed === true,
+    ).length,
+    relayPositiveCount: report.results.filter(
+      (result) => result.runtimeExpectation === "relay-positive",
+    ).length,
+    relayPositivePassedCount: report.results.filter(
+      (result) =>
+        result.runtimeExpectation === "relay-positive" && result.passed === true,
+    ).length,
+    blockedSafetyPassedCount: report.results.filter(
+      (result) =>
+        result.runtimeExpectation === "direct-negative" &&
+        result.userscript?.gate?.blockedStateSafety?.passed === true,
+    ).length,
+    readyMarkerCoveragePassedCount: report.results.filter(
+      (result) =>
+        result.runtimeExpectation === "relay-positive" &&
+        result.userscript?.gate?.readyMarkerCoverage?.passed === true,
+    ).length,
     failureCount: report.failures.length,
     syntheticNoFlashPassed: report.syntheticFixture?.passed === true,
     regressionFixtureCount: report.regressionFixtures?.fixtures?.length ?? 0,
@@ -7395,15 +11042,47 @@ async function main() {
 }
 
 export {
+  acquireArticleAccessLease,
   approvedPathsForLayout,
+  articleIdentitiesLogicallyEquivalent,
+  assertAuditConfig,
+  blockedUserscriptGateFailures,
+  buildProjectedHideSelector,
+  candidateGenerationAllowed,
+  canonicalArticleIdentity,
   classifyAlgumonInventorySnapshot,
   classifyAlgumonSourceResponse,
+  classifyDestinationResponse,
+  classifyProfileLandingRoute,
+  commentControlProjectionFailures,
+  commentControlSelectorDigest,
+  commentControlSelectorDigestsForUrl,
+  commentLowerBoundConsistency,
+  committedProjectionEvidence,
+  consumeArticleAccessLease,
+  createArticleAccessLease,
+  createNetworkPolicyEvidenceRecorder,
+  createPinnedPublicHttpsProxy,
   exactSignedAlgumonDealUrl,
+  finalizeProfileLandingCoverage,
   matchingApprovedPaths,
+  networkFidelityFailures,
+  networkRequestDecision,
+  isPrivateOrSpecialIp,
+  isTopLevelNavigationRequest,
+  markerSelectorsForUrl,
+  parseConnectAuthority,
   projectionCardinalityEvidence,
   promotionVariantId,
+  runtimeExpectationForTarget,
+  semanticOracleContractFailures,
+  selectFinalMainDocumentResponse,
   selectStableDiscoveryGroup,
   selectStableDiscoveryGroups,
+  settlePage,
+  signedRelayAcquisitionEvidence,
+  siteArticleIdentity,
+  staticRuntimeConsistencyFailures,
 };
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
