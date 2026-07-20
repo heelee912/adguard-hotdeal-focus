@@ -19,6 +19,16 @@ foreach ($statement in $ast.EndBlock.Statements) {
 
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
 $script:MaximumSourceBytes = 8MB
+$script:ReaderGateProtocolVersion = 2
+$script:ReaderGateGrant = 'GM_addElement'
+$script:MarkerGateArtifactVersion = '2.0.2'
+$script:MarkerGateSubscriptionUrl = ('https://github.com/heelee912/' +
+    'adguard-hotdeal-focus/releases/download/gate-v2.0.2/filter.txt')
+$script:AdGuardStateVisibilityMaxObservations = 6
+$script:AdGuardStateVisibilityDelayMilliseconds = 0
+$script:AdGuardStateVisibilityRequiredConsecutiveReads = 2
+$script:FreshInstallGmProperties = '{}'
+$script:TemporaryPaths = New-Object 'System.Collections.Generic.List[string]'
 $script:StandardFilterType = 'Standard'
 $script:FilterSubscriptionType = [string]
 $script:HistoricalSnapshotRules = @()
@@ -79,6 +89,29 @@ function Copy-FilterState {
     }
 }
 
+function Assert-FakeUserscriptWriteIntent {
+    param(
+        [Parameter(Mandatory = $true)] $State,
+        [Parameter(Mandatory = $true)][string] $Write
+    )
+    if (-not $State.IntentDirectory) { return }
+    $writeIndex = @($State.UserscriptWrites).Count
+    $expected = @($State.ExpectedWriteIntents)
+    if ($writeIndex -ge $expected.Count -or
+        [string] $expected[$writeIndex].Write -cne $Write) {
+        throw "Fake userscript write occurred outside the expected transaction order: $Write"
+    }
+    $expectedEvent = [string] $expected[$writeIndex].Event
+    $matchingEvents = @(Get-ChildItem -LiteralPath $State.IntentDirectory -File `
+            -Filter 'journal-*.json' | ForEach-Object {
+            try { Get-Content -LiteralPath $_.FullName -Raw | ConvertFrom-Json }
+            catch { $null }
+        } | Where-Object { $_ -and [string] $_.event -ceq $expectedEvent })
+    if ($matchingEvents.Count -eq 0) {
+        throw "Durable intent was not present before fake userscript write: $expectedEvent"
+    }
+}
+
 function New-FakeClient {
     param([Parameter(Mandatory = $true)] $State)
     $client = [pscustomobject]@{ State = $State }
@@ -94,6 +127,10 @@ function New-FakeClient {
         param($filterId, $filterType)
         if ([int] $filterId -eq [int] $this.State.UserFilter.FilterId) {
             $this.State.UserRuleReadCount = [int] $this.State.UserRuleReadCount + 1
+            if ([bool] $this.State.MutateUserOnEveryRead) {
+                $this.State.UserDisabledRules = @($this.State.UserDisabledRules) + @(
+                    [string] ($this.State.MutateUserRule + '-' + $this.State.UserRuleReadCount))
+            }
             if ([int] $this.State.MutateUserOnReadNumber -eq $this.State.UserRuleReadCount) {
                 $this.State.UserDisabledRules = @($this.State.UserDisabledRules) +
                     @([string] $this.State.MutateUserRule)
@@ -106,6 +143,12 @@ function New-FakeClient {
         return $this.State.FilterRules[[string] ([int] $filterId)]
     }
     Add-Member -InputObject $client -MemberType ScriptMethod -Name GetUserscripts -Value {
+        $this.State.UserscriptReadCount = [int] $this.State.UserscriptReadCount + 1
+        if ([int] $this.State.UserscriptHiddenReadsRemaining -gt 0) {
+            $this.State.UserscriptHiddenReadsRemaining = `
+                [int] $this.State.UserscriptHiddenReadsRemaining - 1
+            return @()
+        }
         return @($this.State.Userscripts)
     }
     Add-Member -InputObject $client -MemberType ScriptMethod -Name GetUserscriptCode -Value {
@@ -114,7 +157,90 @@ function New-FakeClient {
     }
     Add-Member -InputObject $client -MemberType ScriptMethod -Name GetUserscriptGmProperties -Value {
         param($name)
-        return [string] $this.State.UserscriptGm
+        return [string] $this.State.UserscriptGmProperties
+    }
+    Add-Member -InputObject $client -MemberType ScriptMethod -Name GetUserscriptMeta -Value {
+        param($path)
+        $content = [System.IO.File]::ReadAllText([string] $path)
+        $versionMatch = [regex]::Match(
+            $content, '(?m)^//\s+@version\s+(?<value>\S+)\s*$')
+        $nameMatch = [regex]::Match(
+            $content, '(?m)^//\s+@name\s+(?<value>.+?)\s*$')
+        $meta = [pscustomobject]@{
+            Name = if ($nameMatch.Success) {
+                $nameMatch.Groups['value'].Value.Trim()
+            } else { [string] $UserscriptName }
+            Version = if ($versionMatch.Success) {
+                $versionMatch.Groups['value'].Value.Trim()
+            } else { [string] $this.State.RestoreMetaVersion }
+            Content = if ($null -ne $this.State.ParsedContentOverride) {
+                [string] $this.State.ParsedContentOverride
+            } else { $content }
+            IsCustom = $false
+            IsStyle = $false
+        }
+        $this.State.LastParsedMeta = $meta
+        return $meta
+    }
+    Add-Member -InputObject $client -MemberType ScriptMethod -Name InstallUserscriptFromMeta -Value {
+        param($meta)
+        Assert-FakeUserscriptWriteIntent -State $this.State -Write 'install'
+        $this.State.UserscriptWrites = @($this.State.UserscriptWrites) + @('install')
+        $receiptIsCustom = if ($null -ne $this.State.ReceiptIsCustomOverride) {
+            [bool] $this.State.ReceiptIsCustomOverride
+        } else { [bool] $meta.IsCustom }
+        $receiptMeta = [pscustomobject]@{
+            Name = [string] $meta.Name
+            Version = [string] $meta.Version
+            Content = [string] $meta.Content
+            IsCustom = $receiptIsCustom
+            IsStyle = [bool] $meta.IsStyle
+        }
+        $this.State.Userscripts = @([pscustomobject]@{
+                Name = [string] $meta.Name
+                Version = [string] $meta.Version
+                IsCustom = $receiptIsCustom
+                IsEnabled = [bool] $this.State.ReceiptInitialEnabled
+                IsStyle = [bool] $meta.IsStyle
+            })
+        $this.State.UserscriptCode = [string] $meta.Content
+        $this.State.UserscriptGmProperties = [string] $this.State.FreshInstallGmProperties
+        return [pscustomobject]@{
+            Meta = $receiptMeta
+            IsEnabled = [bool] $this.State.ReceiptInitialEnabled
+        }
+    }
+    Add-Member -InputObject $client -MemberType ScriptMethod -Name UpdateUserscriptCode -Value {
+        param($name, $content)
+        Assert-FakeUserscriptWriteIntent -State $this.State -Write 'update-code'
+        $this.State.UserscriptWrites = @($this.State.UserscriptWrites) + @('update-code')
+        $this.State.UserscriptCode = [string] $content
+        $versionMatch = [regex]::Match(
+            [string] $content, '(?m)^//\s+@version\s+(?<value>\S+)\s*$')
+        $this.State.Userscripts[0].Version = if ($versionMatch.Success) {
+            $versionMatch.Groups['value'].Value.Trim()
+        } else { [string] $this.State.NextUpdateVersion }
+    }
+    Add-Member -InputObject $client -MemberType ScriptMethod `
+        -Name UpdateUserscriptGmProperties -Value {
+        param($name, $gmProperties)
+        Assert-FakeUserscriptWriteIntent -State $this.State -Write 'update-gm'
+        $this.State.UserscriptWrites = @($this.State.UserscriptWrites) + @('update-gm')
+        $this.State.UserscriptGmProperties = [string] $gmProperties
+    }
+    Add-Member -InputObject $client -MemberType ScriptMethod -Name RemoveUserscript -Value {
+        param($name)
+        Assert-FakeUserscriptWriteIntent -State $this.State -Write 'remove'
+        $this.State.UserscriptWrites = @($this.State.UserscriptWrites) + @('remove')
+        $this.State.Userscripts = @()
+        $this.State.UserscriptCode = ''
+        $this.State.UserscriptGmProperties = ''
+    }
+    Add-Member -InputObject $client -MemberType ScriptMethod -Name SetUserscriptStatus -Value {
+        param($name, $enabled)
+        Assert-FakeUserscriptWriteIntent -State $this.State -Write 'set-status'
+        $this.State.UserscriptWrites = @($this.State.UserscriptWrites) + @('set-status')
+        $this.State.Userscripts[0].IsEnabled = [bool] $enabled
     }
     Add-Member -InputObject $client -MemberType ScriptMethod -Name EnableFilterRules -Value {
         param($filterId, $rules, $filterType)
@@ -137,15 +263,22 @@ Assert-ExclusiveTargetMigrationAuthorized -Plan $approvalPlan
 $ApproveExclusiveTargetMigration = $false
 
 function New-UserscriptSnapshot {
-    param([string] $Version, [bool] $Enabled, [string] $Code, [string] $Gm)
+    param(
+        [string] $Version,
+        [bool] $Enabled,
+        [string] $Code,
+        [string] $GmProperties,
+        [bool] $Custom = $true,
+        [bool] $Style = $false
+    )
     return [pscustomobject]@{
         Exists = $true
         Info = [pscustomobject]@{
-            Name = $UserscriptName; Version = $Version; IsCustom = $true
-            IsEnabled = $Enabled; IsStyle = $false
+            Name = $UserscriptName; Version = $Version; IsCustom = $Custom
+            IsEnabled = $Enabled; IsStyle = $Style
         }
         Code = $Code
-        Gm = $Gm
+        GmProperties = $GmProperties
     }
 }
 
@@ -156,24 +289,28 @@ Assert-Contract ($exclusive.ScopeKind -ceq 'exclusive-target') 'exclusive scope 
 Assert-Contract ($mixed.ScopeKind -ceq 'mixed-target') 'mixed scope misclassified'
 Assert-Contract ($global.ScopeKind -ceq 'global') 'global scope misclassified'
 
-# Existing-userscript mutation has exactly three API prefixes.
+# An already-custom userscript keeps the in-place UpdateCode -> SetStatus
+# transaction. The independent GM value-store remains byte-exact.
 $beforeUserscript = New-UserscriptSnapshot -Version '1.0.0' -Enabled $false `
-    -Code 'before-code' -Gm 'before-gm'
+    -Code 'before-code' -GmProperties '{"saved":"before"}' -Custom $true
 $userscriptPlan = [pscustomobject]@{
     userscript_after = [pscustomobject]@{
         exists = $true; name = $UserscriptName; version = '2.0.0'
         code_sha256 = Get-CanonicalTextSha256 -Text 'after-code'
-        gm_sha256 = Get-CanonicalTextSha256 -Text 'after-gm'
+        gm_properties_sha256 = Get-CanonicalTextSha256 -Text '{"saved":"before"}'
+        fresh_install_gm_properties_sha256 = Get-CanonicalTextSha256 -Text '{}'
         enabled = $true; is_custom = $true; is_style = $false
+        replacement_required = $false
     }
 }
 Assert-Contract (-not (Assert-UserscriptRestorePreconditions -Current $beforeUserscript `
             -BackupSnapshot $beforeUserscript -TransactionPlan $userscriptPlan)) `
     'exact userscript before-state was not idempotent'
 $userscriptPrefixes = @(
-    (New-UserscriptSnapshot -Version '1.0.0' -Enabled $false -Code 'after-code' -Gm 'before-gm'),
-    (New-UserscriptSnapshot -Version '2.0.0' -Enabled $false -Code 'after-code' -Gm 'after-gm'),
-    (New-UserscriptSnapshot -Version '2.0.0' -Enabled $true -Code 'after-code' -Gm 'after-gm')
+    (New-UserscriptSnapshot -Version '2.0.0' -Enabled $false -Code 'after-code' `
+        -GmProperties '{"saved":"before"}' -Custom $true),
+    (New-UserscriptSnapshot -Version '2.0.0' -Enabled $true -Code 'after-code' `
+        -GmProperties '{"saved":"before"}' -Custom $true)
 )
 foreach ($prefix in $userscriptPrefixes) {
     Assert-Contract (Assert-UserscriptRestorePreconditions -Current $prefix `
@@ -181,21 +318,102 @@ foreach ($prefix in $userscriptPrefixes) {
         'authorized userscript crash prefix was rejected'
 }
 $invalidUserscript = New-UserscriptSnapshot -Version '2.0.0' -Enabled $false `
-    -Code 'before-code' -Gm 'after-gm'
+    -Code 'after-code' -GmProperties '{"saved":"tampered"}' -Custom $true
 Assert-ThrowsLike -Action {
     [void] (Assert-UserscriptRestorePreconditions -Current $invalidUserscript `
             -BackupSnapshot $beforeUserscript -TransactionPlan $userscriptPlan)
 } -Pattern '*not an enumerated mutation-prefix*'
+Assert-ThrowsLike -Action {
+    [void] (Assert-UserscriptRestorePreconditions -Current ([pscustomobject]@{
+                Exists = $false; Info = $null; Code = $null; GmProperties = $null
+            }) -BackupSnapshot $beforeUserscript -TransactionPlan $userscriptPlan)
+} -Pattern '*existence is not an authorized transaction prefix*'
+
+# A source-owned IsCustom=false entry is replaced, not updated in place. Every
+# forward crash prefix and every resumable rollback-reinstall prefix is exact.
+$beforeReclassification = New-UserscriptSnapshot -Version '1.0.0' -Enabled $false `
+    -Code 'before-reclassification-code' `
+    -GmProperties '{"saved":"reclassification"}' -Custom $false
+$reclassificationPlan = [pscustomobject]@{
+    userscript_after = [pscustomobject]@{
+        exists = $true; name = $UserscriptName; version = '2.0.0'
+        code_sha256 = Get-CanonicalTextSha256 -Text 'after-code'
+        gm_properties_sha256 = `
+            Get-CanonicalTextSha256 -Text '{"saved":"reclassification"}'
+        fresh_install_gm_properties_sha256 = Get-CanonicalTextSha256 -Text '{}'
+        enabled = $true; is_custom = $true; is_style = $false
+        replacement_required = $true
+    }
+}
+Assert-Contract (-not (Assert-UserscriptRestorePreconditions `
+            -Current $beforeReclassification -BackupSnapshot $beforeReclassification `
+            -TransactionPlan $reclassificationPlan)) `
+    'exact noncustom before-state was not idempotent'
+Assert-Contract (Assert-UserscriptRestorePreconditions -Current ([pscustomobject]@{
+            Exists = $false; Info = $null; Code = $null; GmProperties = $null
+        }) -BackupSnapshot $beforeReclassification `
+        -TransactionPlan $reclassificationPlan) `
+    'remove-before-reclassification prefix was rejected'
+foreach ($gm in @('{}', '{"saved":"reclassification"}')) {
+    foreach ($enabled in @($false, $true)) {
+        $prefix = New-UserscriptSnapshot -Version '2.0.0' -Enabled $enabled `
+            -Code 'after-code' -GmProperties $gm -Custom $true
+        Assert-Contract (Assert-UserscriptRestorePreconditions -Current $prefix `
+                -BackupSnapshot $beforeReclassification `
+                -TransactionPlan $reclassificationPlan) `
+            'authorized reclassification forward prefix was rejected'
+    }
+}
+$rollbackPrefixes = @(
+    (New-UserscriptSnapshot -Version '1.0.0' -Enabled $false `
+        -Code 'before-reclassification-code' -GmProperties '{}' -Custom $false),
+    (New-UserscriptSnapshot -Version '1.0.0' -Enabled $true `
+        -Code 'before-reclassification-code' -GmProperties '{}' -Custom $false),
+    (New-UserscriptSnapshot -Version '1.0.0' -Enabled $true `
+        -Code 'before-reclassification-code' `
+        -GmProperties '{"saved":"reclassification"}' -Custom $false)
+)
+foreach ($prefix in $rollbackPrefixes) {
+    Assert-Contract (Assert-UserscriptRestorePreconditions -Current $prefix `
+            -BackupSnapshot $beforeReclassification `
+            -TransactionPlan $reclassificationPlan) `
+        'authorized reclassification rollback prefix was rejected'
+}
+$tamperedReclassification = New-UserscriptSnapshot -Version '2.0.0' -Enabled $false `
+    -Code 'after-code' -GmProperties '{"tampered":true}' -Custom $true
+Assert-ThrowsLike -Action {
+    [void] (Assert-UserscriptRestorePreconditions -Current $tamperedReclassification `
+            -BackupSnapshot $beforeReclassification `
+            -TransactionPlan $reclassificationPlan)
+} -Pattern '*not an enumerated mutation-prefix*'
 
 # New userscript creation may be exposed disabled or enabled by its atomic install.
-$absentUserscript = [pscustomobject]@{ Exists = $false; Info = $null; Code = $null; Gm = $null }
+$absentUserscript = [pscustomobject]@{
+    Exists = $false; Info = $null; Code = $null; GmProperties = $null
+}
+$newUserscriptPlan = [pscustomobject]@{
+    userscript_after = [pscustomobject]@{
+        exists = $true; name = $UserscriptName; version = '2.0.0'
+        code_sha256 = Get-CanonicalTextSha256 -Text 'after-code'
+        gm_properties_sha256 = Get-CanonicalTextSha256 -Text '{}'
+        fresh_install_gm_properties_sha256 = Get-CanonicalTextSha256 -Text '{}'
+        enabled = $true; is_custom = $true; is_style = $false
+        replacement_required = $false
+    }
+}
 foreach ($enabled in @($false, $true)) {
     $created = New-UserscriptSnapshot -Version '2.0.0' -Enabled $enabled `
-        -Code 'after-code' -Gm 'after-gm'
+        -Code 'after-code' -GmProperties '{}' -Custom $true
     Assert-Contract (Assert-UserscriptRestorePreconditions -Current $created `
-            -BackupSnapshot $absentUserscript -TransactionPlan $userscriptPlan) `
+            -BackupSnapshot $absentUserscript -TransactionPlan $newUserscriptPlan) `
         'authorized userscript creation crash prefix was rejected'
 }
+$wrongClassificationPrefix = New-UserscriptSnapshot -Version '2.0.0' -Enabled $false `
+    -Code 'after-code' -GmProperties '{}' -Custom $false
+Assert-ThrowsLike -Action {
+    [void] (Assert-UserscriptRestorePreconditions -Current $wrongClassificationPrefix `
+            -BackupSnapshot $absentUserscript -TransactionPlan $newUserscriptPlan)
+} -Pattern '*identity is not an authorized transaction prefix*'
 
 $ruleA = 'ruliweb.com##.old-noise-a'
 $ruleB = 'clien.net##.old-noise-b'
@@ -210,63 +428,269 @@ $state = [pscustomobject]@{
     UserDisabledRules = @()
     UserRuleReadCount = 0
     MutateUserOnReadNumber = -1
+    MutateUserOnEveryRead = $false
     MutateUserRule = $ruleC
+    UserscriptReadCount = 0
+    UserscriptHiddenReadsRemaining = 0
+    ReceiptIsCustomOverride = $null
+    ReceiptInitialEnabled = $false
+    FreshInstallGmProperties = '{}'
+    RestoreMetaVersion = '1.0.0'
+    NextUpdateVersion = '2.0.0'
+    ParsedContentOverride = $null
+    LastParsedMeta = $null
+    UserscriptWrites = @()
+    IntentDirectory = $null
+    ExpectedWriteIntents = @()
     Userscripts = @()
     UserscriptCode = ''
-    UserscriptGm = ''
+    UserscriptGmProperties = ''
     Filters = @()
     FilterRules = @{}
 }
 $client = New-FakeClient -State $state
 
-# Exact code and canonical GM checks reject stale same-name installations.
-$desiredUserscript = [pscustomobject]@{
-    Name = $UserscriptName; Version = '2.0.0'; Metadata = 'desired-gm'
-    Meta = [pscustomobject]@{ Content = 'desired-code' }
+# GetUserscriptMeta's local-source IsCustom=false value is promoted only after
+# name, version, style, and authenticated content validation all succeed.
+$manualSourceText = @'
+// ==UserScript==
+// @name         AdGuard Hotdeal Focus Reader Gate
+// @version      2.0.0
+// ==/UserScript==
+manual-body
+'@
+$manualSource = [pscustomobject]@{
+    Bytes = $script:Utf8NoBom.GetBytes($manualSourceText)
+    Text = $manualSourceText
+    Name = $UserscriptName
+    Version = '2.0.0'
+    TempPath = $null
+    Meta = $null
 }
+$state.RestoreMetaVersion = '2.0.0'
+$preparedManualSource = Prepare-UserscriptMeta -Client $client -Source $manualSource
+Assert-Contract ([bool] $preparedManualSource.Meta.IsCustom) `
+    'authenticated manual userscript was not promoted to IsCustom=true'
+[System.IO.File]::Delete([string] $preparedManualSource.TempPath)
+$state.ParsedContentOverride = 'tampered-parser-content'
+$tamperedManualSource = [pscustomobject]@{
+    Bytes = $script:Utf8NoBom.GetBytes($manualSourceText)
+    Text = $manualSourceText
+    Name = $UserscriptName
+    Version = '2.0.0'
+    TempPath = $null
+    Meta = $null
+}
+Assert-ThrowsLike -Action {
+    [void] (Prepare-UserscriptMeta -Client $client -Source $tamperedManualSource)
+} -Pattern '*differs from the authenticated source*'
+Assert-Contract (-not [bool] $state.LastParsedMeta.IsCustom) `
+    'classification changed before authenticated content validation completed'
+[System.IO.File]::Delete([string] $tamperedManualSource.TempPath)
+$state.ParsedContentOverride = $null
+$state.RestoreMetaVersion = '1.0.0'
+
+# Exact full-code and independent GM value-store checks reject stale installs.
+$desiredUserscript = [pscustomobject]@{
+    Name = $UserscriptName; Version = '2.0.0'; MetadataBlock = 'source-metadata-block'
+    FreshInstallGmProperties = '{}'
+    FreshInstallGmPropertiesSha256 = Get-CanonicalTextSha256 -Text '{}'
+    Meta = [pscustomobject]@{
+        Name = $UserscriptName; Version = '2.0.0'; Content = 'desired-code'
+        IsCustom = $true; IsStyle = $false
+    }
+}
+$freshPostState = Get-ExpectedUserscriptPostState `
+    -Snapshot $absentUserscript -Desired $desiredUserscript
 $sameBodyDowngrade = [pscustomobject]@{
-    Name = $UserscriptName; Version = '1.0.0'; Metadata = 'desired-gm'
-    Meta = [pscustomobject]@{ Content = 'desired-code' }
+    Name = $UserscriptName; Version = '1.0.0'; MetadataBlock = 'source-metadata-block'
+    FreshInstallGmProperties = '{}'
+    FreshInstallGmPropertiesSha256 = Get-CanonicalTextSha256 -Text '{}'
+    Meta = [pscustomobject]@{ Content = 'desired-code'; IsCustom = $true; IsStyle = $false }
 }
 Assert-ThrowsLike -Action {
     Assert-UserscriptMutationPreconditions `
         -Snapshot (New-UserscriptSnapshot -Version '2.0.0' -Enabled $true `
-            -Code 'desired-code' -Gm 'desired-gm') `
+            -Code 'desired-code' -GmProperties '{}') `
         -Desired $sameBodyDowngrade
 } -Pattern '*version downgrade is forbidden*'
-$sameVersionGmChange = [pscustomobject]@{
-    Name = $UserscriptName; Version = '2.0.0'; Metadata = 'changed-gm'
-    Meta = [pscustomobject]@{ Content = 'desired-code' }
-}
-Assert-ThrowsLike -Action {
-    Assert-UserscriptMutationPreconditions `
-        -Snapshot (New-UserscriptSnapshot -Version '2.0.0' -Enabled $true `
-            -Code 'desired-code' -Gm 'desired-gm') `
-        -Desired $sameVersionGmChange
-} -Pattern '*without a strictly newer version*'
+# Same-version source validation deliberately ignores independent GM_* values.
 Assert-UserscriptMutationPreconditions `
     -Snapshot (New-UserscriptSnapshot -Version '2.0.0' -Enabled $true `
-        -Code 'desired-code' -Gm 'desired-gm') `
+        -Code 'desired-code' -GmProperties '{"user":"value"}') `
     -Desired $desiredUserscript
-$state.Userscripts = @((New-UserscriptSnapshot -Version '1.0.0' -Enabled $true `
-            -Code '' -Gm '').Info)
-$state.UserscriptCode = 'stale-code'
-$state.UserscriptGm = 'stale-gm'
+Assert-UserscriptMutationPreconditions `
+    -Snapshot (New-UserscriptSnapshot -Version '2.0.0' -Enabled $true `
+        -Code 'desired-code' -GmProperties '{}') `
+    -Desired $desiredUserscript
+$ownedSource = @'
+// ==UserScript==
+// @name         AdGuard Hotdeal Focus Reader Gate
+// @namespace    https://github.com/heelee912/adguard-hotdeal-focus
+// @version      1.0.0
+// @downloadURL  https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
+// @updateURL    https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
+// ==/UserScript==
+'@
+$ownedNonCustom = New-UserscriptSnapshot -Version '1.0.0' -Enabled $true `
+    -Code $ownedSource -GmProperties '{}'
+$ownedNonCustom.Info.IsCustom = $false
+Assert-UserscriptMutationPreconditions -Snapshot $ownedNonCustom -Desired $desiredUserscript
+$unownedNonCustom = New-UserscriptSnapshot -Version '1.0.0' -Enabled $true `
+    -Code 'same-name-but-unowned' -GmProperties '{}'
+$unownedNonCustom.Info.IsCustom = $false
 Assert-ThrowsLike -Action {
-    [void] (Assert-UserscriptInstalled -Client $client -Desired $desiredUserscript)
+    Assert-UserscriptMutationPreconditions -Snapshot $unownedNonCustom `
+        -Desired $desiredUserscript
+} -Pattern '*lacks exact Reader Gate ownership metadata*'
+$state.Userscripts = @((New-UserscriptSnapshot -Version '1.0.0' -Enabled $true `
+            -Code '' -GmProperties '' -Custom $true).Info)
+$state.UserscriptCode = 'stale-code'
+$state.UserscriptGmProperties = '{"stale":true}'
+Assert-ThrowsLike -Action {
+    [void] (Assert-UserscriptInstalled -Client $client -Desired $desiredUserscript `
+            -ExpectedPostState $freshPostState)
 } -Pattern '*version does not match*'
 $state.Userscripts[0].Version = '2.0.0'
 $state.UserscriptCode = 'desired-code'
 Assert-ThrowsLike -Action {
-    [void] (Assert-UserscriptInstalled -Client $client -Desired $desiredUserscript)
-} -Pattern '*GM metadata SHA-256*'
-$state.UserscriptGm = 'desired-gm'
-$installedUserscript = Assert-UserscriptInstalled -Client $client -Desired $desiredUserscript
+    [void] (Assert-UserscriptInstalled -Client $client -Desired $desiredUserscript `
+            -ExpectedPostState $freshPostState)
+} -Pattern '*GM value-store SHA-256*'
+$state.UserscriptGmProperties = '{}'
+$state.Userscripts[0].IsCustom = $false
+Assert-ThrowsLike -Action {
+    [void] (Assert-UserscriptInstalled -Client $client -Desired $desiredUserscript `
+            -ExpectedPostState $freshPostState)
+} -Pattern '*not selected as an executable custom extension*'
+$state.Userscripts[0].IsCustom = $true
+$state.UserscriptReadCount = 0
+$state.UserscriptHiddenReadsRemaining = 2
+$installedUserscript = Assert-UserscriptInstalled -Client $client -Desired $desiredUserscript `
+    -ExpectedPostState $freshPostState
 Assert-Contract ($installedUserscript.InstalledCodeSha256 -ceq
         (Get-CanonicalTextSha256 -Text 'desired-code')) 'installed code hash was not exposed'
+Assert-Contract ([int] $installedUserscript.VisibilityObservationCount -eq 4) `
+    'transient userscript visibility was not retried until two exact consecutive reads'
+Assert-Contract ([int] $state.UserscriptReadCount -eq 4) `
+    'userscript visibility retry count was not bounded and observable'
+$state.UserscriptGmProperties = '{"preserved":"standalone-verify"}'
+$state.UserscriptReadCount = 0
+$standaloneVerified = Assert-UserscriptInstalled -Client $client -Desired $desiredUserscript
+Assert-Contract ($standaloneVerified.InstalledGmPropertiesSha256 -ceq
+        (Get-CanonicalTextSha256 -Text $state.UserscriptGmProperties)) `
+    'standalone verification did not report the preserved GM value-store hash'
 $state.Userscripts = @()
 $state.UserscriptCode = ''
-$state.UserscriptGm = ''
+$state.UserscriptGmProperties = ''
+$state.UserscriptHiddenReadsRemaining = 0
+
+# An authenticated manual install must request, receive, and converge on the
+# executable IsCustom=true classification.
+[void] (Invoke-UserscriptMutation -Client $client -Snapshot $absentUserscript `
+        -Desired $desiredUserscript -JournalDirectory $null)
+Assert-Contract ([bool] $state.Userscripts[0].IsCustom) `
+    'authenticated manual install did not converge on IsCustom=true'
+$state.Userscripts = @()
+$state.UserscriptCode = ''
+$state.ReceiptIsCustomOverride = $false
+Assert-ThrowsLike -Action {
+    [void] (Invoke-UserscriptMutation -Client $client -Snapshot $absentUserscript `
+            -Desired $desiredUserscript -JournalDirectory $null)
+} -Pattern '*installation receipt differs from the exact source*'
+$state.ReceiptIsCustomOverride = $null
+$state.Userscripts = @()
+$state.UserscriptCode = ''
+$state.UserscriptGmProperties = ''
+
+# A source-owned false classification is transactionally replaced and retains
+# its independent GM values. Rollback reinstalls the exact original class.
+$reclassificationSnapshot = New-UserscriptSnapshot -Version '1.0.0' `
+    -Enabled $true -Code $ownedSource -GmProperties '{"persisted":1}' -Custom $false
+$state.Userscripts = @($reclassificationSnapshot.Info)
+$state.UserscriptCode = $reclassificationSnapshot.Code
+$state.UserscriptGmProperties = $reclassificationSnapshot.GmProperties
+$state.UserscriptWrites = @()
+$forwardJournal = Join-Path ([System.IO.Path]::GetTempPath()) (
+    'hdf-reclass-forward-' + [Guid]::NewGuid().ToString('N'))
+[void] [System.IO.Directory]::CreateDirectory($forwardJournal)
+$state.IntentDirectory = $forwardJournal
+$state.ExpectedWriteIntents = @(
+    [pscustomobject]@{ Write = 'remove'; Event = 'intent-userscript-reclassification-remove' },
+    [pscustomobject]@{ Write = 'install'; Event = 'intent-userscript-install' },
+    [pscustomobject]@{
+        Write = 'update-gm'; Event = 'intent-userscript-reclassification-restore-gm'
+    },
+    [pscustomobject]@{ Write = 'set-status'; Event = 'intent-userscript-enable' }
+)
+try {
+    [void] (Invoke-UserscriptMutation -Client $client `
+            -Snapshot $reclassificationSnapshot -Desired $desiredUserscript `
+            -JournalDirectory $forwardJournal)
+}
+finally {
+    $state.IntentDirectory = $null
+    $state.ExpectedWriteIntents = @()
+    [System.IO.Directory]::Delete($forwardJournal, $true)
+}
+Assert-Contract ([bool] $state.Userscripts[0].IsCustom) `
+    'owned noncustom userscript was not reclassified by replacement'
+Assert-Contract ([string] $state.UserscriptGmProperties -ceq '{"persisted":1}') `
+    'reclassification did not restore independent GM values'
+Assert-Contract (Test-ExactStringSequence -Left $state.UserscriptWrites `
+        -Right @('remove', 'install', 'update-gm', 'set-status')) `
+    'reclassification writes were not executed in the exact transaction order'
+
+$state.UserscriptWrites = @()
+$rollbackJournal = Join-Path ([System.IO.Path]::GetTempPath()) (
+    'hdf-reclass-rollback-' + [Guid]::NewGuid().ToString('N'))
+[void] [System.IO.Directory]::CreateDirectory($rollbackJournal)
+$state.IntentDirectory = $rollbackJournal
+$state.ExpectedWriteIntents = @(
+    [pscustomobject]@{
+        Write = 'remove'; Event = 'intent-rollback-userscript-reclassification-remove'
+    },
+    [pscustomobject]@{
+        Write = 'install'; Event = 'intent-rollback-userscript-reclassification-install'
+    },
+    [pscustomobject]@{ Write = 'update-gm'; Event = 'intent-rollback-userscript-gm' },
+    [pscustomobject]@{ Write = 'set-status'; Event = 'intent-rollback-userscript-status' }
+)
+try {
+    Restore-UserscriptSnapshot -Client $client -Snapshot $reclassificationSnapshot `
+        -JournalDirectory $rollbackJournal
+}
+finally {
+    $state.IntentDirectory = $null
+    $state.ExpectedWriteIntents = @()
+    [System.IO.Directory]::Delete($rollbackJournal, $true)
+}
+$restoredFalse = Get-UserscriptSnapshot -Client $client
+Assert-Contract (Test-UserscriptSnapshotExact -Left $restoredFalse `
+        -Right $reclassificationSnapshot) `
+    'rollback did not exactly restore original IsCustom=false snapshot'
+Assert-Contract (Test-ExactStringSequence -Left $state.UserscriptWrites `
+        -Right @('remove', 'install', 'update-gm', 'set-status')) `
+    'false-classification rollback did not use exact replacement order'
+
+$originalTrueSnapshot = New-UserscriptSnapshot -Version '1.0.0' `
+    -Enabled $false -Code $ownedSource -GmProperties '{"original":true}' -Custom $true
+$state.Userscripts = @((New-UserscriptSnapshot -Version '1.0.0' -Enabled $true `
+            -Code '' -GmProperties '' -Custom $false).Info)
+$state.UserscriptCode = $ownedSource
+$state.UserscriptGmProperties = '{}'
+$state.UserscriptWrites = @()
+Restore-UserscriptSnapshot -Client $client -Snapshot $originalTrueSnapshot `
+    -JournalDirectory $null
+$restoredTrue = Get-UserscriptSnapshot -Client $client
+Assert-Contract (Test-UserscriptSnapshotExact -Left $restoredTrue `
+        -Right $originalTrueSnapshot) `
+    'rollback did not exactly restore original IsCustom=true snapshot'
+
+$state.Userscripts = @()
+$state.UserscriptCode = ''
+$state.UserscriptGmProperties = ''
+$state.UserscriptWrites = @()
 
 # Filter creation and each subsequent disable are accepted only in API order.
 $oldRulesSha = Get-RuleListSha256 -Rules @('old.example##.gate')
@@ -354,15 +778,23 @@ Assert-ThrowsLike -Action {
 $state.Filters = @()
 $state.FilterRules = @{}
 
-# Complete-state double read and prewrite compare reject TOCTOU changes.
+# Complete-state reads absorb one cache transition but reject continuous TOCTOU changes.
 $state.UserRuleReadCount = 0
 $state.MutateUserOnReadNumber = 2
-Assert-ThrowsLike -Action {
-    [void] (Get-StableCompleteTargetStateSnapshot -Client $client -ExactFilterUrl $null)
-} -Pattern '*were not identical*'
+$stableAfterTransition = Get-StableCompleteTargetStateSnapshot `
+    -Client $client -ExactFilterUrl $null
+Assert-Contract ([int] $stableAfterTransition.ObservationCount -eq 3) `
+    'one transient state transition did not converge on two consecutive exact reads'
 $state.UserDisabledRules = @()
 $state.UserRuleReadCount = 0
 $state.MutateUserOnReadNumber = -1
+$state.MutateUserOnEveryRead = $true
+Assert-ThrowsLike -Action {
+    [void] (Get-StableCompleteTargetStateSnapshot -Client $client -ExactFilterUrl $null)
+} -Pattern '*were not identical within*'
+$state.MutateUserOnEveryRead = $false
+$state.UserDisabledRules = @()
+$state.UserRuleReadCount = 0
 $beforeComplete = Get-CompleteTargetStateSnapshot -Client $client -ExactFilterUrl $null
 $beforeCompleteSha = Get-CompleteTargetStateSha256 -Snapshot $beforeComplete
 $prewriteBackup = [pscustomobject]@{ Manifest = [pscustomobject]@{
@@ -467,7 +899,8 @@ try {
         Filter = $state.UserFilter; CandidateRecords = @($candidateRecords)
     }
     Initialize-TransactionJournal -Directory $temporary -CommandName 'migrate-legacy' `
-        -DesiredUserscript $null -DesiredFilter $null -MigrationPlan $journalMigration
+        -DesiredUserscript $null -BeforeUserscriptSnapshot $null `
+        -DesiredFilter $null -MigrationPlan $journalMigration
     $manifestBytes = [System.IO.File]::ReadAllBytes(
         (Join-Path $temporary 'backup-manifest.json'))
     $validatedJournal = Get-ValidatedTransactionPlan -Directory $temporary `
@@ -522,7 +955,9 @@ finally {
 [ordered]@{
     ok = $true
     tests = @('scope-classification', 'userscript-all-crash-prefixes',
-        'userscript-stale-and-gm-rejection', 'filter-all-crash-prefixes',
+        'userscript-authenticated-custom-promotion',
+        'userscript-owned-noncustom-reclassification-and-exact-rollback',
+        'userscript-visibility-convergence', 'filter-all-crash-prefixes',
         'disabled-filter-rule-rejection', 'inter-read-mutation-rejection',
         'prewrite-mutation-rejection', 'actual-release-source-contract',
         'backup-complete-state-hash', 'backup-raw-hash-tamper',

@@ -35,7 +35,7 @@ _ROLE_PROJECTION_TITLE_MODE = "seeded-shallow"
 _ROLE_PROJECTION_CONTENT_MODE = "atomic-boundary"
 _ROLE_PROJECTION_COMMENTS_MODE = "classified-children"
 _PRODUCT_CARDINALITIES = frozenset({"zero", "required", "optional"})
-_ALGUMON_CONSISTENCY_THRESHOLD = 0.95
+_PRODUCT_ORDERS = frozenset({"before-body", "after-body"})
 _EVIDENCE_MAX_AGE = timedelta(hours=72)
 _EVIDENCE_FUTURE_SKEW = timedelta(minutes=5)
 _FORBIDDEN_SELECTOR_FRAGMENTS = (
@@ -49,7 +49,7 @@ _FORBIDDEN_SELECTOR_FRAGMENTS = (
 )
 _CANDIDATE_CONTRACT_START = "/* HOTDEAL_FOCUS_CONTRACTS_START */"
 _CANDIDATE_CONTRACT_END = "/* HOTDEAL_FOCUS_CONTRACTS_END */"
-_CANDIDATE_PROTOCOL_VERSION = 1
+_CANDIDATE_PROTOCOL_VERSION = 2
 
 
 class ConfigError(ValueError):
@@ -255,14 +255,22 @@ def _validate_role_projection(
         )
     )
     product = _expect_mapping(projection["product"], f"{location}.product")
-    if set(product) != {"mode", "cardinality", "selectors", "ignored"}:
-        raise ConfigError(f"{location}.product fields are invalid")
     product_mode = _expect_text(product.get("mode"), f"{location}.product.mode")
     product_cardinality = _expect_text(
         product.get("cardinality"), f"{location}.product.cardinality"
     )
     if product_cardinality not in _PRODUCT_CARDINALITIES:
         raise ConfigError(f"{location}.product.cardinality is invalid")
+    expected_product_fields = {"mode", "cardinality", "selectors", "ignored"}
+    if product_cardinality != "zero":
+        expected_product_fields.add("order")
+    if set(product) != expected_product_fields:
+        raise ConfigError(f"{location}.product fields are invalid")
+    product_order = product.get("order")
+    if product_cardinality != "zero":
+        product_order = _expect_text(product_order, f"{location}.product.order")
+        if product_order not in _PRODUCT_ORDERS:
+            raise ConfigError(f"{location}.product.order is invalid")
     product_selectors = sorted(
         _validate_selector_list(
             product.get("selectors"),
@@ -305,6 +313,7 @@ def _validate_role_projection(
             "cardinality": product_cardinality,
             "selectors": product_selectors,
             "ignored": product_ignored,
+            **({"order": product_order} if product_cardinality != "zero" else {}),
         },
         "comments": {"mode": _ROLE_PROJECTION_COMMENTS_MODE},
     }
@@ -318,8 +327,6 @@ def _validate_materialized_variant(
     layout_id: str,
     domain: str,
     base_profiles: Sequence[str],
-    base_required_roles: Sequence[str],
-    base_product_cardinality: str,
 ) -> dict[str, Any]:
     variant = _expect_mapping(variant_value, location)
     raw_keys = {
@@ -374,8 +381,11 @@ def _validate_materialized_variant(
     required_roles = sorted(
         _expect_unique_texts(variant["required_roles"], f"{location}.required_roles")
     )
-    if set(required_roles) != set(base_required_roles):
-        raise ConfigError(f"{location}.required_roles must equal its base layout")
+    role_names = set(required_roles)
+    if not _BASE_ROLE_NAMES <= role_names or not role_names <= _ALLOWED_ROLE_NAMES:
+        raise ConfigError(
+            f"{location}.required_roles must include title/body/comments and may add product"
+        )
     group_values = _expect_mapping(
         variant["required_groups"], f"{location}.required_groups"
     )
@@ -392,10 +402,6 @@ def _validate_materialized_variant(
     role_projection = _validate_role_projection(
         variant["role_projection"], f"{location}.role_projection", required_groups
     )
-    if role_projection["product"]["cardinality"] != base_product_cardinality:
-        raise ConfigError(
-            f"{location}.role_projection.product.cardinality must equal its base layout"
-        )
     comment_value = _expect_mapping(
         variant["comment_contract"], f"{location}.comment_contract"
     )
@@ -517,7 +523,7 @@ def _validate_materialized_variant(
 def _validate_layout(
     layout_value: Any,
     site_location: str,
-    seen_targets: set[tuple[str, str]],
+    seen_targets: dict[tuple[str, str], set[str]],
     *,
     site_id: str,
 ) -> dict[str, Any]:
@@ -525,6 +531,15 @@ def _validate_layout(
     layout_id = _expect_identifier(layout.get("id"), f"{site_location}.id")
     location = f"{site_location}[id={layout_id}]"
     domain = validate_domain(layout.get("domain"), f"{location}.domain")
+    resource_domains = sorted(
+        validate_domain(resource_domain, f"{location}.resource_domains[{index}]")
+        for index, resource_domain in enumerate(
+            _expect_unique_texts(
+                layout.get("resource_domains", []),
+                f"{location}.resource_domains",
+            )
+        )
+    )
     has_path = "path" in layout
     has_paths = "paths" in layout
     if has_path == has_paths:
@@ -539,12 +554,6 @@ def _validate_layout(
             validate_path(path, f"{location}.paths[{index}]")
             for index, path in enumerate(raw_paths)
         ]
-    for path in paths:
-        target = (domain, path)
-        if target in seen_targets:
-            raise ConfigError(f"duplicate domain/path target: {domain} {path}")
-        seen_targets.add(target)
-
     applicable_profiles = _expect_unique_texts(
         layout.get("applicable_profiles"), f"{location}.applicable_profiles"
     )
@@ -552,6 +561,16 @@ def _validate_layout(
         raise ConfigError(
             f"{location}.applicable_profiles must contain desktop and/or mobile"
         )
+    for path in paths:
+        target = (domain, path)
+        existing_profiles = seen_targets.setdefault(target, set())
+        overlapping_profiles = existing_profiles & set(applicable_profiles)
+        if overlapping_profiles:
+            overlap = ", ".join(sorted(overlapping_profiles))
+            raise ConfigError(
+                f"duplicate domain/path/profile target: {domain} {path} ({overlap})"
+            )
+        existing_profiles.update(applicable_profiles)
 
     page_root = validate_selector(layout.get("page_root"), f"{location}.page_root")
 
@@ -684,8 +703,6 @@ def _validate_layout(
             layout_id=layout_id,
             domain=domain,
             base_profiles=applicable_profiles,
-            base_required_roles=required_roles,
-            base_product_cardinality=role_projection["product"]["cardinality"],
         )
         for index, variant in enumerate(raw_variants)
     ]
@@ -696,6 +713,7 @@ def _validate_layout(
     return {
         "id": layout_id,
         "domain": domain,
+        "resource_domains": resource_domains,
         "paths": sorted(paths),
         "applicable_profiles": sorted(applicable_profiles),
         "page_root": page_root,
@@ -765,7 +783,7 @@ def validate_config(config_value: Any) -> dict[str, Any]:
         raise ConfigError("config.sites must not be empty")
 
     site_ids: set[str] = set()
-    seen_targets: set[tuple[str, str]] = set()
+    seen_targets: dict[tuple[str, str], set[str]] = {}
     validated_sites: list[dict[str, Any]] = []
     for site_index, site_value in enumerate(sites_value):
         site = _expect_mapping(site_value, f"config.sites[{site_index}]")
@@ -832,7 +850,10 @@ def build_hide_selector(layout: Mapping[str, Any]) -> str:
     """Build the projected ExtendedCSS selector without domain/path wrappers."""
     selector = "body *"
     for marker in sorted(layout["ancestor_markers"]):
-        selector += f":not(:has({marker}))"
+        # :has() consumes a relative selector. Wrapping the marker in :is()
+        # makes the descendant itself match the document-scoped contract, so
+        # an ancestor already inside e.g. #D_ can still retain #D_ .body.
+        selector += f":not(:has(:is({marker})))"
     for preserved_selector in sorted(layout["preserve_deep"]):
         selector += f":not({preserved_selector}):not({preserved_selector} *)"
     for preserved_selector in sorted(layout["preserve_shallow"]):
@@ -1118,8 +1139,6 @@ def _validate_candidate_payload(
     role_names = set(required_roles)
     if not _BASE_ROLE_NAMES <= role_names or not role_names <= _ALLOWED_ROLE_NAMES:
         raise ConfigError("candidate requiredRoles must include title/body/comments and may add product")
-    if role_names != set(base_layout["required_roles"]):
-        raise ConfigError("candidate requiredRoles must equal the base layout roles")
     roles_value = _expect_mapping(payload["roles"], "candidate.roles")
     if set(roles_value) != role_names:
         raise ConfigError("candidate roles must exactly match requiredRoles")
@@ -1130,16 +1149,6 @@ def _validate_candidate_payload(
     role_projection = _validate_role_projection(
         payload["roleProjection"], "candidate.roleProjection", roles
     )
-    base_product_cardinality = _expect_mapping(
-        _expect_mapping(
-            base_layout.get("role_projection"), "base role_projection"
-        ).get("product"),
-        "base role_projection.product",
-    ).get("cardinality")
-    if role_projection["product"]["cardinality"] != base_product_cardinality:
-        raise ConfigError(
-            "candidate roleProjection.product.cardinality must equal the base layout"
-        )
     comment_items = sorted(
         _validate_selector_list(payload["commentItems"], "candidate.commentItems")
     )
@@ -1403,7 +1412,7 @@ def _validate_observations(
         raise ConfigError("candidate evidence observations must not be empty")
     base_keys = {
         "url", "profile", "capturedAt", "pageRoot", "roles", "algumon",
-        "roleProjection", "commentStructure", "selectorStability",
+        "roleProjection", "productObservation", "commentStructure", "selectorStability",
         "oracleExecutionWorld",
     }
     final_keys = {
@@ -1480,6 +1489,74 @@ def _validate_observations(
             raise ConfigError(
                 f"{location}.roleProjection must equal candidate.roleProjection"
             )
+
+        product_observation_value = _expect_mapping(
+            observation["productObservation"], f"{location}.productObservation"
+        )
+        product_observation_keys = {"cardinality", "selector", "count", "order"}
+        if set(product_observation_value) != product_observation_keys:
+            raise ConfigError(
+                f"{location}.productObservation keys must be: "
+                f"{sorted(product_observation_keys)}"
+            )
+        product_observation_cardinality = _expect_text(
+            product_observation_value["cardinality"],
+            f"{location}.productObservation.cardinality",
+        )
+        if product_observation_cardinality not in {"required", "zero"}:
+            raise ConfigError(
+                f"{location}.productObservation.cardinality must be required or zero"
+            )
+        if product_observation_cardinality == "required":
+            product_observation_selector = validate_selector(
+                product_observation_value["selector"],
+                f"{location}.productObservation.selector",
+            )
+            _expect_exact_integer(
+                product_observation_value["count"],
+                1,
+                f"{location}.productObservation.count",
+            )
+            product_observation_order = _expect_text(
+                product_observation_value["order"],
+                f"{location}.productObservation.order",
+            )
+            if product_observation_order not in _PRODUCT_ORDERS:
+                raise ConfigError(f"{location}.productObservation.order is invalid")
+            if product_observation_selector not in role_projection["product"]["selectors"]:
+                raise ConfigError(
+                    f"{location}.productObservation.selector is not a candidate product selector"
+                )
+            if product_observation_order != role_projection["product"].get("order"):
+                raise ConfigError(
+                    f"{location}.productObservation.order must equal candidate product order"
+                )
+            product_observation = {
+                "cardinality": "required",
+                "selector": product_observation_selector,
+                "count": 1,
+                "order": product_observation_order,
+            }
+        else:
+            if product_observation_value["selector"] is not None:
+                raise ConfigError(
+                    f"{location}.productObservation.selector must be null for zero cardinality"
+                )
+            _expect_exact_integer(
+                product_observation_value["count"],
+                0,
+                f"{location}.productObservation.count",
+            )
+            if product_observation_value["order"] is not None:
+                raise ConfigError(
+                    f"{location}.productObservation.order must be null for zero cardinality"
+                )
+            product_observation = {
+                "cardinality": "zero",
+                "selector": None,
+                "count": 0,
+                "order": None,
+            }
 
         comment_structure = _expect_mapping(
             observation["commentStructure"], f"{location}.commentStructure"
@@ -1620,9 +1697,9 @@ def _validate_observations(
             count_consistency: float | None = _expect_score(
                 algumon["countConsistency"], f"{location}.algumon.countConsistency"
             )
-            if count_consistency < _ALGUMON_CONSISTENCY_THRESHOLD:
+            if count_consistency != 1.0:
                 raise ConfigError(
-                    f"{location}.algumon count consistency is below the promotion threshold"
+                    f"{location}.algumon.countConsistency must be exactly 1 for comparable lower-bound evidence"
                 )
         else:
             if algumon["countConsistency"] is not None:
@@ -1653,6 +1730,7 @@ def _validate_observations(
             "pageRoot": {"selector": page_root_selector, "count": 1},
             "roles": roles,
             "roleProjection": role_projection,
+            "productObservation": product_observation,
             "commentStructure": {
                 "mountSelector": mount_selector,
                 "mountCount": 1,
@@ -1747,6 +1825,44 @@ def _validate_observations(
                 )
     if len({url for _profile, url in seen_profile_urls}) < 3:
         raise ConfigError("candidate evidence requires at least three distinct target URLs")
+    observed_product_cardinalities = {
+        observation["productObservation"]["cardinality"]
+        for observation in normalized
+    }
+    aggregated_product_cardinality = (
+        "required"
+        if observed_product_cardinalities == {"required"}
+        else "zero"
+        if observed_product_cardinalities == {"zero"}
+        else "optional"
+    )
+    candidate_product = payload["roleProjection"]["product"]
+    if candidate_product["cardinality"] != aggregated_product_cardinality:
+        raise ConfigError(
+            "candidate product cardinality must equal the independent product observations"
+        )
+    required_product_observations = [
+        observation["productObservation"]
+        for observation in normalized
+        if observation["productObservation"]["cardinality"] == "required"
+    ]
+    if required_product_observations:
+        stable_product_shapes = {
+            (observation["selector"], observation["order"])
+            for observation in required_product_observations
+        }
+        if len(stable_product_shapes) != 1:
+            raise ConfigError(
+                "candidate product selector and order must be stable across required observations"
+            )
+        stable_selector, stable_order = next(iter(stable_product_shapes))
+        if (
+            candidate_product["selectors"] != [stable_selector]
+            or candidate_product.get("order") != stable_order
+        ):
+            raise ConfigError(
+                "candidate product projection must equal the stable independent observation"
+            )
     normalized.sort(key=lambda item: (item["profile"], item["url"], item["capturedAt"]))
     return normalized, sorted(expected_profiles)
 
@@ -2019,6 +2135,11 @@ def _load_approved_state(
             raise ConfigError(f"{location}.proofProfiles is invalid")
         if set(role_values) != set(payload["requiredRoles"]):
             raise ConfigError(f"{location}.roles must match requiredRoles")
+        role_names = set(payload["requiredRoles"])
+        if not _BASE_ROLE_NAMES <= role_names or not role_names <= _ALLOWED_ROLE_NAMES:
+            raise ConfigError(
+                f"{location}.requiredRoles must include title/body/comments and may add product"
+            )
         payload["roles"] = {
             role: sorted(_validate_selector_list(selectors, f"{location}.roles.{role}"))
             for role, selectors in sorted(role_values.items())
@@ -2026,14 +2147,6 @@ def _load_approved_state(
         payload["roleProjection"] = _validate_role_projection(
             record["roleProjection"], f"{location}.roleProjection", payload["roles"]
         )
-        base_product_cardinality = _expect_mapping(
-            _expect_mapping(
-                layout.get("role_projection"), f"{location}.baseRoleProjection"
-            ).get("product"),
-            f"{location}.baseRoleProjection.product",
-        ).get("cardinality")
-        if payload["roleProjection"]["product"]["cardinality"] != base_product_cardinality:
-            raise ConfigError(f"{location}.roleProjection product cardinality differs from base")
         expected_variant_id = _automatic_variant_id(payload)
         if variant_id != expected_variant_id:
             raise ConfigError(

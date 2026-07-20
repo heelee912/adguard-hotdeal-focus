@@ -74,6 +74,7 @@ jobs:
             filter.txt \
             filter-static.txt \
             hotdeal-focus.user.js \
+            scripts/csp-probe.user.js \
             release-manifest.json \
             tests/fixtures/dom-regressions.json \
             tests/fixtures/behavior-baseline.json >/dev/null || status=1
@@ -92,9 +93,15 @@ jobs:
         run: |
           set +e
           status=0
+          timeout --kill-after=5s 60s npm run test:network || status=1
+          timeout --kill-after=5s 90s npm run test:oracle || status=1
+          python -m unittest -v \
+            tests.test_workflow_contract.AuditProofLeaseAndExpectationTests.test_projected_hide_selector_uses_native_document_qsa_semantics \
+            || status=1
           timeout --kill-after=5s 60s npm run test:tamper || status=1
           if [[ "${status}" == "0" ]]; then
-            timeout --kill-after=15s 210m npm run audit:dom -- \
+            timeout --kill-after=15s 210m xvfb-run -a npm run audit:dom -- \
+              --headed \
               --require-algumon-discovery \
               --synthesize-candidates || status=1
           fi
@@ -291,10 +298,11 @@ jobs:
           fi
 
           if [[ -z "${status}" ]]; then
-            timeout --kill-after=10s 20m node scripts/audit_pages.mjs \
+            timeout --kill-after=10s 20m xvfb-run -a node scripts/audit_pages.mjs \
               --config "${draft_root}/config/sites.json" \
               --userscript "${draft_root}/hotdeal-focus.user.js" \
               --marker-filter "${draft_root}/filter.txt" \
+              --headed \
               --runtime-only \
               --require-algumon-discovery \
               --promotion-draft "${draft}" \
@@ -575,9 +583,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 330
     permissions:
-      contents: write
+      contents: read
     outputs:
-      commit_sha: ${{ steps.push.outputs.commit_sha }}
+      commit_sha: ${{ steps.materialize.outputs.commit_sha }}
     steps:
       - name: Check out exactly the audited base
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -697,7 +705,7 @@ jobs:
             test -f "${release}/${required}"
           done
           cmp --silent filter.txt "${release}/filter.txt" || {
-            echo "A DOM promotion attempted to change immutable gate-v1 bytes." >&2
+            echo "A DOM promotion attempted to change immutable gate-v2 bytes." >&2
             exit 1
           }
           install -m 0644 "${release}/filter.txt" filter.txt
@@ -738,30 +746,298 @@ jobs:
           npm test
           npm run build:check
           npm run integrity
+          timeout --kill-after=5s 60s npm run test:network
+          timeout --kill-after=5s 90s npm run test:oracle
           timeout --kill-after=5s 60s npm run test:tamper
           timeout --kill-after=10s 15m npm run test:behavior
-          timeout --kill-after=15s 180m npm run audit:dom -- \
+          timeout --kill-after=15s 180m xvfb-run -a npm run audit:dom -- \
+            --headed \
             --require-algumon-discovery \
             --promotion-scope .promotion-package/proof/promotion-ready.json \
             --baseline-report .promotion-package/proof/base-audit-report.json
           git diff --exit-code -- .
 
-      - name: Fast-forward push only if the remote is still the audited base
-        id: push
+      - name: Seal the proven one-parent promotion for a fresh push runner
         env:
-          GH_TOKEN: ${{ github.token }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           BASE_SHA: ${{ needs.audit.outputs.base_sha }}
           COMMIT_SHA: ${{ steps.materialize.outputs.commit_sha }}
         shell: bash
         run: |
+          set -euo pipefail
+          mkdir -p .promotion-push
+          BASE_SHA="${BASE_SHA}" COMMIT_SHA="${COMMIT_SHA}" node <<'NODE'
+          const crypto = require('node:crypto');
+          const fs = require('node:fs');
+          const { execFileSync } = require('node:child_process');
+          const allowed = [
+            'config/sites.json',
+            'filter-static.txt',
+            'filter.txt',
+            'hotdeal-focus.user.js',
+            'package-lock.json',
+            'package.json',
+            'release-manifest.json',
+            'state/approved-variants.json',
+          ];
+          const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
+          const bytes = (revision, path) => execFileSync(
+            'git', ['show', `${revision}:${path}`], { encoding: null },
+          );
+          const sha256 = (value) => crypto.createHash('sha256').update(value).digest('hex');
+          const parents = git('rev-list', '--parents', '-n', '1', process.env.COMMIT_SHA).split(' ');
+          if (parents.length !== 2 || parents[1] !== process.env.BASE_SHA) {
+            throw new Error('promotion commit is not the one exact child of the audited base');
+          }
+          const changedPaths = git(
+            'diff', '--name-only', process.env.BASE_SHA, process.env.COMMIT_SHA,
+          ).split('\n').filter(Boolean).sort();
+          if (changedPaths.length === 0 || changedPaths.some((path) => !allowed.includes(path))) {
+            throw new Error(`promotion changed a non-allowlisted path: ${changedPaths.join(', ')}`);
+          }
+          const committedFiles = Object.fromEntries(
+            allowed.map((path) => [path, sha256(bytes(process.env.COMMIT_SHA, path))]),
+          );
+          const manifest = {
+            schemaVersion: 1,
+            bundleRef: 'refs/hdf/promotion',
+            baseSha: process.env.BASE_SHA,
+            commitSha: process.env.COMMIT_SHA,
+            changedPaths,
+            committedFiles,
+          };
+          fs.writeFileSync(
+            '.promotion-push/manifest.json',
+            `${JSON.stringify(manifest, null, 2)}\n`,
+            'utf8',
+          );
+          NODE
+          git update-ref refs/hdf/promotion "${COMMIT_SHA}"
+          trap 'git update-ref -d refs/hdf/promotion' EXIT
+          git bundle create .promotion-push/promotion.bundle \
+            refs/hdf/promotion "^${BASE_SHA}"
+          git bundle verify .promotion-push/promotion.bundle
+          actual_files="$(find .promotion-push -maxdepth 1 -type f -printf '%f\n' | sort)"
+          expected_files="$(printf '%s\n' manifest.json promotion.bundle | sort)"
+          [[ "${actual_files}" == "${expected_files}" ]]
+
+      - name: Upload the sealed promotion push package
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: promotion-push-${{ github.run_id }}
+          path: .promotion-push/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 2
+
+  push-promotion:
+    needs: [audit, promote]
+    if: needs.promote.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    concurrency:
+      group: hotdeal-focus-release-state
+      cancel-in-progress: false
+    environment:
+      name: hdf-main-automation
+      deployment: false
+    permissions:
+      contents: read
+    outputs:
+      commit_sha: ${{ steps.push.outputs.commit_sha }}
+    steps:
+      - name: Check out only the audited base on a fresh runner
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.audit.outputs.base_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download the sealed promotion push package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: promotion-push-${{ github.run_id }}
+          path: .promotion-push
+
+      - name: Independently revalidate the bundle, commit, paths, and release hashes
+        env:
+          BASE_SHA: ${{ needs.audit.outputs.base_sha }}
+          COMMIT_SHA: ${{ needs.promote.outputs.commit_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual_files="$(find .promotion-push -maxdepth 1 -type f -printf '%f\n' | sort)"
+          expected_files="$(printf '%s\n' manifest.json promotion.bundle | sort)"
+          [[ "${actual_files}" == "${expected_files}" ]]
+          git bundle verify .promotion-push/promotion.bundle
+          git fetch --no-tags .promotion-push/promotion.bundle refs/hdf/promotion
+          [[ "$(git rev-parse FETCH_HEAD^{commit})" == "${COMMIT_SHA}" ]]
+          BASE_SHA="${BASE_SHA}" COMMIT_SHA="${COMMIT_SHA}" python3 <<'PY'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          root = pathlib.Path('.promotion-push')
+          raw = (root / 'manifest.json').read_bytes()
+          if len(raw) > 65536:
+              raise SystemExit('promotion manifest is oversized')
+          manifest = json.loads(raw)
+          expected_keys = {
+              'schemaVersion', 'bundleRef', 'baseSha', 'commitSha',
+              'changedPaths', 'committedFiles',
+          }
+          if set(manifest) != expected_keys or manifest['schemaVersion'] != 1:
+              raise SystemExit('promotion manifest schema is not exact')
+          base = os.environ['BASE_SHA']
+          commit = os.environ['COMMIT_SHA']
+          if (
+              manifest['bundleRef'] != 'refs/hdf/promotion'
+              or manifest['baseSha'] != base
+              or manifest['commitSha'] != commit
+          ):
+              raise SystemExit('promotion manifest source binding changed')
+
+          allowed = [
+              'config/sites.json',
+              'filter-static.txt',
+              'filter.txt',
+              'hotdeal-focus.user.js',
+              'package-lock.json',
+              'package.json',
+              'release-manifest.json',
+              'state/approved-variants.json',
+          ]
+          def git_bytes(*args: str) -> bytes:
+              return subprocess.check_output(['git', *args])
+          def git_text(*args: str) -> str:
+              return git_bytes(*args).decode('utf-8').strip()
+          def committed(path: str) -> bytes:
+              return git_bytes('show', f'{commit}:{path}')
+          parents = git_text('rev-list', '--parents', '-n', '1', commit).split()
+          if parents != [commit, base]:
+              raise SystemExit('promotion is not one exact child of the audited base')
+          changed = sorted(filter(None, git_text(
+              'diff', '--name-only', base, commit,
+          ).splitlines()))
+          if not changed or any(path not in allowed for path in changed):
+              raise SystemExit('promotion contains a non-allowlisted path')
+          if manifest['changedPaths'] != changed:
+              raise SystemExit('promotion changed-path proof disagrees')
+          expected_hashes = {
+              path: hashlib.sha256(committed(path)).hexdigest()
+              for path in allowed
+          }
+          if manifest['committedFiles'] != expected_hashes:
+              raise SystemExit('promotion committed-file hashes disagree')
+          if git_bytes('show', f'{base}:filter.txt') != committed('filter.txt'):
+              raise SystemExit('immutable filter.txt changed during DOM promotion')
+          release_manifest = json.loads(committed('release-manifest.json'))
+          if sorted(release_manifest.get('artifacts', {})) != [
+              'filter.txt', 'hotdeal-focus.user.js',
+          ]:
+              raise SystemExit('release manifest public artifact set changed')
+          for path in ('filter.txt', 'hotdeal-focus.user.js'):
+              if release_manifest['artifacts'][path].get('sha256') != expected_hashes[path]:
+                  raise SystemExit(f'release manifest hash disagrees for {path}')
+          PY
+
+      - name: Lease the audited base immediately before exposing the push secret
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ needs.audit.outputs.base_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
           authenticated="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          remote_sha="$(git ls-remote "${authenticated}" "refs/heads/${DEFAULT_BRANCH}" | cut -f1)"
+          remote_listing="$(git ls-remote --heads "${authenticated}" "refs/heads/${DEFAULT_BRANCH}")"
+          [[ "$(printf '%s\n' "${remote_listing}" | awk 'NF { count++ } END { print count + 0 }')" == "1" ]]
+          read -r remote_sha remote_ref extra <<< "${remote_listing}"
+          [[ -z "${extra:-}" ]]
+          [[ "${remote_ref}" == "refs/heads/${DEFAULT_BRANCH}" ]]
+          [[ "${remote_sha}" == "${BASE_SHA}" ]]
+
+      - name: Fast-forward push only if the remote is still the audited base
+        id: push
+        env:
+          AUTOMATION_PUSH_PRIVATE_KEY: ${{ secrets.HDF_AUTOMATION_PUSH_ED25519_PRIVATE_KEY }}
+          EXPECTED_AUTOMATION_PUSH_FINGERPRINT: ${{ vars.HDF_AUTOMATION_PUSH_KEY_FINGERPRINT }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ needs.audit.outputs.base_sha }}
+          COMMIT_SHA: ${{ needs.promote.outputs.commit_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${AUTOMATION_PUSH_PRIVATE_KEY:-}"
+          [[ "${EXPECTED_AUTOMATION_PUSH_FINGERPRINT:-}" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]
+          [[ "${GITHUB_REPOSITORY}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}$ ]]
+          git check-ref-format "refs/heads/${DEFAULT_BRANCH}" >/dev/null
+
+          key_path="${RUNNER_TEMP}/hdf-automation-push-ed25519"
+          known_hosts_path="${RUNNER_TEMP}/hdf-github-known-hosts"
+          ssh_config_path="${RUNNER_TEMP}/hdf-governed-push-ssh-config"
+          umask 077
+          printf '%s\n' "${AUTOMATION_PUSH_PRIVATE_KEY}" > "${key_path}"
+          public_key="$(ssh-keygen -y -f "${key_path}")"
+          [[ "${public_key}" == ssh-ed25519\ * ]]
+          [[ "$(printf '%s\n' "${public_key}" | awk '{print NF}')" == "2" ]]
+          actual_fingerprint="$(
+            printf '%s\n' "${public_key}" |
+              ssh-keygen -lf - -E sha256 |
+              awk 'NR == 1 { print $2 }'
+          )"
+          [[ "${actual_fingerprint}" == "${EXPECTED_AUTOMATION_PUSH_FINGERPRINT}" ]]
+
+          printf '%s\n' \
+            'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' \
+            > "${known_hosts_path}"
+          [[ "$(wc -l < "${known_hosts_path}")" == "1" ]]
+          host_fingerprint="$(
+            ssh-keygen -lf "${known_hosts_path}" -E sha256 |
+              awk 'NR == 1 { print $2 }'
+          )"
+          [[ "${host_fingerprint}" == 'SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU' ]]
+          {
+            printf '%s\n' \
+              'Host github.com' \
+              '  HostName github.com' \
+              '  User git' \
+              '  HostKeyAlgorithms ssh-ed25519' \
+              "  IdentityFile ${key_path}" \
+              '  IdentitiesOnly yes' \
+              '  IdentityAgent none' \
+              '  BatchMode yes' \
+              '  StrictHostKeyChecking yes' \
+              "  UserKnownHostsFile ${known_hosts_path}" \
+              '  GlobalKnownHostsFile /dev/null' \
+              '  PasswordAuthentication no' \
+              '  KbdInteractiveAuthentication no'
+          } > "${ssh_config_path}"
+          chmod 600 "${key_path}" "${known_hosts_path}" "${ssh_config_path}"
+          unset SSH_AUTH_SOCK
+          export GIT_SSH_COMMAND="ssh -F ${ssh_config_path}"
+
+          remote="git@github.com:${GITHUB_REPOSITORY}.git"
+          remote_listing="$(git ls-remote --heads "${remote}" "refs/heads/${DEFAULT_BRANCH}")"
+          [[ "$(printf '%s\n' "${remote_listing}" | awk 'NF { count++ } END { print count + 0 }')" == "1" ]]
+          read -r remote_sha remote_ref extra <<< "${remote_listing}"
+          [[ -z "${extra:-}" ]]
+          [[ "${remote_ref}" == "refs/heads/${DEFAULT_BRANCH}" ]]
           if [[ "${remote_sha}" != "${BASE_SHA}" ]]; then
             echo "Remote head changed; promotion and Pages deployment are cancelled." >&2
             exit 1
           fi
-          git push "${authenticated}" "${COMMIT_SHA}:refs/heads/${DEFAULT_BRANCH}"
+          [[ "$(git rev-parse "${COMMIT_SHA}^{commit}")" == "${COMMIT_SHA}" ]]
+          git merge-base --is-ancestor "${BASE_SHA}" "${COMMIT_SHA}"
+          git -c core.hooksPath=/dev/null push --porcelain "${remote}" \
+            "${COMMIT_SHA}:refs/heads/${DEFAULT_BRANCH}"
+          pushed_listing="$(git ls-remote --heads "${remote}" "refs/heads/${DEFAULT_BRANCH}")"
+          [[ "$(printf '%s\n' "${pushed_listing}" | awk 'NF { count++ } END { print count + 0 }')" == "1" ]]
+          read -r pushed_sha pushed_ref pushed_extra <<< "${pushed_listing}"
+          [[ -z "${pushed_extra:-}" ]]
+          [[ "${pushed_ref}" == "refs/heads/${DEFAULT_BRANCH}" ]]
+          [[ "${pushed_sha}" == "${COMMIT_SHA}" ]]
           echo "commit_sha=${COMMIT_SHA}" >> "${GITHUB_OUTPUT}"
 
   report-failure:
@@ -812,7 +1088,7 @@ jobs:
           exit 1
 
   report-recovery:
-    needs: [audit, promote]
+    needs: [audit, push-promotion]
     if: >-
       always() &&
       needs.audit.result == 'success' &&
@@ -846,15 +1122,21 @@ jobs:
           fi
 
   scheduler-heartbeat:
-    needs: [audit, promote, deploy-pages]
+    needs: [audit, push-promotion, deploy-pages]
     if: >-
       always() &&
       vars.ENABLE_STATE_COMMITS == 'true' &&
-      needs.promote.result != 'success'
+      needs.push-promotion.result != 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
+    concurrency:
+      group: hotdeal-focus-release-state
+      cancel-in-progress: false
+    environment:
+      name: hdf-main-automation
+      deployment: false
     permissions:
-      contents: write
+      contents: read
     steps:
       - name: Check out the current default branch without stored credentials
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -895,37 +1177,133 @@ jobs:
           fs.appendFileSync(process.env.GITHUB_OUTPUT, 'changed=true\n');
           NODE
 
-      - name: Commit only if the remote head is unchanged
+      - name: Commit the heartbeat without any push credential
+        id: heartbeat_commit
         if: steps.heartbeat.outputs.changed == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         shell: bash
         run: |
+          set -euo pipefail
           base_sha="$(git rev-parse HEAD)"
           git config user.name "hotdeal-focus-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- state/scheduler-heartbeat.json
-          git commit -m "chore(monitor): record scheduler attempt / 스케줄 실행 기록 / 定期監査の記録 / 记录定时审计"
+          git -c core.hooksPath=/dev/null commit \
+            -m "chore(monitor): record scheduler attempt / 스케줄러 시도 기록 / スケジューラー試行を記録 / 记录调度器尝试"
+          commit_sha="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "${base_sha}" "${commit_sha}"
+          echo "base_sha=${base_sha}" >> "${GITHUB_OUTPUT}"
+          echo "commit_sha=${commit_sha}" >> "${GITHUB_OUTPUT}"
+
+      - name: Lease the heartbeat base immediately before exposing the push secret
+        if: steps.heartbeat.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ steps.heartbeat_commit.outputs.base_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
           authenticated="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          remote_sha="$(git ls-remote "${authenticated}" "refs/heads/${DEFAULT_BRANCH}" | cut -f1)"
-          if [[ "${remote_sha}" != "${base_sha}" ]]; then
+          remote_listing="$(git ls-remote --heads "${authenticated}" "refs/heads/${DEFAULT_BRANCH}")"
+          [[ "$(printf '%s\n' "${remote_listing}" | awk 'NF { count++ } END { print count + 0 }')" == "1" ]]
+          read -r remote_sha remote_ref extra <<< "${remote_listing}"
+          [[ -z "${extra:-}" ]]
+          [[ "${remote_ref}" == "refs/heads/${DEFAULT_BRANCH}" ]]
+          [[ "${remote_sha}" == "${BASE_SHA}" ]]
+
+      - name: Fast-forward the heartbeat only if the remote head is unchanged
+        if: steps.heartbeat.outputs.changed == 'true'
+        env:
+          AUTOMATION_PUSH_PRIVATE_KEY: ${{ secrets.HDF_AUTOMATION_PUSH_ED25519_PRIVATE_KEY }}
+          EXPECTED_AUTOMATION_PUSH_FINGERPRINT: ${{ vars.HDF_AUTOMATION_PUSH_KEY_FINGERPRINT }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          BASE_SHA: ${{ steps.heartbeat_commit.outputs.base_sha }}
+          COMMIT_SHA: ${{ steps.heartbeat_commit.outputs.commit_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "${AUTOMATION_PUSH_PRIVATE_KEY:-}"
+          [[ "${EXPECTED_AUTOMATION_PUSH_FINGERPRINT:-}" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]]
+          [[ "${GITHUB_REPOSITORY}" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}$ ]]
+          git check-ref-format "refs/heads/${DEFAULT_BRANCH}" >/dev/null
+
+          key_path="${RUNNER_TEMP}/hdf-automation-push-ed25519"
+          known_hosts_path="${RUNNER_TEMP}/hdf-github-known-hosts"
+          ssh_config_path="${RUNNER_TEMP}/hdf-governed-push-ssh-config"
+          umask 077
+          printf '%s\n' "${AUTOMATION_PUSH_PRIVATE_KEY}" > "${key_path}"
+          public_key="$(ssh-keygen -y -f "${key_path}")"
+          [[ "${public_key}" == ssh-ed25519\ * ]]
+          [[ "$(printf '%s\n' "${public_key}" | awk '{print NF}')" == "2" ]]
+          actual_fingerprint="$(
+            printf '%s\n' "${public_key}" |
+              ssh-keygen -lf - -E sha256 |
+              awk 'NR == 1 { print $2 }'
+          )"
+          [[ "${actual_fingerprint}" == "${EXPECTED_AUTOMATION_PUSH_FINGERPRINT}" ]]
+
+          printf '%s\n' \
+            'github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl' \
+            > "${known_hosts_path}"
+          [[ "$(wc -l < "${known_hosts_path}")" == "1" ]]
+          host_fingerprint="$(
+            ssh-keygen -lf "${known_hosts_path}" -E sha256 |
+              awk 'NR == 1 { print $2 }'
+          )"
+          [[ "${host_fingerprint}" == 'SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU' ]]
+          {
+            printf '%s\n' \
+              'Host github.com' \
+              '  HostName github.com' \
+              '  User git' \
+              '  HostKeyAlgorithms ssh-ed25519' \
+              "  IdentityFile ${key_path}" \
+              '  IdentitiesOnly yes' \
+              '  IdentityAgent none' \
+              '  BatchMode yes' \
+              '  StrictHostKeyChecking yes' \
+              "  UserKnownHostsFile ${known_hosts_path}" \
+              '  GlobalKnownHostsFile /dev/null' \
+              '  PasswordAuthentication no' \
+              '  KbdInteractiveAuthentication no'
+          } > "${ssh_config_path}"
+          chmod 600 "${key_path}" "${known_hosts_path}" "${ssh_config_path}"
+          unset SSH_AUTH_SOCK
+          export GIT_SSH_COMMAND="ssh -F ${ssh_config_path}"
+
+          [[ "$(git rev-parse "${BASE_SHA}^{commit}")" == "${BASE_SHA}" ]]
+          [[ "$(git rev-parse "${COMMIT_SHA}^{commit}")" == "${COMMIT_SHA}" ]]
+          git merge-base --is-ancestor "${BASE_SHA}" "${COMMIT_SHA}"
+          remote="git@github.com:${GITHUB_REPOSITORY}.git"
+          remote_listing="$(git ls-remote --heads "${remote}" "refs/heads/${DEFAULT_BRANCH}")"
+          [[ "$(printf '%s\n' "${remote_listing}" | awk 'NF { count++ } END { print count + 0 }')" == "1" ]]
+          read -r remote_sha remote_ref extra <<< "${remote_listing}"
+          [[ -z "${extra:-}" ]]
+          [[ "${remote_ref}" == "refs/heads/${DEFAULT_BRANCH}" ]]
+          if [[ "${remote_sha}" != "${BASE_SHA}" ]]; then
             echo "Heartbeat lost an optimistic race; leaving the remote unchanged."
             exit 0
           fi
-          git push "${authenticated}" "HEAD:refs/heads/${DEFAULT_BRANCH}"
+          git -c core.hooksPath=/dev/null push --porcelain "${remote}" \
+            "${COMMIT_SHA}:refs/heads/${DEFAULT_BRANCH}"
+          pushed_listing="$(git ls-remote --heads "${remote}" "refs/heads/${DEFAULT_BRANCH}")"
+          [[ "$(printf '%s\n' "${pushed_listing}" | awk 'NF { count++ } END { print count + 0 }')" == "1" ]]
+          read -r pushed_sha pushed_ref pushed_extra <<< "${pushed_listing}"
+          [[ -z "${pushed_extra:-}" ]]
+          [[ "${pushed_ref}" == "refs/heads/${DEFAULT_BRANCH}" ]]
+          [[ "${pushed_sha}" == "${COMMIT_SHA}" ]]
 
   deploy-pages:
-    needs: [audit, promote]
+    needs: [audit, push-promotion]
     if: >-
       always() &&
       vars.ENABLE_PAGES_PUBLISH == 'true' &&
-      (needs.promote.result == 'success' ||
+      (needs.push-promotion.result == 'success' ||
        (needs.audit.result == 'success' && needs.audit.outputs.failed == 'false'))
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     concurrency:
-      group: hotdeal-focus-pages-deployment
+      group: hotdeal-focus-release-state
       cancel-in-progress: false
     environment:
       name: github-pages
@@ -934,43 +1312,47 @@ jobs:
       contents: read
       pages: write
       id-token: write
+    outputs:
+      head_drift: ${{ steps.early_head.outputs.head_drift || steps.predeploy_head.outputs.head_drift || steps.postdeploy_head.outputs.head_drift }}
     steps:
       - name: Check out the exact healthy audited release
-        if: needs.promote.result != 'success'
+        if: needs.push-promotion.result != 'success'
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.audit.outputs.base_sha }}
           persist-credentials: false
 
       - name: Check out the exact promoted source
-        if: needs.promote.result == 'success'
+        if: needs.push-promotion.result == 'success'
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
-          ref: ${{ needs.promote.outputs.commit_sha }}
+          ref: ${{ needs.push-promotion.outputs.commit_sha }}
           persist-credentials: false
 
       - name: Download the exact promoted release
-        if: needs.promote.result == 'success'
+        if: needs.push-promotion.result == 'success'
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: promotion-${{ github.run_id }}
           path: .promotion-package
 
       - name: Refuse to publish a release older than the current branch head
+        id: early_head
         env:
           GH_TOKEN: ${{ github.token }}
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           AUDITED_SHA: ${{ needs.audit.outputs.base_sha }}
-          PROMOTED_SHA: ${{ needs.promote.outputs.commit_sha }}
+          PROMOTED_SHA: ${{ needs.push-promotion.outputs.commit_sha }}
         shell: bash
         run: |
           expected_sha="${AUDITED_SHA}"
-          if [[ "${{ needs.promote.result }}" == "success" ]]; then
+          if [[ "${{ needs.push-promotion.result }}" == "success" ]]; then
             expected_sha="${PROMOTED_SHA}"
           fi
           authenticated="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
           remote_sha="$(git ls-remote "${authenticated}" "refs/heads/${DEFAULT_BRANCH}" | cut -f1)"
           if [[ -z "${expected_sha}" || "${remote_sha}" != "${expected_sha}" ]]; then
+            echo "head_drift=true" >> "${GITHUB_OUTPUT}"
             echo "The branch changed after verification; Pages publication is deferred." >&2
             exit 1
           fi
@@ -987,7 +1369,7 @@ jobs:
       - name: Stage only public manifest-matched files
         shell: bash
         run: |
-          if [[ "${{ needs.promote.result }}" == "success" ]]; then
+          if [[ "${{ needs.push-promotion.result }}" == "success" ]]; then
             release=.promotion-package/release
           else
             release=.
@@ -1036,38 +1418,139 @@ jobs:
         with:
           path: .pages
 
+      - name: Recheck the release head immediately before Pages deployment
+        id: predeploy_head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          AUDITED_SHA: ${{ needs.audit.outputs.base_sha }}
+          PROMOTED_SHA: ${{ needs.push-promotion.outputs.commit_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_sha="${AUDITED_SHA}"
+          if [[ "${{ needs.push-promotion.result }}" == "success" ]]; then
+            expected_sha="${PROMOTED_SHA}"
+          fi
+          authenticated="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          remote_listing="$(git ls-remote --heads "${authenticated}" "refs/heads/${DEFAULT_BRANCH}")"
+          [[ "$(printf '%s\n' "${remote_listing}" | awk 'NF { count++ } END { print count + 0 }')" == "1" ]]
+          read -r remote_sha remote_ref extra <<< "${remote_listing}"
+          if [[ -z "${expected_sha}" || -n "${extra:-}" || "${remote_ref}" != "refs/heads/${DEFAULT_BRANCH}" || "${remote_sha}" != "${expected_sha}" ]]; then
+            echo "head_drift=true" >> "${GITHUB_OUTPUT}"
+            echo "The release head changed immediately before Pages deployment." >&2
+            exit 1
+          fi
+
       - name: Deploy the exact verified bytes
         id: deployment
         uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
 
-  continue-drift-chain:
-    needs: [audit, promote]
+      - name: Recheck the release head immediately after Pages deployment
+        id: postdeploy_head
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          AUDITED_SHA: ${{ needs.audit.outputs.base_sha }}
+          PROMOTED_SHA: ${{ needs.push-promotion.outputs.commit_sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_sha="${AUDITED_SHA}"
+          if [[ "${{ needs.push-promotion.result }}" == "success" ]]; then
+            expected_sha="${PROMOTED_SHA}"
+          fi
+          authenticated="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          remote_listing="$(git ls-remote --heads "${authenticated}" "refs/heads/${DEFAULT_BRANCH}")"
+          [[ "$(printf '%s\n' "${remote_listing}" | awk 'NF { count++ } END { print count + 0 }')" == "1" ]]
+          read -r remote_sha remote_ref extra <<< "${remote_listing}"
+          if [[ -z "${expected_sha}" || -n "${extra:-}" || "${remote_ref}" != "refs/heads/${DEFAULT_BRANCH}" || "${remote_sha}" != "${expected_sha}" ]]; then
+            echo "head_drift=true" >> "${GITHUB_OUTPUT}"
+            echo "The release head changed during Pages deployment." >&2
+            exit 1
+          fi
+
+  recover-pages-head-drift:
+    needs: [audit, push-promotion, deploy-pages]
     if: >-
       always() &&
-      needs.audit.outputs.failed == 'true' &&
-      needs.promote.result == 'success'
+      needs.deploy-pages.result == 'failure' &&
+      needs.deploy-pages.outputs.head_drift == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       actions: write
       contents: read
     steps:
-      - name: Dispatch one serialized follow-up audit from the updated default branch
+      - name: Check out the audited CLI without stored credentials
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.audit.outputs.base_sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Dispatch and observe a nonce-bound Verify recovery run
         env:
           GH_TOKEN: ${{ github.token }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         shell: bash
         run: |
-          gh workflow run watch-dom.yml \
+          set -euo pipefail
+          python scripts/hotdeal_focus_cli.py cloud dispatch \
             --repo "${GITHUB_REPOSITORY}" \
-            --ref "${DEFAULT_BRANCH}"
+            --workflow verify.yml \
+            --apply \
+            --json > "${RUNNER_TEMP}/pages-head-recovery.json"
+          jq -c '{ok,status,sourceSha,workflow,ref,dispatchNonce,run}' \
+            "${RUNNER_TEMP}/pages-head-recovery.json"
+
+  continue-drift-chain:
+    needs: [audit, push-promotion]
+    if: >-
+      always() &&
+      needs.audit.outputs.failed == 'true' &&
+      needs.push-promotion.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      actions: write
+      contents: read
+    steps:
+      - name: Check out the audited CLI without stored credentials
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.audit.outputs.base_sha }}
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.12"
+
+      - name: Dispatch and observe one nonce-bound follow-up audit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/hotdeal_focus_cli.py cloud dispatch \
+            --repo "${GITHUB_REPOSITORY}" \
+            --workflow watch-dom.yml \
+            --apply \
+            --json > "${RUNNER_TEMP}/watch-follow-up.json"
+          jq -c '{ok,status,sourceSha,workflow,ref,dispatchNonce,run}' \
+            "${RUNNER_TEMP}/watch-follow-up.json"
 
   report-pages-failure:
-    needs: [audit, promote, deploy-pages]
+    needs: [audit, push-promotion, deploy-pages]
     if: >-
       always() &&
       vars.ENABLE_PAGES_PUBLISH == 'true' &&
-      needs.deploy-pages.result == 'failure'
+      needs.deploy-pages.result == 'failure' &&
+      needs.deploy-pages.outputs.head_drift != 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

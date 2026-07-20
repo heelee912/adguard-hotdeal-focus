@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "protocolVersion": 1,
-  "gateArtifactVersion": "1.0.0",
-  "filterSubscriptionUrl": "https://github.com/heelee912/adguard-hotdeal-focus/releases/download/gate-v1.0.0/filter.txt",
+  "protocolVersion": 2,
+  "gateArtifactVersion": "2.0.2",
+  "filterSubscriptionUrl": "https://github.com/heelee912/adguard-hotdeal-focus/releases/download/gate-v2.0.2/filter.txt",
   "artifact": {
     "path": "filter.txt",
-    "bytes": 11707,
-    "sha256": "9ef7301255056e8ca9fe2b1e91bd29f7f8edea5f312ab000f465638a8d4f065a",
-    "installedRulesSha256": "561a2ba553589c67d7873b20a532bb446bae6f8bef011287c353bf26133cb9a7"
+    "bytes": 70270,
+    "sha256": "778c88297473f1aa94564e24780cdcc763164e6de9a7c6ab5ffd42df0e18ae38",
+    "installedRulesSha256": "a7619be2bebf35f6f502366627697c19690c81adb6833c7cdaf7440066b593bb"
   }
 }

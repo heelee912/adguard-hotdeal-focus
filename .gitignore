@@ -30,6 +30,7 @@ outputs/candidate-evidence/
 .audit-failure-screenshots/
 .release-build-*/
 .promotion-package/
+.promotion-push/
 candidate-draft/
 candidate-release/
 playwright-report/

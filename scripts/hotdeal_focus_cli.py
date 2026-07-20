@@ -9,6 +9,8 @@ JSON document on stdout and never have to scrape human-oriented command output.
 from __future__ import annotations
 
 import argparse
+import base64
+import fnmatch
 import hashlib
 import json
 import os
@@ -35,24 +37,87 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PAGES_MANIFEST = (
     "https://heelee912.github.io/adguard-hotdeal-focus/release-manifest.json"
 )
-GATE_LOCK_PROTOCOL_VERSION = 1
-GATE_LOCK_ARTIFACT_VERSION = "1.0.0"
+GATE_LOCK_PROTOCOL_VERSION = 2
+GATE_LOCK_ARTIFACT_VERSION = "2.0.2"
 GATE_LOCK_SUBSCRIPTION_URL = (
     "https://github.com/heelee912/adguard-hotdeal-focus/releases/download/"
-    "gate-v1.0.0/filter.txt"
+    "gate-v2.0.2/filter.txt"
 )
-GATE_LOCK_BYTES = 11707
-GATE_LOCK_SHA256 = "9ef7301255056e8ca9fe2b1e91bd29f7f8edea5f312ab000f465638a8d4f065a"
+GATE_LOCK_BYTES = 70270
+GATE_LOCK_SHA256 = "778c88297473f1aa94564e24780cdcc763164e6de9a7c6ab5ffd42df0e18ae38"
 GATE_LOCK_INSTALLED_RULES_SHA256 = (
-    "561a2ba553589c67d7873b20a532bb446bae6f8bef011287c353bf26133cb9a7"
+    "a7619be2bebf35f6f502366627697c19690c81adb6833c7cdaf7440066b593bb"
 )
-GATE_LOCK_RULE_COUNT = 14
-GATE_RELEASE_TITLE = "Hotdeal Focus Gate v1 / 핫딜 포커스 게이트 v1"
+GATE_LOCK_RULE_COUNT = 91
+READER_GATE_NAME = "AdGuard Hotdeal Focus Reader Gate"
+MARKER_GATE_NAME = "AdGuard Hotdeal Focus Marker Gate"
+READER_GATE_PROTOCOL_VERSION = 2
+READER_GATE_GRANT = "GM_addElement"
+READER_GATE_REQUIRED_HOSTS = (
+    "algumon.com", "clien.net", "ppomppu.co.kr", "ruliweb.com",
+    "quasarzone.com", "eomisae.co.kr", "zod.kr", "arca.live",
+)
+READER_GATE_REQUIRED_ATTRIBUTES = (
+    "data-hotdeal-focus-lock", "data-hotdeal-focus-ready",
+    "data-hotdeal-focus-keep", "data-hotdeal-focus-protocol",
+    "data-hotdeal-focus-shell", "data-hotdeal-focus-deep",
+    "data-hotdeal-focus-role", "data-hotdeal-focus-state",
+    "data-hotdeal-focus-status",
+)
+READER_GATE_REQUIRED_CLASSES = (
+    "hdf-v2-lock", "hdf-v2-ready", "hdf-v2-keep", "hdf-v2-shell",
+    "hdf-v2-deep", "hdf-v2-role-",
+)
+CSP_PROBE_SOURCE_SHA256 = (
+    "3797355e3257c4f2ad67cca61af1cb182b377c9b91a47b76c48cb559547d842a"
+)
+CSP_PROBE_ENDPOINT = (
+    "https://testcases.agrd.dev/userscripts-csp/header-csp-default-src-none"
+)
+CSP_PROBE_PARSED_META_CONTRACT = {
+    "match_count": 1,
+    "match_exact": True,
+    "include_count": 0,
+    "exclude_count": 0,
+    "grant_count": 1,
+    "grant_exact": True,
+    "connect_count": 0,
+    "require_count": 0,
+    "resource_count": 0,
+    "noframes": True,
+    "run_at_document_start": True,
+    "namespace_exact": True,
+    "download_url_absent": False,
+    "download_url_is_file": True,
+    "download_url_is_https": False,
+    "update_url_absent": True,
+    "unsafe_csp_required": True,
+}
+CSP_PROBE_BROWSER_KEYS = frozenset({
+    "schema_version", "command", "ok", "origin_status_exact",
+    "origin_content_type_exact", "origin_csp_exact", "origin_html_semantics_exact",
+    "endpoint_exact", "response_status_ok", "response_content_type_exact",
+    "page_identity_exact", "effective_csp_present",
+    "effective_csp_directive_set_exact", "effective_csp_default_rewrite_exact",
+    "effective_csp_connect_rewrite_exact", "effective_csp_script_rewrite_exact",
+    "effective_csp_style_rewrite_exact", "effective_csp_restrictions_preserved",
+    "adguard_content_script_request_exact", "adguard_user_script_request_exact",
+    "probe_selected_exact", "probe_state_complete", "raw_style_element_present",
+    "raw_style_applied", "raw_engine_attributes_absent", "gm_style_count_exact",
+    "gm_style_applied", "engine_nonce_present", "engine_data_source_present",
+    "userscript_marker_consistent", "computed_custom_property",
+})
+GATE_RELEASE_TITLE = "Hotdeal Focus Gate v2 / 핫딜 포커스 게이트 v2"
 GATE_RELEASE_NOTES = (
-    "Stable protocol-v1 marker gate; semantic DOM updates are delivered by the "
-    "userscript. / 프로토콜 v1 고정 게이트이며 DOM 의미 업데이트는 사용자 스크립트로 "
-    "배포됩니다. / プロトコル v1 固定ゲート。DOM 更新はユーザースクリプトで配信します。"
-    " / 协议 v1 固定门；DOM 更新由用户脚本发布。"
+    "Immutable protocol-v2 class-and-attribute fail-closed gate. It is the distinct "
+    "successor to gate-v1.0.0; v1 remains unchanged as rollback evidence and is never "
+    "overwritten. Protocol-v1 compatibility and fallback are not accepted. / "
+    "프로토콜 v2 클래스·속성 fail-closed 불변 게이트입니다. gate-v1.0.0은 "
+    "롤백 증거로 변경 없이 보존되며 절대 덮어쓰지 않습니다. v1 호환과 fallback은 "
+    "허용하지 않습니다. / プロトコル v2 のクラス・属性 fail-closed 不変ゲートです。"
+    "gate-v1.0.0 はロールバック証跡として変更せず保存し、上書きしません。v1 互換性と "
+    "fallback は許容しません。 / 协议 v2 类与属性 fail-closed 不变门。"
+    "gate-v1.0.0 仅作为回滚证据原样保留，永不覆盖；不接受 v1 兼容或 fallback。"
 )
 GATE_RELEASE_VIEW_FIELDS = (
     "databaseId,tagName,name,body,isDraft,isPrerelease,isImmutable,"
@@ -75,6 +140,20 @@ WORKFLOW_RUN_TITLE_PREFIX = {
     "watch-dom.yml": "hotdeal-focus-watch-dom-",
     "publish-gate.yml": "hotdeal-focus-publish-gate-",
 }
+AUTOMATION_PUSH_SECRET_NAME = "HDF_AUTOMATION_PUSH_ED25519_PRIVATE_KEY"
+AUTOMATION_PUSH_FINGERPRINT_VARIABLE = "HDF_AUTOMATION_PUSH_KEY_FINGERPRINT"
+AUTOMATION_PUSH_DEPLOY_KEY_TITLE = "hotdeal-focus-automation-push-v1"
+RELEASE_PUBLISHER_ENVIRONMENT = "hdf-release-publisher"
+MAIN_AUTOMATION_ENVIRONMENT = "hdf-main-automation"
+PAGES_ENVIRONMENT = "github-pages"
+BRANCH_GOVERNANCE_PR_RULESET_NAME = "Hotdeal Focus / PR and verified CI"
+BRANCH_GOVERNANCE_HISTORY_RULESET_NAME = (
+    "Hotdeal Focus / immutable fast-forward history"
+)
+GATE_TAG_RULESET_NAME = "Hotdeal Focus / immutable gate-v2 tag"
+GITHUB_ACTIONS_INTEGRATION_ID = 15368
+GITHUB_VERIFY_STATUS_CONTEXT = "verify"
+SSH_SHA256_FINGERPRINT_RE = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 GIT_SHA_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 REPO_RE = re.compile(
@@ -381,6 +460,47 @@ def _capture_command(
     return capture
 
 
+def _capture_command_with_private_stdin_file(
+    argv: Sequence[str],
+    private_input_path: Path,
+    *,
+    label: str,
+    timeout_seconds: int = COMMAND_TIMEOUT_SECONDS,
+) -> ExecutionCapture:
+    """Run one fixed command without ever copying or reporting its private stdin."""
+    if not argv or argv[0] != "gh":
+        raise UsageFailure("private-stdin runner accepts only the GitHub CLI")
+    if not _command_exists("gh"):
+        raise PrerequisiteFailure("GitHub CLI is unavailable")
+    _log(f"running allowlisted step: {label}")
+    try:
+        with private_input_path.open("rb") as private_input:
+            completed = subprocess.run(
+                list(argv),
+                cwd=str(PROJECT_ROOT),
+                check=False,
+                stdin=private_input,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                shell=False,
+                timeout=timeout_seconds,
+            )
+    except subprocess.TimeoutExpired as error:
+        raise TransientFailure(f"allowlisted step timed out: {label}") from error
+    except OSError as error:
+        raise PrerequisiteFailure(f"could not execute prerequisite for {label}") from error
+    capture = ExecutionCapture(
+        label=label,
+        argv=tuple(argv),
+        returncode=int(completed.returncode),
+        stdout=b"",
+        stderr=b"",
+    )
+    if capture.returncode:
+        _log(f"{label} failed without exposing private command output")
+    return capture
+
+
 def _download_gh_archive(argv: Sequence[str], output_path: Path, *, label: str) -> ExecutionCapture:
     """Stream one fixed gh API response into a create-new file without a shell."""
     if not argv or argv[0] != "gh":
@@ -608,6 +728,102 @@ def _gate_subscription_coordinates(
     return parts[1], parts[2], expected_tag
 
 
+def _decode_release_text(content: bytes, label: str) -> str:
+    try:
+        text = content.decode("utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise IntegrityFailure(f"{label} is not valid UTF-8") from error
+    if "\x00" in text:
+        raise IntegrityFailure(f"{label} contains a NUL character")
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _reader_gate_v2_contract(script_bytes: bytes) -> int:
+    text = _decode_release_text(script_bytes, "hotdeal-focus.user.js")
+    start_marker = "// ==UserScript=="
+    end_marker = "// ==/UserScript=="
+    if (
+        not text.startswith(start_marker)
+        or text.count(start_marker) != 1
+        or text.count(end_marker) != 1
+    ):
+        raise IntegrityFailure("Reader Gate userscript metadata block is not exact")
+    metadata, code = text.split(end_marker, 1)
+    metadata += end_marker
+    grants = re.findall(r"(?m)^//\s+@grant\s+(\S+)\s*$", metadata)
+    run_at = re.findall(r"(?m)^//\s+@run-at\s+(\S+)\s*$", metadata)
+    noframes = re.findall(r"(?m)^//\s+@noframes\s*$", metadata)
+    names = re.findall(r"(?m)^//\s+@name\s+(.+?)\s*$", metadata)
+    if grants != [READER_GATE_GRANT]:
+        raise IntegrityFailure(
+            "Reader Gate v2 must declare exactly one @grant GM_addElement"
+        )
+    if run_at != ["document-start"] or len(noframes) != 1:
+        raise IntegrityFailure(
+            "Reader Gate v2 must declare one document-start and one @noframes"
+        )
+    if names != [READER_GATE_NAME]:
+        raise IntegrityFailure("Reader Gate userscript name is not exact")
+    for host in READER_GATE_REQUIRED_HOSTS:
+        if host not in metadata:
+            raise IntegrityFailure(f"Reader Gate userscript scope is missing: {host}")
+
+    protocol_matches = re.findall(
+        r'(?m)^\s*const\s+PROTOCOL_VERSION\s*=\s*"([0-9]+)";\s*$', code
+    )
+    if protocol_matches != [str(READER_GATE_PROTOCOL_VERSION)]:
+        raise IntegrityFailure("Reader Gate userscript protocol is not exactly 2")
+    required_tokens = (
+        "protocolVersion: Number(PROTOCOL_VERSION)",
+        "setAttribute(ATTR.protocol, PROTOCOL_VERSION)",
+        "data-hotdeal-focus-runtime-style",
+        'style[data-hotdeal-focus-runtime-style="${PROTOCOL_VERSION}"]',
+        "GM_addElement(",
+        *READER_GATE_REQUIRED_ATTRIBUTES,
+        *READER_GATE_REQUIRED_CLASSES,
+    )
+    for token in required_tokens:
+        if token not in code:
+            raise IntegrityFailure(
+                f"Reader Gate v2 is missing diagnostics/runtime marker: {token}"
+            )
+    if code.count("protocolVersion: Number(PROTOCOL_VERSION)") != 1:
+        raise IntegrityFailure("Reader Gate v2 diagnostics protocol marker is not unique")
+    return READER_GATE_PROTOCOL_VERSION
+
+
+def _marker_gate_v2_contract(filter_bytes: bytes) -> int:
+    text = _decode_release_text(filter_bytes, "filter.txt")
+    title_matches = re.findall(r"(?m)^!\s*Title:\s*(.+?)\s*$", text)
+    version_matches = re.findall(r"(?m)^!\s*Version:\s*(\S+)\s*$", text)
+    protocol_matches = re.findall(
+        r"(?m)^!\s*Hotdeal-Focus-Protocol:\s*([0-9]+)\s*$", text
+    )
+    if (
+        title_matches != [MARKER_GATE_NAME]
+        or version_matches != [GATE_LOCK_ARTIFACT_VERSION]
+        or protocol_matches != [str(GATE_LOCK_PROTOCOL_VERSION)]
+    ):
+        raise IntegrityFailure("Marker Gate filter metadata is not exactly v2")
+    installed_rules = "\n".join(
+        line for line in text.split("\n")
+        if line.strip() and not line.lstrip().startswith("!")
+    )
+    for token in (
+        "hdf-v2-lock", "hdf-v2-ready", "hdf-v2-keep", "hdf-v2-shell",
+        "hdf-v2-deep", "hdf-v2-role-", 'data-hotdeal-focus-ready="1"',
+        "data-hotdeal-focus-keep", 'data-hotdeal-focus-protocol="2"',
+        "data-hotdeal-focus-shell", "data-hotdeal-focus-deep",
+        'data-hotdeal-focus-role="', 'data-hotdeal-focus-state="ready"',
+        'data-hotdeal-focus-status="ready"',
+    ):
+        if token not in installed_rules:
+            raise IntegrityFailure(f"Marker Gate v2 is missing marker: {token}")
+    if 'data-hotdeal-focus-protocol="1"' in installed_rules:
+        raise IntegrityFailure("Marker Gate v2 contains a protocol-1 marker")
+    return GATE_LOCK_PROTOCOL_VERSION
+
+
 def _manifest_contract(manifest_bytes: bytes) -> tuple[dict[str, Any], dict[str, Any]]:
     value = _decode_json(manifest_bytes, "release-manifest.json")
     if not isinstance(value, dict):
@@ -647,8 +863,14 @@ def _manifest_contract(manifest_bytes: bytes) -> tuple[dict[str, Any], dict[str,
         raise IntegrityFailure("release manifest has no releaseVersion")
     if not isinstance(gate_version, str) or not SEMANTIC_VERSION_RE.fullmatch(gate_version):
         raise IntegrityFailure("release manifest has no gateArtifactVersion")
-    if not isinstance(value.get("protocolVersion"), int) or value["protocolVersion"] < 1:
-        raise IntegrityFailure("release manifest has no positive protocolVersion")
+    if type(value.get("protocolVersion")) is not int or (
+        value["protocolVersion"] != READER_GATE_PROTOCOL_VERSION
+    ):
+        raise IntegrityFailure("release manifest protocolVersion is not exactly 2")
+    if gate_version != GATE_LOCK_ARTIFACT_VERSION:
+        raise IntegrityFailure("release manifest gateArtifactVersion is not exactly 2.0.2")
+    if value.get("filterSubscriptionUrl") != GATE_LOCK_SUBSCRIPTION_URL:
+        raise IntegrityFailure("release manifest does not select the immutable v2 gate")
     _gate_subscription_coordinates(value.get("filterSubscriptionUrl"), gate_version)
     if filter_entry.get("version") != gate_version:
         raise IntegrityFailure("filter artifact version differs from gateArtifactVersion")
@@ -666,6 +888,13 @@ def _verify_release_files(
         raise IntegrityFailure("provided release artifact set is not exact")
     filter_bytes = artifact_bytes["filter.txt"]
     script_bytes = artifact_bytes["hotdeal-focus.user.js"]
+    filter_protocol = _marker_gate_v2_contract(filter_bytes)
+    script_protocol = _reader_gate_v2_contract(script_bytes)
+    if (
+        filter_protocol != manifest["protocolVersion"]
+        or script_protocol != manifest["protocolVersion"]
+    ):
+        raise IntegrityFailure("release artifacts form a cross-protocol combination")
     filter_version_match = FILTER_HEADER_VERSION_RE.search(filter_bytes)
     script_version_match = USERSCRIPT_HEADER_VERSION_RE.search(script_bytes)
     if (
@@ -729,7 +958,9 @@ def _validate_locked_gate_bytes(gate_bytes: bytes) -> None:
         if line.strip() and not line.lstrip().startswith("!")
     )
     if installed_rule_count != GATE_LOCK_RULE_COUNT:
-        raise IntegrityFailure("immutable gate does not contain exactly fourteen rules")
+        raise IntegrityFailure(
+            f"immutable gate does not contain exactly {GATE_LOCK_RULE_COUNT} rules"
+        )
 
 
 def _validate_gate_artifact_lock(
@@ -807,8 +1038,10 @@ FAST_STEPS: tuple[tuple[str, tuple[str, ...], int], ...] = (
     ),
 )
 RELEASE_STEPS: tuple[tuple[str, tuple[str, ...], int], ...] = FAST_STEPS + (
+    ("network", ("npm", "run", "test:network"), COMMAND_TIMEOUT_SECONDS),
     ("build-check", ("python", "scripts/build_release.py", "--check"), COMMAND_TIMEOUT_SECONDS),
     ("integrity", ("node", "scripts/audit_pages.mjs", "--integrity-only"), COMMAND_TIMEOUT_SECONDS),
+    ("oracle", ("npm", "run", "test:oracle"), COMMAND_TIMEOUT_SECONDS),
     (
         "tamper",
         ("node", "scripts/audit_pages.mjs", "--tamper-fixture-only", "--timeout-ms", "8000"),
@@ -1034,6 +1267,35 @@ def _gh_json(argv: Sequence[str], label: str, *, prerequisite: bool = False) -> 
     return _decode_json(capture.stdout, label)
 
 
+def _gh_included_json(
+    endpoint: str,
+    label: str,
+    *,
+    allow_missing: bool = False,
+) -> tuple[int, Any | None]:
+    capture = _capture_command(
+        (
+            "gh", "api", "--include", "-H", GITHUB_JSON_ACCEPT_HEADER,
+            "-H", GITHUB_API_VERSION_HEADER, endpoint,
+        ),
+        label=label,
+        timeout_seconds=60,
+    )
+    normalized = capture.stdout.replace(b"\r\n", b"\n")
+    header, separator, body = normalized.partition(b"\n\n")
+    status_match = re.match(rb"^HTTP/\S+\s+([0-9]{3})\b", header)
+    if not separator or status_match is None:
+        raise IntegrityFailure(f"{label} response has no exact HTTP status envelope")
+    status_code = int(status_match.group(1))
+    if status_code == 404 and allow_missing:
+        if capture.returncode == 0:
+            raise IntegrityFailure(f"{label} returned a contradictory missing state")
+        return status_code, None
+    if capture.returncode or not 200 <= status_code < 300:
+        raise TransientFailure(f"{label} could not be read")
+    return status_code, _decode_json(body, label)
+
+
 def _cloud_preflight(repo: str, workflow: str) -> dict[str, Any]:
     if workflow not in WORKFLOW_FILES:
         raise UsageFailure("workflow is outside the fixed allowlist")
@@ -1073,6 +1335,254 @@ def _cloud_preflight(repo: str, workflow: str) -> dict[str, Any]:
     if workflow_capture.returncode:
         raise PrerequisiteFailure("allowlisted workflow is unavailable in the repository")
     return {"repo": repo, "workflow": workflow, "defaultBranch": branch}
+
+
+def _require_cloud_head_lease(
+    repo: str,
+    default_branch: str,
+    source_sha: str,
+    phase: str,
+) -> dict[str, Any]:
+    branch = urllib.parse.quote(default_branch, safe="")
+    value = _gh_json(
+        (
+            "gh", "api", "-H", GITHUB_JSON_ACCEPT_HEADER, "-H",
+            GITHUB_API_VERSION_HEADER, f"repos/{repo}/commits/{branch}",
+        ),
+        f"cloud-source-head-{phase}",
+        prerequisite=True,
+    )
+    observed = value.get("sha") if isinstance(value, dict) else None
+    if not isinstance(observed, str) or not GIT_SHA_RE.fullmatch(observed.lower()):
+        raise IntegrityFailure("GitHub default branch head SHA is malformed")
+    record = {
+        "phase": phase,
+        "branch": default_branch,
+        "expectedSha": source_sha,
+        "observedSha": observed.lower(),
+        "exact": observed.lower() == source_sha,
+    }
+    if record["exact"] is not True:
+        raise IntegrityFailure(f"default branch changed during cloud apply: {phase}")
+    return record
+
+
+def _workflow_blob_authority(
+    repo: str, workflow: str, source_sha: str
+) -> dict[str, Any]:
+    path = f".github/workflows/{workflow}"
+    local = _capture_command(
+        ("git", "show", f"{source_sha}:{path}"),
+        label=f"local-workflow-blob-{workflow}",
+        timeout_seconds=30,
+    )
+    if local.returncode or not local.stdout or len(local.stdout) > 1_048_576:
+        raise IntegrityFailure(f"local workflow blob is unavailable: {workflow}")
+    encoded_path = urllib.parse.quote(path, safe="/")
+    encoded_ref = urllib.parse.quote(source_sha, safe="")
+    value = _gh_json(
+        (
+            "gh", "api", "-H", GITHUB_JSON_ACCEPT_HEADER, "-H",
+            GITHUB_API_VERSION_HEADER,
+            f"repos/{repo}/contents/{encoded_path}?ref={encoded_ref}",
+        ),
+        f"remote-workflow-blob-{workflow}",
+        prerequisite=True,
+    )
+    if (
+        not isinstance(value, dict)
+        or value.get("type") != "file"
+        or value.get("path") != path
+        or value.get("encoding") != "base64"
+        or type(value.get("size")) is not int
+        or value["size"] < 1
+        or value["size"] > 1_048_576
+        or not isinstance(value.get("content"), str)
+    ):
+        raise IntegrityFailure(f"remote workflow blob is malformed: {workflow}")
+    try:
+        remote = base64.b64decode(
+            "".join(value["content"].split()).encode("ascii"), validate=True
+        )
+    except (UnicodeEncodeError, ValueError) as error:
+        raise IntegrityFailure(f"remote workflow blob is not base64: {workflow}") from error
+    local_digest = sha256_bytes(local.stdout)
+    remote_digest = sha256_bytes(remote)
+    if len(remote) != value["size"] or remote_digest != local_digest:
+        raise IntegrityFailure(f"workflow blob differs at source-ref: {workflow}")
+    return {
+        "workflow": workflow,
+        "path": path,
+        "bytes": len(remote),
+        "sha256": remote_digest,
+        "exact": True,
+    }
+
+
+def _verify_run_jobs_authority(
+    repo: str, run: Mapping[str, Any], check_runs: Sequence[Mapping[str, Any]]
+) -> dict[str, Any] | None:
+    run_id = run.get("id")
+    if type(run_id) is not int or run_id < 1:
+        raise IntegrityFailure("GitHub verify run ID is malformed")
+    value = _gh_json(
+        (
+            "gh", "api", "-H", GITHUB_JSON_ACCEPT_HEADER, "-H",
+            GITHUB_API_VERSION_HEADER,
+            f"repos/{repo}/actions/runs/{run_id}/jobs?filter=all&per_page=100",
+        ),
+        f"github-verify-run-jobs-{run_id}",
+        prerequisite=True,
+    )
+    jobs = value.get("jobs") if isinstance(value, dict) else None
+    total = value.get("total_count") if isinstance(value, dict) else None
+    if (
+        not isinstance(jobs, list)
+        or type(total) is not int
+        or total != len(jobs)
+        or total < 1
+        or total > 100
+    ):
+        raise IntegrityFailure("GitHub verify job listing is malformed")
+    verify_jobs = [job for job in jobs if isinstance(job, dict) and job.get("name") == "verify"]
+    if len(verify_jobs) != 1:
+        return None
+    verify_job = verify_jobs[0]
+    if (
+        type(verify_job.get("id")) is not int
+        or verify_job.get("status") != "completed"
+        or verify_job.get("conclusion") != "success"
+        or not isinstance(verify_job.get("check_run_url"), str)
+    ):
+        return None
+    failed_jobs = [
+        str(job.get("name"))
+        for job in jobs
+        if isinstance(job, dict)
+        and job.get("conclusion") not in {"success", "skipped", "neutral"}
+    ]
+    if failed_jobs and set(failed_jobs) != {"publish-pages"}:
+        return None
+    check_id_match = re.search(r"/check-runs/([1-9][0-9]*)$", verify_job["check_run_url"])
+    if check_id_match is None:
+        raise IntegrityFailure("GitHub verify job check-run URL is malformed")
+    check_id = int(check_id_match.group(1))
+    matching = [check for check in check_runs if check.get("id") == check_id]
+    if len(matching) != 1:
+        return None
+    check = matching[0]
+    app = check.get("app")
+    details_url = check.get("details_url")
+    details_match = re.search(
+        r"/actions/runs/([1-9][0-9]*)/job/([1-9][0-9]*)(?:\?.*)?$",
+        details_url or "",
+    )
+    if (
+        check.get("name") != GITHUB_VERIFY_STATUS_CONTEXT
+        or check.get("status") != "completed"
+        or check.get("conclusion") != "success"
+        or not isinstance(app, dict)
+        or app.get("id") != GITHUB_ACTIONS_INTEGRATION_ID
+        or details_match is None
+        or int(details_match.group(1)) != run_id
+        or int(details_match.group(2)) != verify_job["id"]
+    ):
+        return None
+    return {
+        "runId": run_id,
+        "runConclusion": run.get("conclusion"),
+        "event": run.get("event"),
+        "verifyJobId": verify_job["id"],
+        "verifyCheckRunId": check_id,
+        "allowedFailedJobs": failed_jobs,
+        "exact": True,
+    }
+
+
+def _verify_check_authority(
+    repo: str, default_branch: str, source_sha: str
+) -> dict[str, Any]:
+    encoded_sha = urllib.parse.quote(source_sha, safe="")
+    runs_value = _gh_json(
+        (
+            "gh", "api", "-H", GITHUB_JSON_ACCEPT_HEADER, "-H",
+            GITHUB_API_VERSION_HEADER,
+            f"repos/{repo}/actions/workflows/verify.yml/runs?head_sha={encoded_sha}&per_page=100",
+        ),
+        "github-source-verify-runs",
+        prerequisite=True,
+    )
+    runs = runs_value.get("workflow_runs") if isinstance(runs_value, dict) else None
+    total_runs = runs_value.get("total_count") if isinstance(runs_value, dict) else None
+    if (
+        not isinstance(runs, list)
+        or type(total_runs) is not int
+        or total_runs != len(runs)
+        or total_runs > 100
+    ):
+        raise IntegrityFailure("GitHub source verify run listing is malformed")
+    checks_value = _gh_json(
+        (
+            "gh", "api", "-H", GITHUB_JSON_ACCEPT_HEADER, "-H",
+            GITHUB_API_VERSION_HEADER,
+            f"repos/{repo}/commits/{encoded_sha}/check-runs?per_page=100",
+        ),
+        "github-source-check-runs",
+        prerequisite=True,
+    )
+    checks = checks_value.get("check_runs") if isinstance(checks_value, dict) else None
+    total_checks = checks_value.get("total_count") if isinstance(checks_value, dict) else None
+    if (
+        not isinstance(checks, list)
+        or type(total_checks) is not int
+        or total_checks != len(checks)
+        or total_checks > 100
+        or any(not isinstance(check, dict) for check in checks)
+    ):
+        raise IntegrityFailure("GitHub source check-run listing is malformed")
+    candidates: list[dict[str, Any]] = []
+    for run in runs:
+        if (
+            not isinstance(run, dict)
+            or not _workflow_path_matches(run.get("path"), "verify.yml")
+            or str(run.get("head_sha", "")).lower() != source_sha
+            or run.get("head_branch") != default_branch
+            or run.get("event") not in {"push", "workflow_dispatch"}
+            or run.get("status") != "completed"
+            or run.get("conclusion") not in {"success", "failure"}
+        ):
+            continue
+        authority = _verify_run_jobs_authority(repo, run, checks)
+        if authority is not None:
+            candidates.append(authority)
+    if not candidates:
+        raise IntegrityFailure(
+            "source-ref has no exact successful verify job/check authority"
+        )
+    candidates.sort(key=lambda item: int(item["runId"]), reverse=True)
+    return candidates[0]
+
+
+def _cloud_source_authority(
+    repo: str, default_branch: str, source_ref: str
+) -> dict[str, Any]:
+    source_sha = _git_source_binding(source_ref)
+    head_lease = _require_cloud_head_lease(
+        repo, default_branch, source_sha, "initial-authority"
+    )
+    workflows = [
+        _workflow_blob_authority(repo, workflow, source_sha)
+        for workflow in WORKFLOW_FILES
+    ]
+    verify = _verify_check_authority(repo, default_branch, source_sha)
+    return {
+        "sourceSha": source_sha,
+        "defaultBranch": default_branch,
+        "workflows": workflows,
+        "verify": verify,
+        "headLeases": [head_lease],
+        "exact": True,
+    }
 
 
 def _workflow_path_matches(value: Any, workflow: str) -> bool:
@@ -1158,6 +1668,609 @@ def _repository_variables(repo: str) -> dict[str, str]:
             raise IntegrityFailure("GitHub repository variable entry is malformed")
         variables[item["name"]] = item["value"]
     return variables
+
+
+def _repository_secret_names(repo: str) -> frozenset[str]:
+    capture = _capture_command(
+        (
+            "gh", "secret", "list", "--repo", repo,
+            "--json", "name,updatedAt",
+        ),
+        label="github-repository-secrets",
+        timeout_seconds=60,
+    )
+    if capture.returncode:
+        raise PrerequisiteFailure("GitHub repository secrets are unavailable")
+    value = _decode_json(capture.stdout, "GitHub repository secrets")
+    if not isinstance(value, list):
+        raise IntegrityFailure("GitHub repository secret listing is malformed")
+    names: set[str] = set()
+    for item in value:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"name", "updatedAt"}
+            or not isinstance(item.get("name"), str)
+            or not item["name"]
+            or not isinstance(item.get("updatedAt"), str)
+            or not item["updatedAt"]
+            or item["name"] in names
+        ):
+            raise IntegrityFailure("GitHub repository secret entry is malformed")
+        names.add(item["name"])
+    return frozenset(names)
+
+
+def _environment_secret_names(repo: str, environment: str) -> frozenset[str]:
+    capture = _capture_command(
+        (
+            "gh", "secret", "list", "--env", environment, "--repo", repo,
+            "--json", "name,updatedAt",
+        ),
+        label=f"github-environment-secrets-{environment}",
+        timeout_seconds=60,
+    )
+    if capture.returncode:
+        raise PrerequisiteFailure(
+            f"GitHub environment secrets are unavailable: {environment}"
+        )
+    value = _decode_json(capture.stdout, f"GitHub environment secrets: {environment}")
+    if not isinstance(value, list):
+        raise IntegrityFailure("GitHub environment secret listing is malformed")
+    names: set[str] = set()
+    for item in value:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"name", "updatedAt"}
+            or not isinstance(item.get("name"), str)
+            or not item["name"]
+            or not isinstance(item.get("updatedAt"), str)
+            or not item["updatedAt"]
+            or item["name"] in names
+        ):
+            raise IntegrityFailure("GitHub environment secret entry is malformed")
+        names.add(item["name"])
+    return frozenset(names)
+
+
+def _openssh_public_key_record(public_key: str) -> dict[str, Any]:
+    if (
+        not isinstance(public_key, str)
+        or not public_key
+        or len(public_key.encode("utf-8")) > 32_768
+        or "\n" in public_key
+        or "\r" in public_key
+        or "\x00" in public_key
+    ):
+        raise IntegrityFailure("GitHub deploy key is not one bounded OpenSSH public key")
+    parts = public_key.strip().split()
+    if len(parts) < 2:
+        raise IntegrityFailure("GitHub deploy key has no OpenSSH key blob")
+    key_type, encoded = parts[:2]
+    try:
+        blob = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except (UnicodeEncodeError, ValueError) as error:
+        raise IntegrityFailure("GitHub deploy key has invalid base64") from error
+    if len(blob) < 8:
+        raise IntegrityFailure("GitHub deploy key blob is truncated")
+    type_length = int.from_bytes(blob[:4], "big")
+    if type_length < 1 or type_length > 256 or len(blob) < 4 + type_length:
+        raise IntegrityFailure("GitHub deploy key type is malformed")
+    try:
+        embedded_type = blob[4:4 + type_length].decode("ascii")
+    except UnicodeDecodeError as error:
+        raise IntegrityFailure("GitHub deploy key type is not ASCII") from error
+    if embedded_type != key_type:
+        raise IntegrityFailure("GitHub deploy key type disagrees with its key blob")
+    ed25519_exact = False
+    if key_type == "ssh-ed25519":
+        offset = 4 + type_length
+        if len(blob) < offset + 4:
+            raise IntegrityFailure("GitHub Ed25519 deploy key blob is truncated")
+        public_length = int.from_bytes(blob[offset:offset + 4], "big")
+        ed25519_exact = public_length == 32 and len(blob) == offset + 4 + 32
+        if not ed25519_exact:
+            raise IntegrityFailure("GitHub Ed25519 deploy key is not exactly 256 bits")
+    fingerprint = "SHA256:" + base64.b64encode(
+        hashlib.sha256(blob).digest()
+    ).decode("ascii").rstrip("=")
+    if not SSH_SHA256_FINGERPRINT_RE.fullmatch(fingerprint):
+        raise IntegrityFailure("GitHub deploy key fingerprint is malformed")
+    return {
+        "keyType": key_type,
+        "fingerprint": fingerprint,
+        "ed25519Exact": ed25519_exact,
+    }
+
+
+def _github_deploy_keys_state(repo: str) -> list[dict[str, Any]]:
+    value = _gh_json(
+        (
+            "gh", "api", "-H", GITHUB_JSON_ACCEPT_HEADER, "-H",
+            GITHUB_API_VERSION_HEADER,
+            f"repos/{repo}/keys?per_page=100",
+        ),
+        "github-deploy-keys",
+        prerequisite=True,
+    )
+    if not isinstance(value, list) or len(value) > 100:
+        raise IntegrityFailure("GitHub deploy key listing is malformed")
+    records: list[dict[str, Any]] = []
+    seen_ids: set[int] = set()
+    for item in value:
+        if (
+            not isinstance(item, dict)
+            or type(item.get("id")) is not int
+            or item["id"] < 1
+            or item["id"] in seen_ids
+            or not isinstance(item.get("title"), str)
+            or not item["title"]
+            or type(item.get("read_only")) is not bool
+            or type(item.get("verified")) is not bool
+            or not isinstance(item.get("key"), str)
+        ):
+            raise IntegrityFailure("GitHub deploy key entry is malformed")
+        seen_ids.add(item["id"])
+        key_record = _openssh_public_key_record(item["key"])
+        records.append({
+            "id": item["id"],
+            "title": item["title"],
+            "readOnly": item["read_only"],
+            "verified": item["verified"],
+            **key_record,
+        })
+    return records
+
+
+def _automation_push_identity_state(
+    repo: str,
+    variables: Mapping[str, str] | None = None,
+    *,
+    environment_exists: bool = True,
+) -> dict[str, Any]:
+    current_variables = dict(variables) if variables is not None \
+        else _repository_variables(repo)
+    repository_secrets = _repository_secret_names(repo)
+    environment_secrets = (
+        _environment_secret_names(repo, MAIN_AUTOMATION_ENVIRONMENT)
+        if environment_exists else frozenset()
+    )
+    deploy_keys = _github_deploy_keys_state(repo)
+    write_keys = [item for item in deploy_keys if item["readOnly"] is False]
+    reserved_title_keys = [
+        item for item in deploy_keys
+        if item["title"].casefold() == AUTOMATION_PUSH_DEPLOY_KEY_TITLE.casefold()
+    ]
+    configured_fingerprint = current_variables.get(
+        AUTOMATION_PUSH_FINGERPRINT_VARIABLE
+    )
+    exact_key = write_keys[0] if len(write_keys) == 1 else None
+    key_exact = bool(
+        exact_key is not None
+        and exact_key["title"] == AUTOMATION_PUSH_DEPLOY_KEY_TITLE
+        and exact_key["keyType"] == "ssh-ed25519"
+        and exact_key["ed25519Exact"] is True
+        and exact_key["verified"] is True
+        and configured_fingerprint == exact_key["fingerprint"]
+        and SSH_SHA256_FINGERPRINT_RE.fullmatch(configured_fingerprint or "")
+        and len(reserved_title_keys) == 1
+    )
+    exact = bool(
+        key_exact
+        and AUTOMATION_PUSH_SECRET_NAME in environment_secrets
+        and AUTOMATION_PUSH_SECRET_NAME not in repository_secrets
+    )
+    return {
+        "scopeRepository": repo,
+        "environmentName": MAIN_AUTOMATION_ENVIRONMENT,
+        "secretName": AUTOMATION_PUSH_SECRET_NAME,
+        "environmentSecretPresent": (
+            AUTOMATION_PUSH_SECRET_NAME in environment_secrets
+        ),
+        "repositorySecretPresent": (
+            AUTOMATION_PUSH_SECRET_NAME in repository_secrets
+        ),
+        "fingerprintVariableName": AUTOMATION_PUSH_FINGERPRINT_VARIABLE,
+        "configuredFingerprint": configured_fingerprint,
+        "deployKeyTitle": AUTOMATION_PUSH_DEPLOY_KEY_TITLE,
+        "deployKeys": deploy_keys,
+        "writeKeyCount": len(write_keys),
+        "reservedTitleKeyCount": len(reserved_title_keys),
+        "keyExact": key_exact,
+        "exact": exact,
+    }
+
+
+def _required_branch_ruleset_contracts() -> dict[str, dict[str, Any]]:
+    ref_condition = {"ref_name": {"include": ["~DEFAULT_BRANCH"], "exclude": []}}
+    return {
+        "prAndVerifiedCi": {
+            "name": BRANCH_GOVERNANCE_PR_RULESET_NAME,
+            "target": "branch",
+            "enforcement": "active",
+            "bypass_actors": [{
+                "actor_id": None,
+                "actor_type": "DeployKey",
+                "bypass_mode": "always",
+            }],
+            "conditions": ref_condition,
+            "rules": [
+                {
+                    "type": "pull_request",
+                    "parameters": {
+                        "required_approving_review_count": 0,
+                        "dismiss_stale_reviews_on_push": False,
+                        "required_reviewers": [],
+                        "require_code_owner_review": False,
+                        "require_last_push_approval": False,
+                        "required_review_thread_resolution": True,
+                        "allowed_merge_methods": ["squash", "rebase"],
+                    },
+                },
+                {
+                    "type": "required_status_checks",
+                    "parameters": {
+                        "strict_required_status_checks_policy": True,
+                        "do_not_enforce_on_create": False,
+                        "required_status_checks": [{
+                            "context": GITHUB_VERIFY_STATUS_CONTEXT,
+                            "integration_id": GITHUB_ACTIONS_INTEGRATION_ID,
+                        }],
+                    },
+                },
+            ],
+        },
+        "immutableFastForwardHistory": {
+            "name": BRANCH_GOVERNANCE_HISTORY_RULESET_NAME,
+            "target": "branch",
+            "enforcement": "active",
+            "bypass_actors": [],
+            "conditions": ref_condition,
+            "rules": [
+                {"type": "deletion"},
+                {"type": "non_fast_forward"},
+                {"type": "required_linear_history"},
+            ],
+        },
+        "immutableGateTag": {
+            "name": GATE_TAG_RULESET_NAME,
+            "target": "tag",
+            "enforcement": "active",
+            "bypass_actors": [{
+                "actor_id": GITHUB_ACTIONS_INTEGRATION_ID,
+                "actor_type": "Integration",
+                "bypass_mode": "always",
+            }],
+            "conditions": {
+                "ref_name": {
+                    "include": ["refs/tags/gate-v2.0.2"],
+                    "exclude": [],
+                }
+            },
+            "rules": [
+                {"type": "creation"},
+                {
+                    "type": "update",
+                    "parameters": {"update_allows_fetch_and_merge": False},
+                },
+                {"type": "deletion"},
+            ],
+        },
+    }
+
+
+def _ruleset_mutation_payload(contract: Mapping[str, Any]) -> dict[str, Any]:
+    payload = json.loads(canonical_json_bytes(contract).decode("utf-8"))
+    pull_request = next(
+        (rule for rule in payload["rules"] if rule.get("type") == "pull_request"),
+        None,
+    )
+    if isinstance(pull_request, dict):
+        # GitHub adds this empty beta field on read. Omitting it on write keeps the
+        # public API contract stable while the exact post-read still requires [].
+        pull_request["parameters"].pop("required_reviewers", None)
+    return payload
+
+
+def _normalized_repository_ruleset(
+    value: Any, repo: str, expected_contract: Mapping[str, Any]
+) -> tuple[int, dict[str, Any]]:
+    expected_name = str(expected_contract["name"])
+    if (
+        not isinstance(value, dict)
+        or type(value.get("id")) is not int
+        or value["id"] < 1
+        or value.get("name") != expected_name
+        or value.get("source_type") != "Repository"
+        or str(value.get("source", "")).casefold() != repo.casefold()
+        or value.get("target") != expected_contract.get("target")
+        or value.get("enforcement") not in {"disabled", "active", "evaluate"}
+        or not isinstance(value.get("bypass_actors"), list)
+        or not isinstance(value.get("conditions"), dict)
+        or not isinstance(value.get("rules"), list)
+    ):
+        raise IntegrityFailure(f"GitHub named ruleset is malformed: {expected_name}")
+    contract = {
+        "name": value["name"],
+        "target": value["target"],
+        "enforcement": value["enforcement"],
+        "bypass_actors": value["bypass_actors"],
+        "conditions": value["conditions"],
+        "rules": value["rules"],
+    }
+    return value["id"], contract
+
+
+def _ruleset_ref_scope(
+    ruleset: Mapping[str, Any], default_branch: str
+) -> dict[str, Any]:
+    target = ruleset.get("target")
+    if target not in {"branch", "tag"}:
+        return {"relevant": True, "reason": "unproven-non-ref-target"}
+    target_ref = (
+        f"refs/heads/{default_branch}"
+        if target == "branch"
+        else "refs/tags/gate-v2.0.2"
+    )
+    conditions = ruleset.get("conditions")
+    ref_name = conditions.get("ref_name") if isinstance(conditions, Mapping) else None
+    includes = ref_name.get("include") if isinstance(ref_name, Mapping) else None
+    excludes = ref_name.get("exclude") if isinstance(ref_name, Mapping) else None
+    if (
+        not isinstance(includes, list)
+        or not includes
+        or not isinstance(excludes, list)
+        or any(not isinstance(item, str) or not item for item in includes + excludes)
+    ):
+        return {"relevant": True, "reason": "unproven-ref-condition"}
+
+    def exact_match(pattern: str) -> bool:
+        return bool(
+            pattern == target_ref
+            or pattern == "~ALL"
+            or (pattern == "~DEFAULT_BRANCH" and target == "branch")
+        )
+
+    if any(exact_match(pattern) for pattern in excludes):
+        return {"relevant": False, "reason": "exactly-excluded"}
+    if any(exact_match(pattern) for pattern in includes):
+        return {"relevant": True, "reason": "exactly-included"}
+    # Only literal, different refs prove irrelevance. Pattern syntax is treated as
+    # applicable unless its non-match is independently provable by GitHub.
+    if all(not any(character in pattern for character in "*?[]~") for pattern in includes):
+        return {"relevant": False, "reason": "literal-unrelated-ref"}
+    if any(fnmatch.fnmatchcase(target_ref, pattern) for pattern in includes):
+        return {"relevant": True, "reason": "pattern-match"}
+    return {"relevant": True, "reason": "unproven-pattern-nonmatch"}
+
+
+def _github_classic_branch_protection_state(
+    repo: str, default_branch: str
+) -> dict[str, Any]:
+    encoded = urllib.parse.quote(default_branch, safe="")
+    status, value = _gh_included_json(
+        f"repos/{repo}/branches/{encoded}/protection",
+        "github-classic-branch-protection",
+        allow_missing=True,
+    )
+    if status == 404:
+        return {"present": False, "compatible": True}
+    if not isinstance(value, dict) or not value:
+        raise IntegrityFailure("GitHub classic branch protection is malformed")
+    return {
+        "present": True,
+        "compatible": False,
+        "reason": "classic protection cannot prove deploy-key fast-forward bypass",
+    }
+
+
+def _github_branch_governance_state(
+    repo: str, default_branch: str = "main"
+) -> dict[str, Any]:
+    listing = _gh_json(
+        (
+            "gh", "api", "-H", GITHUB_JSON_ACCEPT_HEADER, "-H",
+            GITHUB_API_VERSION_HEADER,
+            f"repos/{repo}/rulesets?includes_parents=true&per_page=100",
+        ),
+        "github-repository-rulesets",
+        prerequisite=True,
+    )
+    if not isinstance(listing, list) or len(listing) > 75:
+        raise IntegrityFailure("GitHub repository ruleset listing is malformed")
+    required = _required_branch_ruleset_contracts()
+    matches: dict[str, list[int]] = {name: [] for name in required}
+    seen_ids: set[int] = set()
+    for item in listing:
+        if (
+            not isinstance(item, dict)
+            or type(item.get("id")) is not int
+            or item["id"] < 1
+            or item["id"] in seen_ids
+            or not isinstance(item.get("name"), str)
+            or not item["name"]
+            or item.get("source_type") not in {
+                "Repository", "Organization", "Enterprise"
+            }
+            or not isinstance(item.get("source"), str)
+            or not item["source"]
+        ):
+            raise IntegrityFailure("GitHub repository ruleset entry is malformed")
+        seen_ids.add(item["id"])
+        for contract_name, contract in required.items():
+            if item["name"].casefold() == contract["name"].casefold():
+                if (
+                    item.get("source_type") != "Repository"
+                    or str(item.get("source", "")).casefold() != repo.casefold()
+                ):
+                    raise IntegrityFailure(
+                        f"GitHub reserved ruleset name is inherited: {contract['name']}"
+                    )
+                matches[contract_name].append(item["id"])
+    for contract_name, identifiers in matches.items():
+        if len(identifiers) > 1:
+            raise IntegrityFailure(
+                f"GitHub named ruleset is ambiguous: {required[contract_name]['name']}"
+            )
+    observed: dict[str, Any] = {}
+    for contract_name, contract in required.items():
+        identifiers = matches[contract_name]
+        if not identifiers:
+            observed[contract_name] = {
+                "present": False,
+                "id": None,
+                "exact": False,
+                "contract": None,
+            }
+            continue
+        ruleset_id = identifiers[0]
+        value = _gh_json(
+            (
+                "gh", "api", "-H", GITHUB_JSON_ACCEPT_HEADER, "-H",
+                GITHUB_API_VERSION_HEADER,
+                f"repos/{repo}/rulesets/{ruleset_id}?includes_parents=true",
+            ),
+            f"github-ruleset-{contract_name}",
+            prerequisite=True,
+        )
+        normalized_id, normalized = _normalized_repository_ruleset(
+            value, repo, contract
+        )
+        if normalized_id != ruleset_id:
+            raise IntegrityFailure("GitHub named ruleset ID changed during inspection")
+        observed[contract_name] = {
+            "present": True,
+            "id": ruleset_id,
+            "exact": normalized == contract,
+            "contract": normalized,
+        }
+    required_ids = {
+        item["id"] for item in observed.values() if item.get("id") is not None
+    }
+    extra_rulesets: list[dict[str, Any]] = []
+    unproven_applicable: list[dict[str, Any]] = []
+    for item in listing:
+        if item["id"] in required_ids:
+            continue
+        value = _gh_json(
+            (
+                "gh", "api", "-H", GITHUB_JSON_ACCEPT_HEADER, "-H",
+                GITHUB_API_VERSION_HEADER,
+                f"repos/{repo}/rulesets/{item['id']}?includes_parents=true",
+            ),
+            f"github-extra-ruleset-{item['id']}",
+            prerequisite=True,
+        )
+        if (
+            not isinstance(value, dict)
+            or value.get("id") != item["id"]
+            or value.get("name") != item["name"]
+            or value.get("target") not in {"branch", "tag", "push", "repository"}
+            or value.get("enforcement") not in {"disabled", "active", "evaluate"}
+            or not isinstance(value.get("conditions"), dict)
+            or not isinstance(value.get("rules"), list)
+        ):
+            raise IntegrityFailure("GitHub extra ruleset is malformed")
+        scope = _ruleset_ref_scope(value, default_branch)
+        record = {
+            "id": value["id"],
+            "name": value["name"],
+            "sourceType": value.get("source_type"),
+            "source": value.get("source"),
+            "target": value["target"],
+            "enforcement": value["enforcement"],
+            "scope": scope,
+        }
+        extra_rulesets.append(record)
+        if value["enforcement"] in {"active", "evaluate"} and scope["relevant"]:
+            unproven_applicable.append(record)
+    classic = _github_classic_branch_protection_state(repo, default_branch)
+    return {
+        "target": "~DEFAULT_BRANCH and refs/tags/gate-v2.0.2",
+        "namedRulesets": observed,
+        "repositoryRulesetCount": len(listing),
+        "extraRulesets": extra_rulesets,
+        "unprovenApplicableRulesets": unproven_applicable,
+        "classicBranchProtection": classic,
+        "exact": bool(
+            all(item["exact"] is True for item in observed.values())
+            and not unproven_applicable
+            and classic["compatible"] is True
+        ),
+    }
+
+
+def _validate_governance_mutation_source(state: Mapping[str, Any]) -> None:
+    identity = state.get("automationPushIdentity")
+    governance = state.get("branchGovernance")
+    if not isinstance(identity, Mapping) or not isinstance(governance, Mapping):
+        raise IntegrityFailure("automation push governance state is unavailable")
+    unproven_rulesets = governance.get("unprovenApplicableRulesets")
+    classic = governance.get("classicBranchProtection")
+    if not isinstance(unproven_rulesets, list):
+        raise IntegrityFailure("applicable GitHub ruleset state is malformed")
+    if unproven_rulesets:
+        raise IntegrityFailure(
+            "unproven applicable GitHub ruleset exists; refusing every mutation"
+        )
+    if not isinstance(classic, Mapping) or classic.get("compatible") is not True:
+        raise IntegrityFailure(
+            "classic branch protection compatibility is unproven; refusing every mutation"
+        )
+    write_key_count = identity.get("writeKeyCount")
+    if type(write_key_count) is not int:
+        raise IntegrityFailure("automation push key count is malformed")
+    if write_key_count:
+        if write_key_count != 1 or identity.get("keyExact") is not True:
+            raise IntegrityFailure(
+                "unknown or unbound write deploy key exists; refusing every mutation"
+            )
+    if type(identity.get("reservedTitleKeyCount")) is not int:
+        raise IntegrityFailure("automation push reserved-title key count is malformed")
+    if identity["reservedTitleKeyCount"] and identity.get("keyExact") is not True:
+        raise IntegrityFailure(
+            "reserved automation deploy-key title is ambiguous; refusing every mutation"
+        )
+
+
+@contextmanager
+def _generated_automation_push_identity(repo: str) -> Iterator[dict[str, Any]]:
+    if not _command_exists("ssh-keygen"):
+        raise PrerequisiteFailure("OpenSSH ssh-keygen is unavailable")
+    with tempfile.TemporaryDirectory(prefix="hotdeal-focus-automation-key-") as temporary:
+        private_path = Path(temporary) / "automation-push-ed25519"
+        generated = _capture_command(
+            (
+                "ssh-keygen", "-q", "-t", "ed25519", "-N", "",
+                "-C", f"hotdeal-focus-automation@{repo}",
+                "-f", str(private_path),
+            ),
+            label="generate-automation-push-ed25519",
+            timeout_seconds=60,
+        )
+        if generated.returncode:
+            raise PrerequisiteFailure("could not generate automation Ed25519 key")
+        public_path = Path(f"{private_path}.pub")
+        try:
+            private_size = private_path.stat().st_size
+            public_text = public_path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise IntegrityFailure("generated automation key pair is incomplete") from error
+        if private_size < 100 or private_size > 16_384:
+            raise IntegrityFailure("generated automation private key size is invalid")
+        public_key = public_text.rstrip("\r\n")
+        if "\n" in public_key or "\r" in public_key:
+            raise IntegrityFailure("generated automation public key is not one line")
+        public_record = _openssh_public_key_record(public_key)
+        if (
+            public_record["keyType"] != "ssh-ed25519"
+            or public_record["ed25519Exact"] is not True
+        ):
+            raise IntegrityFailure("generated automation key is not exact Ed25519")
+        yield {
+            "privatePath": private_path,
+            "publicKey": public_key,
+            "fingerprint": public_record["fingerprint"],
+        }
 
 
 def _github_actions_permissions_state(repo: str) -> dict[str, Any]:
@@ -1264,35 +2377,117 @@ def _github_workflow_states(repo: str) -> dict[str, dict[str, Any]]:
 
 
 def _github_pages_state(repo: str) -> dict[str, Any]:
-    capture = _capture_command(
-        (
-            "gh", "api", "--include", "-H", GITHUB_JSON_ACCEPT_HEADER,
-            "-H", GITHUB_API_VERSION_HEADER, f"repos/{repo}/pages",
-        ),
-        label="github-pages-state",
-        timeout_seconds=60,
+    status_code, page = _gh_included_json(
+        f"repos/{repo}/pages", "github-pages-state", allow_missing=True
     )
-    normalized = capture.stdout.replace(b"\r\n", b"\n")
-    header, separator, body = normalized.partition(b"\n\n")
-    status_match = re.match(rb"^HTTP/\S+\s+([0-9]{3})\b", header)
-    if not separator or status_match is None:
-        raise IntegrityFailure("GitHub Pages response has no exact HTTP status envelope")
-    status_code = int(status_match.group(1))
     if status_code == 404:
-        if capture.returncode == 0:
-            raise IntegrityFailure("GitHub Pages returned a contradictory missing state")
         return {"exists": False, "buildType": None}
-    if capture.returncode or not 200 <= status_code < 300:
-        raise TransientFailure("GitHub Pages state could not be read")
-    page = _decode_json(body, "GitHub Pages state")
     if not isinstance(page, dict) or not isinstance(page.get("build_type"), str):
         raise IntegrityFailure("GitHub Pages state is malformed")
     return {"exists": True, "buildType": page["build_type"]}
 
 
-def _cloud_operating_state(repo: str) -> dict[str, Any]:
+def _github_environment_state(
+    repo: str, environment: str, default_branch: str
+) -> dict[str, Any]:
+    encoded = urllib.parse.quote(environment, safe="")
+    status, value = _gh_included_json(
+        f"repos/{repo}/environments/{encoded}",
+        f"github-environment-{environment}",
+        allow_missing=True,
+    )
+    if status == 404:
+        return {
+            "name": environment,
+            "present": False,
+            "customBranchPolicy": False,
+            "branchPolicies": [],
+            "exact": False,
+        }
+    if (
+        not isinstance(value, dict)
+        or value.get("name") != environment
+        or not isinstance(value.get("protection_rules"), list)
+        or not isinstance(value.get("deployment_branch_policy"), dict)
+    ):
+        raise IntegrityFailure(f"GitHub environment is malformed: {environment}")
+    deployment_policy = value["deployment_branch_policy"]
+    custom = bool(
+        deployment_policy.get("protected_branches") is False
+        and deployment_policy.get("custom_branch_policies") is True
+    )
+    branch_policies: list[dict[str, Any]] = []
+    if custom:
+        policies = _gh_json(
+            (
+                "gh", "api", "-H", GITHUB_JSON_ACCEPT_HEADER, "-H",
+                GITHUB_API_VERSION_HEADER,
+                f"repos/{repo}/environments/{encoded}/deployment-branch-policies?per_page=100",
+            ),
+            f"github-environment-branch-policies-{environment}",
+            prerequisite=True,
+        )
+        raw_policies = policies.get("branch_policies") \
+            if isinstance(policies, dict) else None
+        total_count = policies.get("total_count") if isinstance(policies, dict) else None
+        if (
+            not isinstance(raw_policies, list)
+            or type(total_count) is not int
+            or total_count != len(raw_policies)
+            or total_count > 50
+        ):
+            raise IntegrityFailure("GitHub environment branch policies are malformed")
+        seen_ids: set[int] = set()
+        for policy in raw_policies:
+            if (
+                not isinstance(policy, dict)
+                or type(policy.get("id")) is not int
+                or policy["id"] < 1
+                or policy["id"] in seen_ids
+                or not isinstance(policy.get("name"), str)
+                or not policy["name"]
+                or policy.get("type") not in {"branch", "tag"}
+            ):
+                raise IntegrityFailure("GitHub environment branch policy is malformed")
+            seen_ids.add(policy["id"])
+            branch_policies.append({
+                "id": policy["id"],
+                "name": policy["name"],
+                "type": policy["type"],
+            })
+    exact = bool(
+        custom
+        and len(branch_policies) == 1
+        and branch_policies[0]["name"] == default_branch
+        and branch_policies[0]["type"] == "branch"
+    )
+    return {
+        "name": environment,
+        "present": True,
+        "canAdminsBypass": value.get("can_admins_bypass"),
+        "customBranchPolicy": custom,
+        "branchPolicies": branch_policies,
+        "exact": exact,
+    }
+
+
+def _github_privileged_environments_state(
+    repo: str, default_branch: str
+) -> dict[str, dict[str, Any]]:
+    return {
+        environment: _github_environment_state(repo, environment, default_branch)
+        for environment in (
+            RELEASE_PUBLISHER_ENVIRONMENT,
+            MAIN_AUTOMATION_ENVIRONMENT,
+            PAGES_ENVIRONMENT,
+        )
+    }
+
+
+def _cloud_operating_state(repo: str, default_branch: str = "main") -> dict[str, Any]:
     variables = _repository_variables(repo)
     pages = _github_pages_state(repo)
+    environments = _github_privileged_environments_state(repo, default_branch)
     return {
         "enableStateCommits": variables.get("ENABLE_STATE_COMMITS") == "true",
         "enablePagesPublish": variables.get("ENABLE_PAGES_PUBLISH") == "true",
@@ -1300,6 +2495,13 @@ def _cloud_operating_state(repo: str) -> dict[str, Any]:
         "actions": _github_actions_permissions_state(repo),
         "workflows": _github_workflow_states(repo),
         "pages": pages,
+        "privilegedEnvironments": environments,
+        "automationPushIdentity": _automation_push_identity_state(
+            repo,
+            variables,
+            environment_exists=environments[MAIN_AUTOMATION_ENVIRONMENT]["present"],
+        ),
+        "branchGovernance": _github_branch_governance_state(repo, default_branch),
     }
 
 
@@ -1321,6 +2523,28 @@ def _required_cloud_configuration() -> dict[str, Any]:
             "canApprovePullRequestReviews": False,
         },
         "workflows": {workflow: "active" for workflow in WORKFLOW_FILES},
+        "privilegedEnvironments": {
+            environment: {
+                "selectedBranch": "~DEFAULT_BRANCH",
+                "branchType": "branch",
+            }
+            for environment in (
+                RELEASE_PUBLISHER_ENVIRONMENT,
+                MAIN_AUTOMATION_ENVIRONMENT,
+                PAGES_ENVIRONMENT,
+            )
+        },
+        "automationPushIdentity": {
+            "scope": "one repository",
+            "algorithm": "Ed25519",
+            "uniqueWriteDeployKey": True,
+            "deployKeyTitle": AUTOMATION_PUSH_DEPLOY_KEY_TITLE,
+            "secretName": AUTOMATION_PUSH_SECRET_NAME,
+            "secretScope": MAIN_AUTOMATION_ENVIRONMENT,
+            "fingerprintVariableName": AUTOMATION_PUSH_FINGERPRINT_VARIABLE,
+            "runtimeFingerprintBinding": True,
+        },
+        "branchGovernance": _required_branch_ruleset_contracts(),
     }
 
 
@@ -1340,13 +2564,34 @@ def _cloud_actions_contract_is_exact(
 def _cloud_configuration_is_exact(state: Mapping[str, Any]) -> bool:
     actions = state.get("actions")
     workflows = state.get("workflows")
-    if not isinstance(actions, Mapping) or not isinstance(workflows, Mapping):
+    environments = state.get("privilegedEnvironments")
+    identity = state.get("automationPushIdentity")
+    governance = state.get("branchGovernance")
+    if (
+        not isinstance(actions, Mapping)
+        or not isinstance(workflows, Mapping)
+        or not isinstance(environments, Mapping)
+        or not isinstance(identity, Mapping)
+        or not isinstance(governance, Mapping)
+    ):
         return False
     if any(state.get(key) is not True for key in (
         "enableStateCommits", "enablePagesPublish", "pagesWorkflow",
     )):
         return False
     if not _cloud_actions_contract_is_exact(actions, expected_enabled=True):
+        return False
+    if identity.get("exact") is not True or governance.get("exact") is not True:
+        return False
+    if set(environments) != {
+        RELEASE_PUBLISHER_ENVIRONMENT,
+        MAIN_AUTOMATION_ENVIRONMENT,
+        PAGES_ENVIRONMENT,
+    } or any(
+        not isinstance(environments.get(environment), Mapping)
+        or environments[environment].get("exact") is not True
+        for environment in environments
+    ):
         return False
     return set(workflows) == set(WORKFLOW_FILES) and all(
         isinstance(workflows.get(workflow), Mapping)
@@ -1357,6 +2602,7 @@ def _cloud_configuration_is_exact(state: Mapping[str, Any]) -> bool:
 
 
 def _validate_cloud_monotonic_source(state: Mapping[str, Any]) -> None:
+    _validate_governance_mutation_source(state)
     actions = state.get("actions")
     if not isinstance(actions, Mapping):
         raise IntegrityFailure("GitHub Actions state is unavailable")
@@ -1399,9 +2645,106 @@ def _github_api_mutation(
         )
 
 
-def _configure_cloud(repo: str, apply: bool, evidence_dir: str | None) -> dict[str, Any]:
+def _configure_privileged_environment(
+    repo: str,
+    environment: str,
+    default_branch: str,
+    before: Mapping[str, Any],
+    mutate: Callable[[Callable[[], ExecutionCapture], str], bool],
+) -> dict[str, Any]:
+    if before.get("exact") is True:
+        return dict(before)
+    encoded_environment = urllib.parse.quote(environment, safe="")
+    if before.get("customBranchPolicy") is not True:
+        label = f"configure-environment-{environment}"
+        mutate(
+            lambda: _github_api_mutation(
+                f"repos/{repo}/environments/{encoded_environment}",
+                label,
+                payload={
+                    "deployment_branch_policy": {
+                        "protected_branches": False,
+                        "custom_branch_policies": True,
+                    }
+                },
+            ),
+            label,
+        )
+    observed = _github_environment_state(repo, environment, default_branch)
+    if observed.get("customBranchPolicy") is not True:
+        return observed
+    exact_policy_ids = [
+        policy["id"]
+        for policy in observed["branchPolicies"]
+        if policy["name"] == default_branch and policy["type"] == "branch"
+    ]
+    keep_id = exact_policy_ids[0] if len(exact_policy_ids) == 1 else None
+    for policy in observed["branchPolicies"]:
+        if policy["id"] == keep_id:
+            continue
+        label = f"remove-environment-policy-{environment}-{policy['id']}"
+        mutate(
+            lambda policy_id=policy["id"], label=label: _github_api_mutation(
+                (
+                    f"repos/{repo}/environments/{encoded_environment}/"
+                    f"deployment-branch-policies/{policy_id}"
+                ),
+                label,
+                method="DELETE",
+            ),
+            label,
+        )
+    if keep_id is None:
+        label = f"create-environment-policy-{environment}"
+        mutate(
+            lambda: _github_api_mutation(
+                (
+                    f"repos/{repo}/environments/{encoded_environment}/"
+                    "deployment-branch-policies"
+                ),
+                label,
+                method="POST",
+                payload={"name": default_branch, "type": "branch"},
+            ),
+            label,
+        )
+    return _github_environment_state(repo, environment, default_branch)
+
+
+def _configure_cloud(
+    repo: str,
+    apply: bool,
+    evidence_dir: str | None,
+    *,
+    source_authority: Mapping[str, Any] | None = None,
+    default_branch: str = "main",
+) -> dict[str, Any]:
+    if apply and (
+        not isinstance(source_authority, Mapping)
+        or source_authority.get("exact") is not True
+        or source_authority.get("defaultBranch") != default_branch
+        or not isinstance(source_authority.get("sourceSha"), str)
+    ):
+        raise IntegrityFailure("cloud apply requires exact source authority")
+    source_sha = (
+        str(source_authority["sourceSha"])
+        if isinstance(source_authority, Mapping)
+        else _try_source_sha()
+    )
+    head_leases = (
+        list(source_authority.get("headLeases", []))
+        if isinstance(source_authority, Mapping)
+        else []
+    )
+
+    def require_head(phase: str) -> None:
+        if apply:
+            head_leases.append(
+                _require_cloud_head_lease(repo, default_branch, source_sha, phase)
+            )
+
     repository_before = _gate_policy_repository(repo)
-    before = _cloud_operating_state(repo)
+    before = _cloud_operating_state(repo, default_branch)
     _validate_cloud_monotonic_source(before)
     required = _required_cloud_configuration()
     complete = _cloud_configuration_is_exact(before)
@@ -1410,10 +2753,12 @@ def _configure_cloud(repo: str, apply: bool, evidence_dir: str | None) -> dict[s
             "cloud.configure",
             ok=True,
             status="already-configured",
-            source_sha=_try_source_sha(),
+            source_sha=source_sha,
             repo=repo,
             repository=repository_before,
             configuration=before,
+            sourceAuthority=source_authority,
+            headLeases=head_leases,
             mutationApplied=False,
         )
         return _attach_command_evidence(result, evidence_dir)
@@ -1422,30 +2767,42 @@ def _configure_cloud(repo: str, apply: bool, evidence_dir: str | None) -> dict[s
             "cloud.configure",
             ok=True,
             status="dry-run",
-            source_sha=_try_source_sha(),
+            source_sha=source_sha,
             repo=repo,
             repository=repository_before,
             configuration=before,
             requiredConfiguration=required,
+            applyRequiresSourceRef=True,
             mutationApplied=False,
         )
         return _attach_command_evidence(result, evidence_dir)
+    if (
+        before["automationPushIdentity"].get("exact") is not True
+        and not _command_exists("ssh-keygen")
+    ):
+        raise PrerequisiteFailure(
+            "OpenSSH ssh-keygen is required before any cloud mutation"
+        )
     attempts: list[dict[str, Any]] = []
     accepted_count = 0
     ambiguous = False
 
-    def mutate(operation: Callable[[], ExecutionCapture], label: str) -> None:
+    def mutate(operation: Callable[[], ExecutionCapture], label: str) -> bool:
         nonlocal accepted_count, ambiguous
         try:
             capture = operation()
             attempts.append(capture.summary())
             if capture.returncode == 0:
                 accepted_count += 1
+                return True
             else:
                 ambiguous = True
         except (CliFailure, OSError) as error:
             ambiguous = True
             attempts.append({"id": label, "error": _safe_error(str(error))})
+        return False
+
+    require_head("immediately-before-first-mutation")
 
     actions = before["actions"]
     selected_required = required["actions"]["selectedActions"]
@@ -1491,6 +2848,244 @@ def _configure_cloud(repo: str, apply: bool, evidence_dir: str | None) -> dict[s
             "narrow-workflow-token-permissions",
         )
 
+    governance_before = before["branchGovernance"]
+    staged_governance: Mapping[str, Any] = governance_before
+    governance_observation_error: str | None = None
+    if governance_before.get("exact") is not True:
+        required_rulesets = _required_branch_ruleset_contracts()
+        observed_rulesets = governance_before["namedRulesets"]
+        for contract_name in (
+            "immutableFastForwardHistory", "prAndVerifiedCi", "immutableGateTag"
+        ):
+            observed_ruleset = observed_rulesets[contract_name]
+            if observed_ruleset["exact"] is True:
+                continue
+            contract = required_rulesets[contract_name]
+            payload = _ruleset_mutation_payload(contract)
+            ruleset_id = observed_ruleset["id"]
+            method = "POST" if ruleset_id is None else "PUT"
+            endpoint = (
+                f"repos/{repo}/rulesets"
+                if ruleset_id is None
+                else f"repos/{repo}/rulesets/{ruleset_id}"
+            )
+            label = f"configure-ruleset-{contract_name}"
+            mutate(
+                lambda endpoint=endpoint, method=method, payload=payload, label=label: (
+                    _github_api_mutation(
+                        endpoint,
+                        label,
+                        method=method,
+                        payload=payload,
+                    )
+                ),
+                label,
+            )
+        try:
+            staged_governance = _github_branch_governance_state(repo, default_branch)
+        except (CliFailure, OSError) as error:
+            ambiguous = True
+            governance_observation_error = _safe_error(str(error))
+            staged_governance = governance_before
+
+    require_head("after-governance")
+
+    staged_environments: dict[str, dict[str, Any]] = {}
+    environment_error: str | None = None
+    try:
+        for environment in (
+            RELEASE_PUBLISHER_ENVIRONMENT,
+            MAIN_AUTOMATION_ENVIRONMENT,
+            PAGES_ENVIRONMENT,
+        ):
+            staged_environments[environment] = _configure_privileged_environment(
+                repo,
+                environment,
+                default_branch,
+                before["privilegedEnvironments"][environment],
+                mutate,
+            )
+    except (CliFailure, OSError) as error:
+        ambiguous = True
+        environment_error = _safe_error(str(error))
+        staged_environments = dict(before["privilegedEnvironments"])
+    environments_proven = bool(
+        set(staged_environments) == {
+            RELEASE_PUBLISHER_ENVIRONMENT,
+            MAIN_AUTOMATION_ENVIRONMENT,
+            PAGES_ENVIRONMENT,
+        }
+        and all(item.get("exact") is True for item in staged_environments.values())
+    )
+    require_head("before-credential-provisioning")
+
+    credential_actions: Mapping[str, Any] | None = None
+    credential_actions_error: str | None = None
+    try:
+        credential_actions = _github_actions_permissions_state(repo)
+    except (CliFailure, OSError) as error:
+        ambiguous = True
+        credential_actions_error = _safe_error(str(error))
+    credential_actions_proven = bool(
+        credential_actions is not None
+        and _cloud_actions_contract_is_exact(
+            credential_actions, expected_enabled=None
+        )
+    )
+
+    identity_before = before["automationPushIdentity"]
+    staged_identity: Mapping[str, Any] = identity_before
+    identity_observation_error: str | None = None
+    if identity_before["exact"] is not True:
+        try:
+            staged_governance = _github_branch_governance_state(repo, default_branch)
+        except (CliFailure, OSError) as error:
+            ambiguous = True
+            governance_observation_error = _safe_error(str(error))
+        if staged_governance.get("exact") is True:
+            try:
+                staged_identity = _automation_push_identity_state(repo)
+                _validate_governance_mutation_source({
+                    "automationPushIdentity": staged_identity,
+                    "branchGovernance": staged_governance,
+                })
+            except (CliFailure, OSError) as error:
+                ambiguous = True
+                identity_observation_error = _safe_error(str(error))
+                staged_identity = identity_before
+    if (
+        staged_identity.get("exact") is not True
+        and staged_governance.get("exact") is True
+        and credential_actions_proven
+        and environments_proven
+        and identity_observation_error is None
+    ):
+        if before["enableStateCommits"]:
+            mutate(
+                lambda: _capture_command(
+                    (
+                        "gh", "variable", "set", "ENABLE_STATE_COMMITS",
+                        "--body", "false", "--repo", repo,
+                    ),
+                    label="deactivate-state-commits-for-key-rotation",
+                    timeout_seconds=60,
+                ),
+                "deactivate-state-commits-for-key-rotation",
+            )
+        require_head("immediately-before-environment-secret")
+        with _generated_automation_push_identity(repo) as generated_identity:
+            secret_write_accepted = mutate(
+                lambda: _capture_command_with_private_stdin_file(
+                    (
+                        "gh", "secret", "set", AUTOMATION_PUSH_SECRET_NAME,
+                        "--env", MAIN_AUTOMATION_ENVIRONMENT, "--repo", repo,
+                    ),
+                    generated_identity["privatePath"],
+                    label="set-automation-push-private-key-secret",
+                    timeout_seconds=60,
+                ),
+                "set-automation-push-private-key-secret",
+            )
+            mutate(
+                lambda: _capture_command(
+                    (
+                        "gh", "variable", "set",
+                        AUTOMATION_PUSH_FINGERPRINT_VARIABLE,
+                        "--body", generated_identity["fingerprint"],
+                        "--repo", repo,
+                    ),
+                    label="set-automation-push-fingerprint",
+                    timeout_seconds=60,
+                ),
+                "set-automation-push-fingerprint",
+            )
+            identity_material_staged = False
+            try:
+                staged_variables = _repository_variables(repo)
+                staged_environment_secrets = _environment_secret_names(
+                    repo, MAIN_AUTOMATION_ENVIRONMENT
+                )
+                identity_material_staged = bool(
+                    secret_write_accepted
+                    and staged_variables.get(AUTOMATION_PUSH_FINGERPRINT_VARIABLE)
+                    == generated_identity["fingerprint"]
+                    and AUTOMATION_PUSH_SECRET_NAME in staged_environment_secrets
+                )
+            except (CliFailure, OSError) as error:
+                ambiguous = True
+                identity_observation_error = _safe_error(str(error))
+            if identity_material_staged:
+                for existing_key in staged_identity.get("deployKeys", []):
+                    if existing_key.get("readOnly") is False:
+                        label = f"rotate-automation-push-deploy-key-{existing_key['id']}"
+                        mutate(
+                            lambda key_id=existing_key["id"], label=label: (
+                                _github_api_mutation(
+                                    f"repos/{repo}/keys/{key_id}",
+                                    label,
+                                    method="DELETE",
+                                )
+                            ),
+                            label,
+                        )
+                mutate(
+                    lambda: _github_api_mutation(
+                        f"repos/{repo}/keys",
+                        "create-automation-push-deploy-key",
+                        method="POST",
+                        payload={
+                            "title": AUTOMATION_PUSH_DEPLOY_KEY_TITLE,
+                            "key": generated_identity["publicKey"],
+                            "read_only": False,
+                        },
+                    ),
+                    "create-automation-push-deploy-key",
+                )
+            else:
+                ambiguous = True
+                identity_observation_error = identity_observation_error or (
+                    "automation secret and fingerprint were not both proven; "
+                    "deploy-key creation was skipped"
+                )
+        try:
+            staged_identity = _automation_push_identity_state(repo)
+            if (
+                staged_identity.get("keyExact") is True
+                and staged_identity.get("environmentSecretPresent") is True
+                and staged_identity.get("repositorySecretPresent") is True
+            ):
+                mutate(
+                    lambda: _capture_command(
+                        (
+                            "gh", "secret", "delete", AUTOMATION_PUSH_SECRET_NAME,
+                            "--repo", repo,
+                        ),
+                        label="remove-repository-scoped-automation-secret",
+                        timeout_seconds=60,
+                    ),
+                    "remove-repository-scoped-automation-secret",
+                )
+                staged_identity = _automation_push_identity_state(repo)
+        except (CliFailure, OSError) as error:
+            ambiguous = True
+            identity_observation_error = _safe_error(str(error))
+            staged_identity = identity_before
+    elif staged_identity.get("exact") is not True:
+        ambiguous = True
+        if identity_observation_error is None:
+            identity_observation_error = (
+                "branch governance was not proven; "
+                "automation key provisioning was skipped"
+                if staged_governance.get("exact") is not True
+                else "Actions policy, privileged environments, or source lease was not "
+                "proven; automation key provisioning was skipped"
+            )
+        if credential_actions_error:
+            identity_observation_error = (
+                f"{identity_observation_error}: {credential_actions_error}"
+            )
+
+    require_head("before-activation")
     staged_actions: dict[str, Any] | None = None
     activation_precondition: dict[str, Any]
     try:
@@ -1499,38 +3094,73 @@ def _configure_cloud(repo: str, apply: bool, evidence_dir: str | None) -> dict[s
         ambiguous = True
         activation_precondition = {
             "proven": False,
+            "actions": None,
+            "automationPushIdentity": staged_identity,
+            "branchGovernance": staged_governance,
+            "privilegedEnvironments": staged_environments,
             "error": _safe_error(
                 f"Actions policy could not be read before activation: {error}"
             ),
         }
+        if identity_observation_error:
+            activation_precondition["identityObservationError"] = (
+                identity_observation_error
+            )
+        if governance_observation_error:
+            activation_precondition["governanceObservationError"] = (
+                governance_observation_error
+            )
     else:
         actions_policy_proven = _cloud_actions_contract_is_exact(
             staged_actions, expected_enabled=None
         )
+        identity_proven = staged_identity.get("exact") is True
+        governance_proven = staged_governance.get("exact") is True
+        environment_policy_proven = environments_proven
+        complete_precondition = (
+            actions_policy_proven
+            and identity_proven
+            and governance_proven
+            and environment_policy_proven
+        )
         activation_precondition = {
-            "proven": actions_policy_proven,
+            "proven": complete_precondition,
             "actions": staged_actions,
+            "automationPushIdentity": staged_identity,
+            "branchGovernance": staged_governance,
+            "privilegedEnvironments": staged_environments,
         }
-        if not actions_policy_proven:
+        if not complete_precondition:
             ambiguous = True
             activation_precondition["error"] = (
-                "Actions policy was not exact; all activation substeps were skipped"
+                "Actions policy, automation identity, branch governance, or privileged "
+                "environment policy was not exact; "
+                "all activation substeps were skipped"
             )
+            if identity_observation_error:
+                activation_precondition["identityObservationError"] = (
+                    identity_observation_error
+                )
+            if governance_observation_error:
+                activation_precondition["governanceObservationError"] = (
+                    governance_observation_error
+                )
+            if environment_error:
+                activation_precondition["environmentObservationError"] = environment_error
 
     if activation_precondition["proven"]:
         for name, key in (
             ("ENABLE_STATE_COMMITS", "enableStateCommits"),
             ("ENABLE_PAGES_PUBLISH", "enablePagesPublish"),
         ):
-            if not before[key]:
-                mutate(
-                    lambda name=name: _capture_command(
-                        ("gh", "variable", "set", name, "--body", "true", "--repo", repo),
-                        label=f"enable-{name.lower().replace('_', '-')}",
-                        timeout_seconds=60,
-                    ),
-                    f"enable-{name.lower().replace('_', '-')}",
-                )
+            mutate(
+                lambda name=name: _capture_command(
+                    ("gh", "variable", "set", name, "--body", "true", "--repo", repo),
+                    label=f"enable-{name.lower().replace('_', '-')}",
+                    timeout_seconds=60,
+                ),
+                f"enable-{name.lower().replace('_', '-')}",
+            )
         if not before["pagesWorkflow"]:
             pages_method = "PUT" if before["pages"]["exists"] else "POST"
             mutate(
@@ -1567,13 +3197,14 @@ def _configure_cloud(repo: str, apply: bool, evidence_dir: str | None) -> dict[s
                 ),
                 "enable-github-actions",
             )
+    require_head("after-configuration")
     after: dict[str, Any] | None = None
     repository_after: dict[str, Any] | None = None
     verification_error: str | None = None
     for attempt in range(6):
         try:
             repository_after = _gate_policy_repository(repo)
-            after = _cloud_operating_state(repo)
+            after = _cloud_operating_state(repo, default_branch)
             if _cloud_configuration_is_exact(after):
                 break
         except (CliFailure, OSError) as error:
@@ -1594,11 +3225,13 @@ def _configure_cloud(repo: str, apply: bool, evidence_dir: str | None) -> dict[s
                 "configured" if unambiguous
                 else "configured-after-ambiguous-client-result"
             ),
-            source_sha=_try_source_sha(),
+            source_sha=source_sha,
             repo=repo,
             repository=repository_after,
             configuration=after,
             activationPrecondition=activation_precondition,
+            sourceAuthority=source_authority,
+            headLeases=head_leases,
             mutations=attempts,
             mutationApplied=True if unambiguous else None,
             mutationState="applied" if unambiguous else "observed-exact",
@@ -1611,11 +3244,13 @@ def _configure_cloud(repo: str, apply: bool, evidence_dir: str | None) -> dict[s
             "configuration-applied-unverified" if accepted_count
             else "configuration-terminal-state-unknown"
         ),
-        source_sha=_try_source_sha(),
+        source_sha=source_sha,
         repo=repo,
         repository=repository_after,
         configuration=after,
         activationPrecondition=activation_precondition,
+        sourceAuthority=source_authority,
+        headLeases=head_leases,
         requiredConfiguration=required,
         mutations=attempts,
         verificationError=verification_error,
@@ -1632,7 +3267,12 @@ def _configure_cloud(repo: str, apply: bool, evidence_dir: str | None) -> dict[s
     return _attach_post_mutation_evidence(result, evidence_dir)
 
 
-def _dispatch_cloud(preflight: Mapping[str, Any], apply: bool) -> dict[str, Any]:
+def _dispatch_cloud(
+    preflight: Mapping[str, Any],
+    apply: bool,
+    *,
+    expected_source_sha: str | None = None,
+) -> dict[str, Any]:
     repo = str(preflight["repo"])
     workflow = str(preflight["workflow"])
     branch = str(preflight["defaultBranch"])
@@ -1645,6 +3285,8 @@ def _dispatch_cloud(preflight: Mapping[str, Any], apply: bool) -> dict[str, Any]
     if not isinstance(source_sha, str) or not GIT_SHA_RE.fullmatch(source_sha.lower()):
         raise IntegrityFailure("default branch head SHA is invalid")
     source_sha = source_sha.lower()
+    if expected_source_sha is not None and source_sha != expected_source_sha.lower():
+        raise IntegrityFailure("default branch changed before workflow dispatch")
     before_ids = {
         item.get("id") for item in _latest_runs(repo, workflow)
         if isinstance(item.get("id"), int)
@@ -1665,10 +3307,13 @@ def _dispatch_cloud(preflight: Mapping[str, Any], apply: bool) -> dict[str, Any]
     dispatched: ExecutionCapture | None = None
     dispatch_error: str | None = None
     try:
+        dispatch_fields = ["--field", f"dispatch_nonce={dispatch_nonce}"]
+        if workflow == "publish-gate.yml":
+            dispatch_fields.extend(("--field", f"source_sha={source_sha}"))
         dispatched = _capture_command(
             (
                 "gh", "workflow", "run", workflow, "--repo", repo, "--ref", branch,
-                "--field", f"dispatch_nonce={dispatch_nonce}",
+                *dispatch_fields,
             ),
             label="github-dispatch",
             timeout_seconds=60,
@@ -1755,7 +3400,7 @@ def _artifact_name_allowed(name: str, workflow: str, run_id: int) -> bool:
         return name == f"gate-release-evidence-{run_id}"
     prefixes = (
         "candidate-queue", "dom-audit-json", "dom-audit-failure-screenshots",
-        "candidate-aggregate", "promotion",
+        "candidate-aggregate", "promotion", "promotion-push",
     )
     if any(name == f"{prefix}-{run_id}" for prefix in prefixes):
         return True
@@ -2006,9 +3651,14 @@ def _download_cloud_evidence(
 def command_cloud(args: argparse.Namespace) -> dict[str, Any]:
     repo = _require_repo(args.repo)
     workflow = args.workflow
+    source_ref = getattr(args, "source_ref", None)
     if args.action == "configure":
         if args.run_id is not None or args.output_root:
             raise UsageFailure("configure does not accept run-id or output-root")
+        if args.apply and not source_ref:
+            raise UsageFailure("cloud configure --apply requires full --source-ref")
+        if not args.apply and source_ref:
+            raise UsageFailure("cloud configure dry-run does not accept --source-ref")
     elif args.action == "dispatch":
         if args.run_id is not None:
             raise UsageFailure("dispatch does not accept run-id")
@@ -2026,11 +3676,26 @@ def command_cloud(args: argparse.Namespace) -> dict[str, Any]:
         raise UsageFailure("unknown cloud action")
     if args.action != "configure" and args.evidence_dir:
         raise UsageFailure("evidence-dir is accepted only by cloud configure")
+    if args.action != "configure" and source_ref:
+        raise UsageFailure("source-ref is accepted only by cloud configure --apply")
     preflight = _cloud_preflight(repo, workflow)
     if args.action == "configure":
         if args.evidence_dir:
             _assert_new_directory(Path(args.evidence_dir))
-        return _configure_cloud(repo, bool(args.apply), args.evidence_dir)
+        authority = (
+            _cloud_source_authority(
+                repo, str(preflight["defaultBranch"]), str(source_ref)
+            )
+            if args.apply
+            else None
+        )
+        return _configure_cloud(
+            repo,
+            bool(args.apply),
+            args.evidence_dir,
+            source_authority=authority,
+            default_branch=str(preflight["defaultBranch"]),
+        )
     if args.action == "dispatch":
         return _dispatch_cloud(preflight, bool(args.apply))
     run = _resolve_cloud_run(repo, workflow, args.run_id)
@@ -2480,6 +4145,21 @@ def _remote_gate_tag_commit(
     raise IntegrityFailure("immutable gate tag peel exceeded its bound")
 
 
+def _require_gate_tag_lease(repo: str, tag: str, source_sha: str) -> dict[str, Any]:
+    observed = _remote_gate_tag_commit(repo, tag)
+    record = {
+        "tag": tag,
+        "expectedCommit": source_sha,
+        "observedCommit": observed,
+        "exact": observed == source_sha,
+    }
+    if record["exact"] is not True:
+        raise IntegrityFailure(
+            "gate tag changed after binding and immediately before release publication"
+        )
+    return record
+
+
 def _ensure_remote_gate_tag(repo: str, tag: str, source_sha: str) -> dict[str, Any]:
     existing = _remote_gate_tag_commit(repo, tag, allow_missing=True)
     if existing is not None:
@@ -2538,10 +4218,13 @@ def _ensure_remote_gate_tag(repo: str, tag: str, source_sha: str) -> dict[str, A
     }
 
 
-def _require_remote_default_head(repo: str, branch: str, source_sha: str) -> None:
+def _require_remote_default_head(
+    repo: str, branch: str, source_sha: str
+) -> dict[str, Any]:
     default_head = _gh_json(
         (
-            "gh", "api",
+            "gh", "api", "-H", GITHUB_JSON_ACCEPT_HEADER, "-H",
+            GITHUB_API_VERSION_HEADER,
             f"repos/{repo}/commits/{urllib.parse.quote(branch, safe='')}",
         ),
         "gate-release-default-head",
@@ -2552,10 +4235,63 @@ def _require_remote_default_head(repo: str, branch: str, source_sha: str) -> Non
     if (
         not isinstance(default_head_sha, str)
         or not GIT_SHA_RE.fullmatch(default_head_sha.lower())
-        or default_head_sha.lower() != source_sha
     ):
+        raise IntegrityFailure("gate release default-branch head is malformed")
+    observed_sha = default_head_sha.lower()
+    observation = {
+        "branch": branch,
+        "expectedSourceCommit": source_sha,
+        "observedHead": observed_sha,
+        "exact": observed_sha == source_sha,
+    }
+    if not observation["exact"]:
         raise IntegrityFailure(
-            "gate release source is not the current default-branch head"
+            "gate release source is not the current default-branch head",
+            details={"defaultHeadObservation": observation},
+        )
+    return observation
+
+
+def _gate_default_head_observation(
+    repo: str, branch: str, source_sha: str, phase: str
+) -> dict[str, Any]:
+    try:
+        observed = _require_remote_default_head(repo, branch, source_sha)
+    except (CliFailure, OSError) as error:
+        remote = (
+            error.details.get("defaultHeadObservation")
+            if isinstance(error, CliFailure) else None
+        )
+        observation = dict(remote) if isinstance(remote, Mapping) else {
+            "branch": branch,
+            "expectedSourceCommit": source_sha,
+            "observedHead": None,
+            "exact": False,
+        }
+        observation["phase"] = phase
+        observation["error"] = _safe_error(str(error))
+        return observation
+    if (
+        not isinstance(observed, Mapping)
+        or set(observed) != {
+            "branch", "expectedSourceCommit", "observedHead", "exact"
+        }
+        or observed.get("branch") != branch
+        or observed.get("expectedSourceCommit") != source_sha
+        or observed.get("observedHead") != source_sha
+        or observed.get("exact") is not True
+    ):
+        raise IntegrityFailure("gate release default-head observation is malformed")
+    observation = dict(observed)
+    observation["phase"] = phase
+    return observation
+
+
+def _require_exact_gate_head_observation(observation: Mapping[str, Any]) -> None:
+    if observation.get("exact") is not True:
+        raise IntegrityFailure(
+            "gate release source is not the current default-branch head",
+            details={"defaultHeadObservation": dict(observation)},
         )
 
 
@@ -3094,6 +4830,9 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
             source_sha=source_sha,
             artifacts=artifacts,
             gateRelease=proof,
+            immutableReleasePublished=(
+                isinstance(proof, Mapping) and proof.get("immutable") is True
+            ),
             mutationApplied=False,
         )
         return _attach_command_evidence(result, args.evidence_dir)
@@ -3101,7 +4840,12 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
     if policy["enabled"] is not True:
         raise IntegrityFailure("repository immutable releases are not enabled")
     if existing is not None and existing.get("isDraft") is True:
-        _require_remote_default_head(bound_repo, default_branch, source_sha)
+        head_observations = [
+            _gate_default_head_observation(
+                bound_repo, default_branch, source_sha, "before-draft-recovery"
+            )
+        ]
+        _require_exact_gate_head_observation(head_observations[-1])
         recovery = _recover_exact_gate_draft(
             bound_repo,
             tag,
@@ -3110,6 +4854,33 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
             source_sha,
             existing,
         )
+        head_observations.append(
+            _gate_default_head_observation(
+                bound_repo, default_branch, source_sha, "after-draft-recovery"
+            )
+        )
+        if head_observations[-1]["exact"] is not True:
+            result = _base_result(
+                "gate-release.publish",
+                ok=False,
+                status="default-head-drift-after-draft-recovery",
+                source_sha=source_sha,
+                artifacts=artifacts,
+                defaultHeadObservations=head_observations,
+                gateDraftRecovery={
+                    key: value for key, value in recovery.items() if key != "proof"
+                },
+                gateRelease=recovery.get("proof"),
+                mutationApplied=recovery.get("mutationApplied"),
+                mutationState=recovery.get("mutationState", "unknown"),
+                immutableReleasePublished=(
+                    recovery.get("ok") is True
+                    and isinstance(recovery.get("proof"), Mapping)
+                    and recovery["proof"].get("immutable") is True
+                ),
+            )
+            result["_processExitCode"] = EXIT_ROLLBACK_INCOMPLETE
+            return _attach_post_mutation_evidence(result, args.evidence_dir)
         if not recovery["ok"]:
             result = _base_result(
                 "gate-release.publish",
@@ -3117,7 +4888,9 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
                 status=str(recovery["status"]),
                 source_sha=source_sha,
                 artifacts=artifacts,
+                defaultHeadObservations=head_observations,
                 gateDraftRecovery=recovery,
+                immutableReleasePublished=None,
                 mutationApplied=recovery["mutationApplied"],
                 mutationState=recovery["mutationState"],
             )
@@ -3129,16 +4902,31 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
             status=str(recovery["status"]),
             source_sha=source_sha,
             artifacts=artifacts,
+            defaultHeadObservations=head_observations,
             gateRelease=recovery["proof"],
             gateDraftRecovery={
                 key: value for key, value in recovery.items() if key != "proof"
             },
+            immutableReleasePublished=(
+                isinstance(recovery.get("proof"), Mapping)
+                and recovery["proof"].get("immutable") is True
+            ),
             mutationApplied=recovery["mutationApplied"],
             mutationState=recovery["mutationState"],
         )
         return _attach_post_mutation_evidence(result, args.evidence_dir)
-    _require_remote_default_head(bound_repo, default_branch, source_sha)
+    head_observations = [
+        _gate_default_head_observation(
+            bound_repo, default_branch, source_sha, "immediately-before-tag"
+        )
+    ]
+    _require_exact_gate_head_observation(head_observations[-1])
     tag_binding = _ensure_remote_gate_tag(bound_repo, tag, source_sha)
+    head_observations.append(
+        _gate_default_head_observation(
+            bound_repo, default_branch, source_sha, "after-tag-before-release"
+        )
+    )
     if not tag_binding["verified"]:
         result = _base_result(
             "gate-release.publish",
@@ -3146,7 +4934,9 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
             status="gate-tag-binding-unverified",
             source_sha=source_sha,
             artifacts=artifacts,
+            defaultHeadObservations=head_observations,
             gateTag=tag_binding,
+            immutableReleasePublished=False,
             mutationApplied=tag_binding["mutationApplied"],
             mutationState=(
                 "partially-applied-unverified"
@@ -3155,6 +4945,30 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
         )
         result["_processExitCode"] = EXIT_ROLLBACK_INCOMPLETE
         return _attach_post_mutation_evidence(result, args.evidence_dir)
+    if head_observations[-1]["exact"] is not True:
+        tag_mutated = tag_binding["mutationApplied"] is True
+        result = _base_result(
+            "gate-release.publish",
+            ok=False,
+            status="default-head-drift-after-tag-before-release",
+            source_sha=source_sha,
+            artifacts=artifacts,
+            defaultHeadObservations=head_observations,
+            gateTag=tag_binding,
+            releaseCreation=None,
+            immutableReleasePublished=False,
+            mutationApplied=True if tag_mutated else False,
+            mutationState=("partially-applied-verified" if tag_mutated else "unchanged"),
+        )
+        result["_processExitCode"] = (
+            EXIT_ROLLBACK_INCOMPLETE if tag_mutated else EXIT_INTEGRITY
+        )
+        return (
+            _attach_post_mutation_evidence(result, args.evidence_dir)
+            if tag_mutated
+            else _attach_command_evidence(result, args.evidence_dir)
+        )
+    pre_release_tag_lease = _require_gate_tag_lease(bound_repo, tag, source_sha)
     creation: ExecutionCapture | None = None
     creation_error: str | None = None
     try:
@@ -3182,9 +4996,17 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
             bound_repo, tag, subscription_url, gate_bytes, source_sha
         )
     except (CliFailure, OSError) as verification_error:
+        head_observations.append(
+            _gate_default_head_observation(
+                bound_repo, default_branch, source_sha, "after-release-attempt"
+            )
+        )
         recovery: dict[str, Any] | None = None
         recovery_error: str | None = None
-        if not creation_accepted:
+        if (
+            not creation_accepted
+            and head_observations[-1]["exact"] is True
+        ):
             try:
                 recovery = _resume_gate_draft_after_ambiguous_create(
                     bound_repo, tag, subscription_url, gate_bytes, source_sha
@@ -3192,6 +5014,14 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
             except (CliFailure, OSError) as error:
                 recovery_error = _safe_error(str(error))
         if recovery is not None:
+            head_observations.append(
+                _gate_default_head_observation(
+                    bound_repo,
+                    default_branch,
+                    source_sha,
+                    "after-ambiguous-draft-recovery",
+                )
+            )
             recovery_applied = recovery.get("mutationApplied") is True
             mutation_applied = (
                 True
@@ -3200,19 +5030,51 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
             )
             mutation_state = str(recovery.get("mutationState", "unknown"))
             if recovery.get("ok") is True:
+                if head_observations[-1]["exact"] is not True:
+                    result = _base_result(
+                        "gate-release.publish",
+                        ok=False,
+                        status="default-head-drift-after-release",
+                        source_sha=source_sha,
+                        artifacts=artifacts,
+                        defaultHeadObservations=head_observations,
+                        gateRelease=recovery["proof"],
+                        gateDraftRecovery={
+                            key: value for key, value in recovery.items()
+                            if key != "proof"
+                        },
+                        releaseCreation=creation_record,
+                        gateTag=tag_binding,
+                        gateTagLease=pre_release_tag_lease,
+                        initialVerificationError=_safe_error(str(verification_error)),
+                        immutableReleasePublished=(
+                            isinstance(recovery.get("proof"), Mapping)
+                            and recovery["proof"].get("immutable") is True
+                        ),
+                        mutationApplied=mutation_applied,
+                        mutationState=mutation_state,
+                    )
+                    result["_processExitCode"] = EXIT_ROLLBACK_INCOMPLETE
+                    return _attach_post_mutation_evidence(result, args.evidence_dir)
                 result = _base_result(
                     "gate-release.publish",
                     ok=True,
                     status=str(recovery["status"]),
                     source_sha=source_sha,
                     artifacts=artifacts,
+                    defaultHeadObservations=head_observations,
                     gateRelease=recovery["proof"],
                     gateDraftRecovery={
                         key: value for key, value in recovery.items() if key != "proof"
                     },
                     releaseCreation=creation_record,
                     gateTag=tag_binding,
+                    gateTagLease=pre_release_tag_lease,
                     initialVerificationError=_safe_error(str(verification_error)),
+                    immutableReleasePublished=(
+                        isinstance(recovery.get("proof"), Mapping)
+                        and recovery["proof"].get("immutable") is True
+                    ),
                     mutationApplied=mutation_applied,
                     mutationState=mutation_state,
                 )
@@ -3222,28 +5084,39 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
             result = _base_result(
                 "gate-release.publish",
                 ok=False,
-                status=str(recovery.get("status", "draft-recovery-failed")),
+                status=(
+                    "default-head-drift-after-draft-recovery"
+                    if head_observations[-1]["exact"] is not True
+                    else str(recovery.get("status", "draft-recovery-failed"))
+                ),
                 source_sha=source_sha,
                 artifacts=artifacts,
+                defaultHeadObservations=head_observations,
                 gateDraftRecovery=recovery,
                 releaseCreation=creation_record,
                 gateTag=tag_binding,
+                gateTagLease=pre_release_tag_lease,
                 initialVerificationError=_safe_error(str(verification_error)),
+                immutableReleasePublished=None,
                 mutationApplied=mutation_applied,
                 mutationState=mutation_state,
             )
             result["_processExitCode"] = EXIT_ROLLBACK_INCOMPLETE
             return _attach_post_mutation_evidence(result, args.evidence_dir)
         known_mutation = creation_accepted or tag_binding["mutationApplied"] is True
+        head_drift = head_observations[-1]["exact"] is not True
         result = _base_result(
             "gate-release.publish",
             ok=False,
             status=(
-                "published-unverified"
+                "default-head-drift-after-release-attempt"
+                if head_drift
+                else "published-unverified"
                 if creation_accepted else "publication-terminal-state-unknown"
             ),
             source_sha=source_sha,
             artifacts=artifacts,
+            defaultHeadObservations=head_observations,
             gateRelease={
                 "repo": bound_repo,
                 "tag": tag,
@@ -3261,6 +5134,8 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
             ),
             releaseCreation=creation_record,
             gateTag=tag_binding,
+            gateTagLease=pre_release_tag_lease,
+            immutableReleasePublished=None,
             mutationApplied=True if known_mutation else None,
             mutationState=(
                 "applied-unverified"
@@ -3272,21 +5147,53 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
         )
         result["_processExitCode"] = EXIT_ROLLBACK_INCOMPLETE
         return _attach_post_mutation_evidence(result, args.evidence_dir)
+    head_observations.append(
+        _gate_default_head_observation(
+            bound_repo, default_branch, source_sha, "after-release"
+        )
+    )
     if creation_accepted:
         status = "published"
         mutation_applied = True
     else:
         status = "published-after-ambiguous-client-result"
         mutation_applied = True if tag_binding["mutationApplied"] is True else None
+    if head_observations[-1]["exact"] is not True:
+        result = _base_result(
+            "gate-release.publish",
+            ok=False,
+            status="default-head-drift-after-release",
+            source_sha=source_sha,
+            artifacts=artifacts,
+            defaultHeadObservations=head_observations,
+            gateRelease=proof,
+            releaseCreation=creation_record,
+            gateTag=tag_binding,
+            gateTagLease=pre_release_tag_lease,
+            immutableReleasePublished=(
+                isinstance(proof, Mapping) and proof.get("immutable") is True
+            ),
+            mutationApplied=mutation_applied,
+            mutationState=(
+                "applied" if mutation_applied is True else "observed-exact"
+            ),
+        )
+        result["_processExitCode"] = EXIT_ROLLBACK_INCOMPLETE
+        return _attach_post_mutation_evidence(result, args.evidence_dir)
     result = _base_result(
         "gate-release.publish",
         ok=True,
         status=status,
         source_sha=source_sha,
         artifacts=artifacts,
+        defaultHeadObservations=head_observations,
         gateRelease=proof,
         releaseCreation=creation_record,
         gateTag=tag_binding,
+        gateTagLease=pre_release_tag_lease,
+        immutableReleasePublished=(
+            isinstance(proof, Mapping) and proof.get("immutable") is True
+        ),
         mutationApplied=mutation_applied,
         mutationState="applied" if mutation_applied is True else "observed-exact",
     )
@@ -3295,6 +5202,69 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
         if mutation_applied is not False
         else _attach_command_evidence(result, args.evidence_dir)
     )
+
+
+def _github_gate_publisher_context(repo: str, source_ref: str | None) -> bool:
+    if not source_ref or not GIT_SHA_RE.fullmatch(source_ref.lower()):
+        return False
+    workflow_ref = os.environ.get("GITHUB_WORKFLOW_REF", "")
+    expected_prefix = f"{repo}/.github/workflows/publish-gate.yml@refs/heads/"
+    return bool(
+        os.environ.get("GITHUB_ACTIONS") == "true"
+        and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+        and os.environ.get("GITHUB_REPOSITORY", "").casefold() == repo.casefold()
+        and os.environ.get("GITHUB_SHA", "").lower() == source_ref.lower()
+        and os.environ.get("GITHUB_WORKFLOW_SHA", "").lower() == source_ref.lower()
+        and workflow_ref.startswith(expected_prefix)
+        and os.environ.get("HDF_PRIVILEGED_ENVIRONMENT")
+        == RELEASE_PUBLISHER_ENVIRONMENT
+    )
+
+
+def command_gate_release_entry(args: argparse.Namespace) -> dict[str, Any]:
+    if args.action != "publish" or not args.apply:
+        return command_gate_release(args)
+    repo = _require_repo(args.repo)
+    if _github_gate_publisher_context(repo, args.source_ref):
+        return command_gate_release(args)
+    if not args.source_ref:
+        raise UsageFailure("gate-release publish requires --source-ref and --apply")
+    preflight = _cloud_preflight(repo, "publish-gate.yml")
+    default_branch = str(preflight["defaultBranch"])
+    authority = _cloud_source_authority(repo, default_branch, args.source_ref)
+    final_lease = _require_cloud_head_lease(
+        repo,
+        default_branch,
+        str(authority["sourceSha"]),
+        "immediately-before-gate-workflow-dispatch",
+    )
+    dispatched = _dispatch_cloud(
+        preflight,
+        True,
+        expected_source_sha=str(authority["sourceSha"]),
+    )
+    dispatch_ok = dispatched.get("ok") is True
+    result = _base_result(
+        "gate-release.publish",
+        ok=dispatch_ok,
+        status=(
+            "publisher-workflow-dispatched"
+            if dispatch_ok else "publisher-workflow-dispatch-unverified"
+        ),
+        source_sha=str(authority["sourceSha"]),
+        repo=repo,
+        sourceAuthority=authority,
+        headLeases=[*authority["headLeases"], final_lease],
+        dispatch=dispatched,
+        directPublication=False,
+        mutationApplied=dispatched.get("mutationApplied"),
+        mutationState=dispatched.get("mutationState"),
+    )
+    if not dispatch_ok:
+        result["_processExitCode"] = int(
+            dispatched.get("_processExitCode", EXIT_ROLLBACK_INCOMPLETE)
+        )
+    return _attach_post_mutation_evidence(result, args.evidence_dir)
 
 
 def _child_recovery_details(value: Any) -> dict[str, Any]:
@@ -3397,6 +5367,395 @@ def _powershell_json(argv: Sequence[str], *, apply_mutation: bool, rollback: boo
     return _public_value(value)
 
 
+def _require_csp_probe_inspection(value: Any, *, label: str) -> str:
+    if not isinstance(value, Mapping):
+        raise IntegrityFailure(f"{label} returned a non-object CSP probe inspection")
+    state_sha = value.get("state_sha256")
+    probe_count = value.get("probe_count")
+    if (
+        value.get("command") != "csp-probe-inspect"
+        or value.get("ok") is not True
+        or value.get("two_read_stable") is not True
+        or value.get("read_1_sha256") != state_sha
+        or value.get("read_2_sha256") != state_sha
+        or not isinstance(state_sha, str)
+        or not SHA256_RE.fullmatch(state_sha)
+        or value.get("probe_source_sha256") != CSP_PROBE_SOURCE_SHA256
+        or value.get("endpoint") != CSP_PROBE_ENDPOINT
+        or type(probe_count) is not int
+        or probe_count not in (0, 1)
+        or value.get("probe_present") is not (probe_count == 1)
+        or value.get("adguard_configuration_changed") is not False
+    ):
+        raise IntegrityFailure(f"{label} failed the fixed CSP probe inspection contract")
+    return state_sha
+
+
+def _require_csp_probe_plan(value: Any) -> None:
+    if (
+        not isinstance(value, Mapping)
+        or value.get("command") != "csp-probe-install"
+        or value.get("ok") is not True
+        or value.get("what_if") is not True
+        or value.get("probe_present") is not False
+        or value.get("probe_source_sha256") != CSP_PROBE_SOURCE_SHA256
+        or value.get("endpoint") != CSP_PROBE_ENDPOINT
+        or value.get("is_custom") is not True
+        or value.get("is_style") is not False
+        or value.get("parsed_meta") != CSP_PROBE_PARSED_META_CONTRACT
+        or value.get("adguard_configuration_changed") is not False
+        or not isinstance(value.get("order"), list)
+        or "validated-backup-restore" not in value["order"]
+        or "two-independent-stable-post-inspections" not in value["order"]
+    ):
+        raise IntegrityFailure("AdGuard returned an invalid fixed CSP probe dry-run plan")
+
+
+def _require_csp_probe_install(value: Any, pre_state_sha: str) -> str:
+    if not isinstance(value, Mapping):
+        raise IntegrityFailure("AdGuard returned a non-object CSP probe install result")
+    backup = value.get("backup")
+    if (
+        value.get("command") != "csp-probe-install"
+        or value.get("ok") is not True
+        or value.get("changed") is not True
+        or value.get("probe_present") is not True
+        or value.get("pre_state_sha256") != pre_state_sha
+        or value.get("probe_source_sha256") != CSP_PROBE_SOURCE_SHA256
+        or value.get("endpoint") != CSP_PROBE_ENDPOINT
+        or value.get("is_custom") is not True
+        or value.get("is_style") is not False
+        or not isinstance(backup, str)
+        or not backup
+        or not isinstance(value.get("installed_state_sha256"), str)
+        or not SHA256_RE.fullmatch(value["installed_state_sha256"])
+    ):
+        raise IntegrityFailure("AdGuard returned an invalid fixed CSP probe install result")
+    return backup
+
+
+def _require_csp_probe_restore(value: Any, pre_state_sha: str) -> None:
+    if (
+        not isinstance(value, Mapping)
+        or value.get("command") != "csp-probe-restore"
+        or value.get("ok") is not True
+        or value.get("verified") is not True
+        or value.get("probe_present") is not False
+        or value.get("state_sha256") != pre_state_sha
+        or value.get("probe_source_sha256") != CSP_PROBE_SOURCE_SHA256
+        or value.get("idempotent") is not True
+    ):
+        raise IntegrityFailure("AdGuard returned an invalid fixed CSP probe restore result")
+
+
+def _create_csp_probe_backup_root() -> Path:
+    return Path(tempfile.mkdtemp(prefix="hotdeal-focus-csp-probe-"))
+
+
+def _discover_csp_probe_backup(backup_root: Path) -> Path | None:
+    try:
+        resolved_root = backup_root.resolve(strict=True)
+        entries = list(resolved_root.iterdir())
+    except OSError as error:
+        raise IntegrityFailure("CSP probe backup root cannot be inspected") from error
+    completed: list[Path] = []
+    for entry in entries:
+        if entry.is_symlink():
+            raise IntegrityFailure("CSP probe backup root contains a reparse entry")
+        if entry.name.startswith(".pending-") and entry.is_dir():
+            continue
+        if not entry.is_dir():
+            raise IntegrityFailure("CSP probe backup root contains an unexpected entry")
+        marker = entry / "backup-complete.json"
+        manifest = entry / "backup-manifest.json"
+        if (
+            not marker.is_file()
+            or marker.is_symlink()
+            or not manifest.is_file()
+            or manifest.is_symlink()
+        ):
+            raise IntegrityFailure("CSP probe backup directory is not complete and regular")
+        completed.append(entry.resolve(strict=True))
+    if len(completed) > 1:
+        raise IntegrityFailure("CSP probe installation produced multiple completed backups")
+    return completed[0] if completed else None
+
+
+def _csp_probe_backup_has_transaction(backup: Path) -> bool:
+    plan = backup / "transaction-plan.json"
+    marker = backup / "transaction-plan.complete.json"
+    plan_exists = plan.is_file() and not plan.is_symlink()
+    marker_exists = marker.is_file() and not marker.is_symlink()
+    if plan_exists is not marker_exists:
+        raise IntegrityFailure("CSP probe transaction marker is incomplete")
+    return plan_exists and marker_exists
+
+
+def _require_child_backup_path(child_path: str, discovered: Path) -> None:
+    try:
+        child = Path(child_path).resolve(strict=True)
+    except OSError as error:
+        raise IntegrityFailure("AdGuard CSP probe result names an unavailable backup") from error
+    if os.path.normcase(str(child)) != os.path.normcase(str(discovered)):
+        raise IntegrityFailure("AdGuard CSP probe result names a different backup")
+
+
+def _csp_probe_recovery_details(
+    ps_cli: Path,
+    backup: Path | None,
+    backup_root: Path,
+) -> dict[str, Any]:
+    details: dict[str, Any] = {"backupRoot": str(backup_root)}
+    if backup is not None:
+        details.update({
+            "backupPath": str(backup),
+            "commandArgv": [
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File", str(ps_cli), "csp-probe-restore", "-BackupPath",
+                str(backup), "-Apply",
+            ],
+        })
+    return details
+
+
+def _run_csp_browser_probe(script_path: Path) -> dict[str, Any]:
+    capture = _capture_command(
+        ("node", str(script_path)),
+        label="adguard-csp-browser-proof",
+        timeout_seconds=150,
+    )
+    try:
+        value = _decode_json(capture.stdout, "AdGuard CSP browser probe output")
+    except IntegrityFailure as error:
+        raise VerificationFailure("CSP browser probe returned no valid proof") from error
+    if capture.returncode:
+        failure_kind = value.get("failure_kind") if isinstance(value, Mapping) else None
+        safe_kind = failure_kind if failure_kind in {
+            "arguments-rejected", "origin-request-failed",
+            "origin-contract-failed", "browser-launch-failed",
+            "navigation-failed", "navigation-response-missing",
+            "proof-failed", "proof-error",
+        } else "invalid-failure-contract"
+        safe_observation: dict[str, Any] = {
+            "schema_version": 2,
+            "command": "adguard-csp-browser-probe",
+            "ok": False,
+            "failure_kind": safe_kind,
+        }
+        if isinstance(value, Mapping):
+            for key in CSP_PROBE_BROWSER_KEYS - {
+                "schema_version", "command", "ok", "computed_custom_property"
+            }:
+                if isinstance(value.get(key), bool):
+                    safe_observation[key] = value[key]
+            root_state = value.get("root_state")
+            if root_state in {
+                "complete", "failed", "missing", "pending", "other", "unknown"
+            }:
+                safe_observation["root_state"] = root_state
+        raise VerificationFailure(
+            "CSP browser probe did not prove the fixed contract",
+            details={"browserProbe": safe_observation},
+        )
+    if not isinstance(value, dict) or set(value) != set(CSP_PROBE_BROWSER_KEYS):
+        raise IntegrityFailure("CSP browser proof has an unexpected evidence field set")
+    for key in CSP_PROBE_BROWSER_KEYS - {
+        "schema_version", "command", "computed_custom_property"
+    }:
+        if value.get(key) is not True:
+            raise VerificationFailure("CSP browser proof contains a failed assertion")
+    if (
+        value.get("schema_version") != 2
+        or value.get("command") != "adguard-csp-browser-probe"
+        or value.get("computed_custom_property") != "hdf-gm-style-pass"
+    ):
+        raise VerificationFailure("CSP browser proof differs from the fixed result contract")
+    return _public_value(value)
+
+
+def _command_adguard_csp_probe(args: argparse.Namespace, ps_cli: Path) -> dict[str, Any]:
+    if args.backup_path:
+        raise UsageFailure("adguard csp-probe does not accept --backup-path")
+    if args.approve_exclusive_target_migration:
+        raise UsageFailure("adguard csp-probe does not accept migration approval")
+    powershell_base = (
+        "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+        "-File", str(ps_cli),
+    )
+    if not args.apply:
+        child = _powershell_json(
+            (*powershell_base, "csp-probe-install", "-WhatIf"),
+            apply_mutation=False,
+            rollback=False,
+        )
+        _require_csp_probe_plan(child)
+        result = _base_result(
+            "adguard.csp-probe",
+            ok=True,
+            status="dry-run",
+            source_sha=_try_source_sha(),
+            mutationApplied=False,
+            probe=child,
+        )
+        return _attach_command_evidence(result, args.evidence_dir)
+
+    browser_script = PROJECT_ROOT / "scripts" / "probe_adguard_csp.mjs"
+    if not browser_script.is_file():
+        raise PrerequisiteFailure("fixed AdGuard CSP browser probe is missing")
+    if not _command_exists("node"):
+        raise PrerequisiteFailure("Node.js is unavailable for the CSP browser proof")
+
+    pre = _powershell_json(
+        (*powershell_base, "csp-probe-inspect"),
+        apply_mutation=False,
+        rollback=False,
+    )
+    pre_state_sha = _require_csp_probe_inspection(pre, label="pre-inspection")
+    if pre.get("probe_present") is not False or pre.get("probe_count") != 0:
+        raise IntegrityFailure("fixed CSP probe already exists before the diagnostic")
+
+    backup_root = _create_csp_probe_backup_root()
+    install: dict[str, Any] | None = None
+    browser: dict[str, Any] | None = None
+    operation_error: CliFailure | None = None
+    discovered_backup: Path | None = None
+    restore: dict[str, Any] | None = None
+    recovery_contract_errors: list[CliFailure] = []
+    restore_errors: list[CliFailure] = []
+    restore_attempt_count = 0
+    post_inspections: list[dict[str, Any]] = []
+    post_errors: list[CliFailure] = []
+    child_backup_path: str | None = None
+    transaction_complete = False
+
+    try:
+        try:
+            candidate = _powershell_json(
+                (*powershell_base, "csp-probe-install", "-BackupRoot",
+                 str(backup_root), "-Apply"),
+                apply_mutation=True,
+                rollback=False,
+            )
+            child_backup_path = _require_csp_probe_install(candidate, pre_state_sha)
+            install = dict(candidate)
+            browser = _run_csp_browser_probe(browser_script)
+        except CliFailure as error:
+            operation_error = error
+    finally:
+        try:
+            discovered_backup = _discover_csp_probe_backup(backup_root)
+            if discovered_backup is not None:
+                transaction_complete = _csp_probe_backup_has_transaction(
+                    discovered_backup
+                )
+            if child_backup_path is not None:
+                if discovered_backup is None:
+                    raise IntegrityFailure(
+                        "successful CSP probe install has no completed backup"
+                    )
+                _require_child_backup_path(child_backup_path, discovered_backup)
+        except CliFailure as error:
+            recovery_contract_errors.append(error)
+
+        if discovered_backup is not None and transaction_complete:
+            restore_argv = (
+                *powershell_base, "csp-probe-restore", "-BackupPath",
+                str(discovered_backup), "-Apply",
+            )
+            for _ in range(2):
+                restore_attempt_count += 1
+                try:
+                    restored = _powershell_json(
+                        restore_argv, apply_mutation=True, rollback=True
+                    )
+                    _require_csp_probe_restore(restored, pre_state_sha)
+                    restore = dict(restored)
+                    break
+                except CliFailure as error:
+                    restore_errors.append(error)
+        elif install is not None:
+            recovery_contract_errors.append(IntegrityFailure(
+                "installed CSP probe has no restorable completed transaction"
+            ))
+
+        for index in range(2):
+            try:
+                observed = _powershell_json(
+                    (*powershell_base, "csp-probe-inspect"),
+                    apply_mutation=False,
+                    rollback=False,
+                )
+                observed_sha = _require_csp_probe_inspection(
+                    observed, label=f"post-inspection-{index + 1}"
+                )
+                if (
+                    observed_sha != pre_state_sha
+                    or observed.get("probe_present") is not False
+                    or observed.get("probe_count") != 0
+                ):
+                    raise IntegrityFailure(
+                        "post-inspection differs from the exact pre-probe state"
+                    )
+                post_inspections.append(dict(observed))
+            except CliFailure as error:
+                post_errors.append(error)
+
+    restore_was_required = discovered_backup is not None and transaction_complete
+    terminal_state_proved = len(post_inspections) == 2 and not post_errors
+    restoration_proved = not restore_was_required or restore is not None
+    if recovery_contract_errors or not terminal_state_proved or not restoration_proved:
+        raise MutationFailure(
+            "CSP probe terminal restoration could not be proven",
+            rollback_complete=False,
+            details={
+                "mutationApplied": None,
+                "mutationState": "unknown-terminal-state",
+                "restorationAttemptCount": restore_attempt_count,
+                "restoreFailureCount": len(restore_errors),
+                "postInspectionSuccessCount": len(post_inspections),
+                "adguardRecovery": _csp_probe_recovery_details(
+                    ps_cli, discovered_backup, backup_root
+                ),
+            },
+        )
+    if operation_error is not None:
+        raise MutationFailure(
+            "CSP probe failed after exact terminal restoration",
+            rollback_complete=True,
+            details={
+                "mutationApplied": False,
+                "mutationState": "rolled-back",
+                "failureType": type(operation_error).__name__,
+                "operationError": _public_value(operation_error.details),
+                "backup": str(discovered_backup) if discovered_backup else None,
+                "postStateSha256": pre_state_sha,
+            },
+        )
+    if install is None or browser is None or restore is None:
+        raise IntegrityFailure("CSP probe orchestration completed without full proof")
+
+    result = _base_result(
+        "adguard.csp-probe",
+        ok=True,
+        status="proved-and-restored",
+        source_sha=_try_source_sha(),
+        mutationApplied=False,
+        mutationState="transiently-applied-and-restored",
+        transientMutationApplied=True,
+        restorationVerified=True,
+        restorationAttemptCount=restore_attempt_count,
+        probeSourceSha256=CSP_PROBE_SOURCE_SHA256,
+        endpoint=CSP_PROBE_ENDPOINT,
+        backup=str(discovered_backup),
+        preInspection=pre,
+        install=install,
+        browserProof=browser,
+        restore=restore,
+        postInspections=post_inspections,
+    )
+    return _attach_command_evidence(result, args.evidence_dir)
+
+
 def command_adguard(args: argparse.Namespace) -> dict[str, Any]:
     if sys.platform != "win32":
         raise PrerequisiteFailure("AdGuard commands are supported only on Windows")
@@ -3408,6 +5767,10 @@ def command_adguard(args: argparse.Namespace) -> dict[str, Any]:
     if not ps_cli.is_file():
         raise PrerequisiteFailure("typed AdGuard PowerShell delegate is missing")
     action = args.action
+    if action == "csp-probe":
+        if args.manifest_source != DEFAULT_PAGES_MANIFEST:
+            raise UsageFailure("adguard csp-probe does not accept --manifest-source")
+        return _command_adguard_csp_probe(args, ps_cli)
     if action == "inspect":
         if args.apply or args.approve_exclusive_target_migration:
             raise UsageFailure("adguard inspect is read-only")
@@ -3492,6 +5855,7 @@ def command_adguard(args: argparse.Namespace) -> dict[str, Any]:
         source_sha=_try_source_sha(),
         artifacts=artifacts,
         releaseVersion=manifest["releaseVersion"],
+        protocolVersion=manifest["protocolVersion"],
         gateArtifactVersion=manifest["gateArtifactVersion"],
         gateRelease=gate_release,
         manifestSource=args.manifest_source,
@@ -3543,6 +5907,7 @@ def build_parser() -> JsonArgumentParser:
     cloud.add_argument("--run-id")
     cloud.add_argument("--output-root")
     cloud.add_argument("--evidence-dir")
+    cloud.add_argument("--source-ref")
     cloud.add_argument("--apply", action="store_true")
     cloud.add_argument("--json", action="store_true", required=True)
     cloud.set_defaults(execute=command_cloud)
@@ -3556,11 +5921,13 @@ def build_parser() -> JsonArgumentParser:
     gate_release.add_argument("--evidence-dir")
     gate_release.add_argument("--apply", action="store_true")
     gate_release.add_argument("--json", action="store_true", required=True)
-    gate_release.set_defaults(execute=command_gate_release)
+    gate_release.set_defaults(execute=command_gate_release_entry)
 
     adguard = commands.add_parser("adguard")
     adguard.add_argument(
-        "action", choices=("inspect", "plan", "deploy", "verify", "rollback")
+        "action", choices=(
+            "inspect", "plan", "deploy", "verify", "rollback", "csp-probe"
+        )
     )
     adguard.add_argument("--manifest-source", default=DEFAULT_PAGES_MANIFEST)
     adguard.add_argument("--backup-path")

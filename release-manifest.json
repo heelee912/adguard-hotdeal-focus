@@ -1,25 +1,25 @@
 {
   "artifacts": {
     "filter.txt": {
-      "bytes": 11707,
-      "installedRulesSha256": "561a2ba553589c67d7873b20a532bb446bae6f8bef011287c353bf26133cb9a7",
-      "sha256": "9ef7301255056e8ca9fe2b1e91bd29f7f8edea5f312ab000f465638a8d4f065a",
-      "version": "1.0.0"
+      "bytes": 70270,
+      "installedRulesSha256": "a7619be2bebf35f6f502366627697c19690c81adb6833c7cdaf7440066b593bb",
+      "sha256": "778c88297473f1aa94564e24780cdcc763164e6de9a7c6ab5ffd42df0e18ae38",
+      "version": "2.0.2"
     },
     "hotdeal-focus.user.js": {
-      "bytes": 161161,
-      "canonicalTextSha256": "991c1553ba27f7c8a0052f7af146443fd7fef20a983ca268bc756712d558af49",
-      "sha256": "760c223c16108c421476d2832ab17060c81ca3dc034236986622d07c1532df5a",
-      "version": "0.3.6"
+      "bytes": 313912,
+      "canonicalTextSha256": "933e3ae50531bdcf2b5db52749ebfb633f5e4a196a1c62cdc4ba1d222dd0eb14",
+      "sha256": "87ab45918f70ce536a6c23f0afa2290ce54e19e5ad8f4ef409f59c837338578c",
+      "version": "0.5.5"
     }
   },
-  "configSha256": "f576531c758bdde08b4691f132e28a07d2665ec72ce3b47d052f90fea4d3c8a5",
+  "configSha256": "65915de2fcdb6ddbca34fe4f50c8de9a481211fa29c9b7a3554ab33b98512285",
   "coverage": {
     "approvedVariantCount": 0,
-    "contractCount": 8,
-    "layoutCount": 8,
-    "layoutFamilyCount": 8,
-    "routeCount": 12,
+    "contractCount": 9,
+    "layoutCount": 9,
+    "layoutFamilyCount": 9,
+    "routeCount": 13,
     "siteCount": 7,
     "sites": [
       {
@@ -136,11 +136,27 @@
         "layouts": [
           {
             "applicableProfiles": [
-              "desktop",
-              "mobile"
+              "desktop"
             ],
             "domain": "quasarzone.com",
             "id": "market",
+            "paths": [
+              "|/bbs/qb_*/views/"
+            ],
+            "requiredRoles": [
+              "body",
+              "comments",
+              "product",
+              "title"
+            ],
+            "variants": []
+          },
+          {
+            "applicableProfiles": [
+              "mobile"
+            ],
+            "domain": "quasarzone.com",
+            "id": "market-mobile",
             "paths": [
               "|/bbs/qb_*/views/"
             ],
@@ -202,42 +218,42 @@
       }
     ]
   },
-  "filterSubscriptionUrl": "https://github.com/heelee912/adguard-hotdeal-focus/releases/download/gate-v1.0.0/filter.txt",
-  "gateArtifactVersion": "1.0.0",
-  "generatorVersion": "0.3.6",
+  "filterSubscriptionUrl": "https://github.com/heelee912/adguard-hotdeal-focus/releases/download/gate-v2.0.2/filter.txt",
+  "gateArtifactVersion": "2.0.2",
+  "generatorVersion": "0.5.5",
   "promotion": null,
-  "protocolVersion": 1,
-  "releaseVersion": "0.3.6",
+  "protocolVersion": 2,
+  "releaseVersion": "0.5.5",
   "rollback_of": null,
   "schemaVersion": 1,
   "sourceIntegrity": {
     "config/gate-artifacts.json": {
       "bytes": 449,
-      "sha256": "c9656ed065347738bf5c81802e80695a71d3529cffaea1ba2371b1a9b695356c"
+      "sha256": "ea35eaa942216b5166b11cb8d86220cc6c8c52ebc1453b657d91fc64738df150"
     },
     "config/sites.json": {
-      "bytes": 18586,
-      "sha256": "f576531c758bdde08b4691f132e28a07d2665ec72ce3b47d052f90fea4d3c8a5"
+      "bytes": 22141,
+      "sha256": "65915de2fcdb6ddbca34fe4f50c8de9a481211fa29c9b7a3554ab33b98512285"
     },
     "filter-static.txt": {
-      "bytes": 5640,
-      "sha256": "f2447c6c026b8309ab6cb6a2f7622daa0e3cad3d7329f357a4dd0ad62792e49f"
+      "bytes": 7551,
+      "sha256": "730179cced93a0db5fb1b1928478247861bc830ebfefc43ff4431e9685a6d07c"
     },
     "package-lock.json": {
-      "bytes": 1826,
-      "sha256": "88833c126d000a0de8d7ddf72ff8afcabf228458641cfb3f4adf60aaa890a4a3"
+      "bytes": 2258,
+      "sha256": "0595f4c5e0d6c0470883e4a1ef7f5199fb6d3c1d08f76864c11b36acc0cd35af"
     },
     "package.json": {
-      "bytes": 983,
-      "sha256": "10a3ec24cf2e4a9f86b79484a482bafea12b93ce230d312ff291835548040c14"
+      "bytes": 1944,
+      "sha256": "da27c2c36fbe47c186fef3e110d47728ce101b348e6bbab3f235d4ba251a8d8a"
     },
     "tests/fixtures/behavior-baseline.json": {
-      "bytes": 1986,
-      "sha256": "6178dd84a619a79915cd75ce679c107ab5580de606ffc0e984b62be427e1c8c5"
+      "bytes": 2322,
+      "sha256": "1d179225face2ce548b24dd9583c181c8e20c8a800bd89021fd551f92479fd83"
     },
     "tests/fixtures/dom-regressions.json": {
-      "bytes": 21686,
-      "sha256": "026cd9565e6208c23ffbfde7b89aa9298bf6303e0f74b9fc554835e73caf4813"
+      "bytes": 25753,
+      "sha256": "d31f8fcb7e3bd5cba08121a9500df367d3d33ca6648f5139c87c4eddb14d3d56"
     }
   },
   "status": "release-ready"

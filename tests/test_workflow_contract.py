@@ -51,6 +51,7 @@ class PublicRepositoryHygieneTests(unittest.TestCase):
                 ".audit-failure-screenshots/",
                 ".release-build-*/",
                 ".promotion-package/",
+                ".promotion-push/",
                 "candidate-draft/",
                 "candidate-release/",
             }.issubset(GITIGNORE_LINES)
@@ -103,6 +104,9 @@ class ImmutableGateReleaseWorkflowTests(unittest.TestCase):
             with self.subTest(prefix=prefix):
                 self.assertIn("dispatch_nonce:", workflow)
                 self.assertIn(f"run-name: {prefix}", workflow)
+        combined = VERIFY_WORKFLOW + WATCH_WORKFLOW + PUBLISH_GATE_WORKFLOW
+        self.assertEqual(4, combined.count("{ok,status,sourceSha,workflow,ref,dispatchNonce,run}"))
+        self.assertNotIn("{ok,status,sourceCommit,workflow,ref,dispatchNonce,run}", combined)
 
     def test_gate_publication_is_manual_verified_and_cli_controlled(self) -> None:
         trigger = PUBLISH_GATE_WORKFLOW.split("concurrency:", 1)[0]
@@ -117,6 +121,8 @@ class ImmutableGateReleaseWorkflowTests(unittest.TestCase):
             "npm run build",
             "git diff --exit-code -- .",
             "npm run integrity",
+            "npm run test:network",
+            "npm run test:oracle",
             "npm run test:tamper",
             "npm run test:behavior",
             "gate-release publish",
@@ -134,6 +140,46 @@ class ImmutableGateReleaseWorkflowTests(unittest.TestCase):
             "${{ runner.temp }}/gate-release-result.json",
             PUBLISH_GATE_WORKFLOW,
         )
+        self.assertIn("source_sha:\n", PUBLISH_GATE_WORKFLOW)
+        self.assertIn(
+            '[[ "${GITHUB_SHA}" == "${AUTHORIZED_SOURCE_SHA}" ]]',
+            PUBLISH_GATE_WORKFLOW,
+        )
+        publisher = PUBLISH_GATE_WORKFLOW.split("  publish:\n", 1)[1].split(
+            "  redispatch-verify:\n", 1
+        )[0]
+        verifier = PUBLISH_GATE_WORKFLOW.split("  verify-source:\n", 1)[1].split(
+            "  publish:\n", 1
+        )[0]
+        self.assertIn("name: hdf-release-publisher", publisher)
+        self.assertIn("deployment: false", publisher)
+        self.assertIn("contents: write", publisher)
+        self.assertNotIn("contents: write", verifier)
+        redispatch = PUBLISH_GATE_WORKFLOW.split("  redispatch-verify:\n", 1)[1]
+        self.assertIn("actions: write", redispatch)
+        self.assertNotIn("contents: write", redispatch)
+        self.assertIn("cloud dispatch", redispatch)
+        self.assertIn("--workflow verify.yml", redispatch)
+
+    def test_promotion_proof_and_secret_push_use_fresh_separate_jobs(self) -> None:
+        proof = WATCH_WORKFLOW.split("  promote:\n", 1)[1].split(
+            "  push-promotion:\n", 1
+        )[0]
+        push = WATCH_WORKFLOW.split("  push-promotion:\n", 1)[1].split(
+            "  report-failure:\n", 1
+        )[0]
+        self.assertIn("npm run test:behavior", proof)
+        self.assertIn("audit:dom", proof)
+        self.assertIn("promotion.bundle", proof)
+        self.assertNotIn("secrets.", proof)
+        self.assertIn("promotion.bundle", push)
+        self.assertIn("one exact child", push)
+        self.assertIn("release manifest hash disagrees", push)
+        self.assertIn("immutable filter.txt changed", push)
+        self.assertIn("Lease the audited base immediately before", push)
+        for forbidden in ("npm ci", "playwright", "xvfb-run", "audit:dom"):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, push)
 
     def test_pages_and_dom_promotions_require_the_immutable_gate(self) -> None:
         verify_pages = VERIFY_WORKFLOW.split("  publish-pages:\n", 1)[1]
@@ -149,6 +195,125 @@ class ImmutableGateReleaseWorkflowTests(unittest.TestCase):
             WATCH_WORKFLOW,
         )
 
+    def test_gate_publication_and_every_default_branch_writer_share_one_mutex(self) -> None:
+        mutex = "group: hotdeal-focus-release-state"
+        self.assertIn(mutex, PUBLISH_GATE_WORKFLOW)
+        push = WATCH_WORKFLOW.split("  push-promotion:\n", 1)[1].split(
+            "  report-failure:\n", 1
+        )[0]
+        heartbeat = WATCH_WORKFLOW.split("  scheduler-heartbeat:\n", 1)[1].split(
+            "  deploy-pages:\n", 1
+        )[0]
+        for name, section in (("push-promotion", push), ("heartbeat", heartbeat)):
+            with self.subTest(job=name):
+                self.assertIn(mutex, section)
+                self.assertIn("cancel-in-progress: false", section)
+
+    def test_default_branch_writers_use_one_fingerprint_bound_ssh_identity(self) -> None:
+        proof = WATCH_WORKFLOW.split("  promote:\n", 1)[1].split(
+            "  push-promotion:\n", 1
+        )[0]
+        push = WATCH_WORKFLOW.split("  push-promotion:\n", 1)[1].split(
+            "  report-failure:\n", 1
+        )[0]
+        heartbeat = WATCH_WORKFLOW.split("  scheduler-heartbeat:\n", 1)[1].split(
+            "  deploy-pages:\n", 1
+        )[0]
+        self.assertNotIn("contents: write", WATCH_WORKFLOW)
+        self.assertEqual(
+            2,
+            WATCH_WORKFLOW.count(
+                "git -c core.hooksPath=/dev/null push --porcelain"
+            ),
+        )
+        self.assertEqual(2, WATCH_WORKFLOW.count(
+            "secrets.HDF_AUTOMATION_PUSH_ED25519_PRIVATE_KEY"
+        ))
+        self.assertEqual(2, WATCH_WORKFLOW.count(
+            "vars.HDF_AUTOMATION_PUSH_KEY_FINGERPRINT"
+        ))
+        official_host_key = (
+            "github.com ssh-ed25519 "
+            "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+        )
+        official_host_fingerprint = (
+            "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"
+        )
+        self.assertNotIn("secrets.", proof)
+        self.assertIn("npm run test:behavior", proof)
+        for name, section in (("push-promotion", push), ("heartbeat", heartbeat)):
+            with self.subTest(job=name):
+                self.assertIn("contents: read", section)
+                self.assertIn("name: hdf-main-automation", section)
+                self.assertIn("deployment: false", section)
+                self.assertIn("GH_TOKEN:", section)
+                self.assertIn("x-access-token", section)
+                self.assertIn('ssh-keygen -y -f "${key_path}"', section)
+                self.assertIn(
+                    '"${actual_fingerprint}" == "${EXPECTED_AUTOMATION_PUSH_FINGERPRINT}"',
+                    section,
+                )
+                self.assertIn(official_host_key, section)
+                self.assertIn(official_host_fingerprint, section)
+                for directive in (
+                    "HostKeyAlgorithms ssh-ed25519",
+                    "IdentitiesOnly yes",
+                    "IdentityAgent none",
+                    "BatchMode yes",
+                    "StrictHostKeyChecking yes",
+                    "GlobalKnownHostsFile /dev/null",
+                    "PasswordAuthentication no",
+                    "KbdInteractiveAuthentication no",
+                ):
+                    self.assertIn(directive, section)
+                self.assertIn(
+                    'remote="git@github.com:${GITHUB_REPOSITORY}.git"', section
+                )
+                self.assertIn("git merge-base --is-ancestor", section)
+                self.assertIn(
+                    "git -c core.hooksPath=/dev/null push --porcelain", section
+                )
+                self.assertNotIn("--force", section)
+                self.assertGreaterEqual(section.count("git ls-remote --heads"), 2)
+                self.assertIn('[[ "${pushed_sha}" == "${', section)
+        self.assertIn(
+            "git -c core.hooksPath=/dev/null commit", heartbeat
+        )
+        heartbeat_push = heartbeat.split(
+            "- name: Fast-forward the heartbeat only if the remote head is unchanged",
+            1,
+        )[1]
+        self.assertIn(
+            "BASE_SHA: ${{ steps.heartbeat_commit.outputs.base_sha }}",
+            heartbeat_push,
+        )
+        self.assertIn(
+            "COMMIT_SHA: ${{ steps.heartbeat_commit.outputs.commit_sha }}",
+            heartbeat_push,
+        )
+        self.assertNotIn("git add", heartbeat_push)
+        self.assertNotIn("git commit", heartbeat_push)
+
+    def test_every_release_lane_runs_network_and_projection_oracles(self) -> None:
+        verify_lane = VERIFY_WORKFLOW.split(
+            "- name: Compare June/July behavior", 1
+        )[1].split("- name: Collect bounded", 1)[0]
+        watch_live_lane = WATCH_WORKFLOW.split(
+            "- name: Audit bounded samples", 1
+        )[1].split("- name: Publish the full-audit outcome", 1)[0]
+        watch_promotion_lane = WATCH_WORKFLOW.split(
+            "- name: Audit the exact candidate profiles", 1
+        )[1].split("- name: Seal the proven one-parent promotion", 1)[0]
+        for name, section in (
+            ("verify", verify_lane),
+            ("publish-gate", PUBLISH_GATE_WORKFLOW),
+            ("watch-live", watch_live_lane),
+            ("watch-promotion", watch_promotion_lane),
+        ):
+            with self.subTest(lane=name):
+                self.assertIn("npm run test:network", section)
+                self.assertIn("npm run test:oracle", section)
+
 
 class PagesRetryContractTests(unittest.TestCase):
     def test_audit_job_budget_exceeds_all_subprocess_timeouts_and_margin(self) -> None:
@@ -161,7 +326,7 @@ class PagesRetryContractTests(unittest.TestCase):
             r"timeout\s+--kill-after=(\d+)([smh])\s+(\d+)([smh])",
             audit_section,
         )
-        self.assertEqual(2, len(timeout_calls))
+        self.assertEqual(4, len(timeout_calls))
 
         def seconds(value: str, unit: str) -> int:
             return int(value) * {"s": 1, "m": 60, "h": 3600}[unit]
@@ -215,12 +380,14 @@ class PagesRetryContractTests(unittest.TestCase):
         self.assertTrue(all(timeout <= 360 for timeout in timeouts))
 
     def test_every_healthy_audit_retries_the_exact_current_release(self) -> None:
-        self.assertIn("deploy-pages:\n    needs: [audit, promote]", WATCH_WORKFLOW)
-        self.assertIn("needs.promote.result == 'success' ||", WATCH_WORKFLOW)
+        self.assertIn(
+            "deploy-pages:\n    needs: [audit, push-promotion]", WATCH_WORKFLOW
+        )
+        self.assertIn("needs.push-promotion.result == 'success' ||", WATCH_WORKFLOW)
         self.assertIn("needs.audit.outputs.failed == 'false'", WATCH_WORKFLOW)
         self.assertIn("ref: ${{ needs.audit.outputs.base_sha }}", WATCH_WORKFLOW)
-        self.assertIn("if: needs.promote.result != 'success'", WATCH_WORKFLOW)
-        self.assertIn("if: needs.promote.result == 'success'", WATCH_WORKFLOW)
+        self.assertIn("if: needs.push-promotion.result != 'success'", WATCH_WORKFLOW)
+        self.assertIn("if: needs.push-promotion.result == 'success'", WATCH_WORKFLOW)
         self.assertIn('remote_sha="$(git ls-remote', WATCH_WORKFLOW)
         self.assertIn('"${remote_sha}" != "${expected_sha}"', WATCH_WORKFLOW)
 
@@ -263,14 +430,14 @@ class PagesRetryContractTests(unittest.TestCase):
         self.assertIn("needs.deploy-pages.result == 'success'", WATCH_WORKFLOW)
         self.assertIn("The next healthy six-hour audit will retry", WATCH_WORKFLOW)
         self.assertIn(
-            "scheduler-heartbeat:\n    needs: [audit, promote, deploy-pages]",
+            "scheduler-heartbeat:\n    needs: [audit, push-promotion, deploy-pages]",
             WATCH_WORKFLOW,
         )
 
     def test_pages_deployments_are_serialized_and_head_pinned(self) -> None:
         shared_concurrency = (
             "concurrency:\n"
-            "      group: hotdeal-focus-pages-deployment\n"
+            "      group: hotdeal-focus-release-state\n"
             "      cancel-in-progress: false"
         )
         self.assertIn(shared_concurrency, VERIFY_WORKFLOW)
@@ -282,6 +449,12 @@ class PagesRetryContractTests(unittest.TestCase):
             "github.ref_name == github.event.repository.default_branch",
             VERIFY_WORKFLOW,
         )
+        for workflow in (VERIFY_WORKFLOW, WATCH_WORKFLOW):
+            self.assertIn("id: predeploy_head", workflow)
+            self.assertIn("id: postdeploy_head", workflow)
+            self.assertIn("head_drift=true", workflow)
+            self.assertIn("recover-pages-head-drift:", workflow)
+            self.assertIn("--workflow verify.yml", workflow)
 
 
 class MatrixDriftPromotionContractTests(unittest.TestCase):
@@ -354,6 +527,30 @@ const makeResult = (matchedApprovedPath, index) => ({
     roles: { title: ".title", body: ".body", comments: ".comments" },
     cardinality: { title: 1, body: 1, comments: 1 },
     containment: true,
+    productOrder: null,
+    policyProposal: {
+      schemaVersion: 1,
+      source: "independent-projection-tuple",
+      complete: true,
+      pageRoot: ".root",
+      pageRootEvidence: "all-role-lowest-common-ancestor",
+      product: { cardinality: "zero", order: null, selectors: [] },
+      bodyIgnored: [],
+      productIgnored: [],
+      commentIgnored: [],
+      safety: {
+        strictDescendantsOnly: true,
+        strongStructuralNoiseOnly: true,
+        meaningfulTextPriceAndPurchaseLinksExcluded: true,
+      },
+      shapeFingerprint: "projection-policy-v1-0123abcd",
+      promotionGate: {
+        promotable: false,
+        requiredDistinctUrlsPerProfile: 3,
+        requiredProfilesSource: "auditor-layout-contract",
+        requiredMatchingShapeFingerprint: true,
+      },
+    },
     commentItems: [".comment"],
     commentControls: [],
     commentIgnored: [],
@@ -391,6 +588,7 @@ const secondShape = [1, 2, 3].map((index) => {
   const result = makeResult(approvedPaths[1], index + 10);
   result.semanticOracle = structuredClone(result.semanticOracle);
   result.semanticOracle.pageRoot = ".root-v2";
+  result.semanticOracle.policyProposal.pageRoot = ".root-v2";
   result.semanticOracle.roles.title = ".title-v2";
   return result;
 });
@@ -532,10 +730,12 @@ if (matchingApprovedPaths(
             "  continue-drift-chain:\n", 1
         )[1].split("  report-pages-failure:\n", 1)[0]
         self.assertIn("needs.audit.outputs.failed == 'true'", chain_section)
-        self.assertIn("needs.promote.result == 'success'", chain_section)
+        self.assertIn("needs.push-promotion.result == 'success'", chain_section)
         self.assertNotIn("deploy-pages", chain_section)
         self.assertIn("actions: write", chain_section)
-        self.assertIn("gh workflow run watch-dom.yml", chain_section)
+        self.assertIn("cloud dispatch", chain_section)
+        self.assertIn("--workflow watch-dom.yml", chain_section)
+        self.assertIn("dispatchNonce", chain_section)
 
         # Contract model: each successful run promotes exactly one deterministic
         # candidate, then dispatches once from the updated head while drift remains.
@@ -706,6 +906,646 @@ class ArtifactQuotaContractTests(unittest.TestCase):
         self.assertNotIn("continue-on-error", promotion_upload)
         self.assertIn("if-no-files-found: error", promotion_upload)
         self.assertIn("retention-days: 7", promotion_upload)
+
+
+class AuditProofLeaseAndExpectationTests(unittest.TestCase):
+    def test_audit_resource_domains_are_exact_validated_hostnames(self) -> None:
+        audit_uri = (PROJECT_ROOT / "scripts" / "audit_pages.mjs").as_uri()
+        script = r"""
+import { readFileSync } from "node:fs";
+import { assertAuditConfig } from %s;
+const config = JSON.parse(readFileSync("config/sites.json", "utf8"));
+const selectedSiteIndex = 0;
+const selectedLayoutIndex = 0;
+config.sites[selectedSiteIndex].layouts[selectedLayoutIndex].resource_domains = [
+  "cdn.example.net",
+];
+assertAuditConfig(config);
+for (const invalid of [
+  "https://cdn.example.net/assets",
+  "CDN.example.net",
+  "cdn.example.net:8443",
+  "*.example.net",
+]) {
+  let rejected = false;
+  try {
+    const invalidConfig = structuredClone(config);
+    invalidConfig.sites[selectedSiteIndex].layouts[
+      selectedLayoutIndex
+    ].resource_domains = [invalid];
+    assertAuditConfig(invalidConfig);
+  } catch { rejected = true; }
+  if (!rejected) throw new Error(`invalid resource domain was accepted: ${invalid}`);
+}
+let duplicateRejected = false;
+try {
+  const duplicateConfig = structuredClone(config);
+  duplicateConfig.sites[selectedSiteIndex].layouts[
+    selectedLayoutIndex
+  ].resource_domains = ["cdn.example.net", "cdn.example.net"];
+  assertAuditConfig(duplicateConfig);
+} catch { duplicateRejected = true; }
+if (!duplicateRejected) throw new Error("duplicate resource domains were accepted");
+""" % json.dumps(audit_uri)
+        completed = subprocess.run(
+            ["node", "--input-type=module", "--eval", script],
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+
+    def test_runtime_expectations_profile_routes_and_fresh_relay_are_fail_closed(self) -> None:
+        audit_uri = (PROJECT_ROOT / "scripts" / "audit_pages.mjs").as_uri()
+        script = r"""
+import {
+  blockedUserscriptGateFailures,
+  classifyProfileLandingRoute,
+  committedProjectionEvidence,
+  finalizeProfileLandingCoverage,
+  runtimeExpectationForTarget,
+  semanticOracleContractFailures,
+  signedRelayAcquisitionEvidence,
+} from %s;
+
+if (runtimeExpectationForTarget({
+  source: "sample",
+  runtimeExpectation: "direct-negative",
+  url: "https://example.com/deal/1",
+}) !== "direct-negative") throw new Error("sample was not direct-negative");
+if (runtimeExpectationForTarget({
+  source: "algumon-latest",
+  runtimeExpectation: "relay-positive",
+  algumon: { dealId: "1" },
+}) !== "relay-positive") throw new Error("latest target was not relay-positive");
+let mismatchedExpectationRejected = false;
+try {
+  runtimeExpectationForTarget({
+    source: "sample",
+    runtimeExpectation: "relay-positive",
+    url: "https://example.com/deal/1",
+  });
+} catch { mismatchedExpectationRejected = true; }
+if (!mismatchedExpectationRejected) throw new Error("expectation mismatch was accepted");
+
+const safeBlockedGate = {
+  ready: false,
+  state: "blocked",
+  status: "terminal-algumon-seed-required",
+  blockedStateSafety: {
+    globalPaintLockIntact: true,
+    zeroVisibleContent: true,
+    passed: true,
+  },
+  paintProbe: {
+    sampleCount: 1,
+    flashFrameCount: 0,
+    firstReadyFrame: null,
+    samples: [{ bodyElementCount: 3, ready: false, paintLockIntact: true }],
+  },
+  visibleWithoutKeepCount: 0,
+  directVisibleTextLeakCount: 0,
+  uncoveredUnmarkedCount: 999,
+};
+if (blockedUserscriptGateFailures(safeBlockedGate).length !== 0) {
+  throw new Error("safe global-lock blocked state depended on ready marker coverage");
+}
+const unsafeBlockedGate = structuredClone(safeBlockedGate);
+unsafeBlockedGate.blockedStateSafety.globalPaintLockIntact = false;
+if (!blockedUserscriptGateFailures(unsafeBlockedGate).some((failure) =>
+  failure.includes("global paint lock"))) {
+  throw new Error("missing blocked global paint lock was accepted");
+}
+
+const site = {
+  id: "example",
+  layouts: [
+    {
+      id: "desktop",
+      domain: "example.com",
+      paths: ["|/desktop/view.php?id=deal^"],
+      applicable_profiles: ["desktop"],
+    },
+    {
+      id: "mobile",
+      domain: "example.com",
+      paths: ["|/mobile/view.php?id=deal^"],
+      applicable_profiles: ["mobile"],
+      variants: [{ id: "candidate", paths: ["|/mobile/new/*^"] }],
+    },
+  ],
+};
+const mobileLanding = classifyProfileLandingRoute(
+  site,
+  "mobile",
+  "https://m.example.com/mobile/view.php?id=deal&no=7",
+);
+if (
+  mobileLanding.layoutId !== "mobile" ||
+  mobileLanding.configuredPathMatchCount !== 1 ||
+  mobileLanding.approvedRouteMatched !== true
+) throw new Error("profile-UA final route was not selected exactly");
+const preRedirect = classifyProfileLandingRoute(
+  site,
+  "mobile",
+  "https://www.example.com/desktop/view.php?id=deal&no=7",
+);
+if (
+  preRedirect.classification !== "same-domain-candidate" ||
+  preRedirect.configuredPathMatchCount !== 0
+) throw new Error("relay destination was mistaken for the mobile final route");
+const candidateLanding = classifyProfileLandingRoute(
+  site,
+  "mobile",
+  "https://m.example.com/mobile/new/7",
+  { siteId: "example", layoutId: "mobile", variantId: "candidate" },
+);
+if (
+  candidateLanding.configuredPathMatchCount !== 1 ||
+  candidateLanding.approvedRouteMatched !== false
+) throw new Error("candidate route was not separated from baseline approval");
+
+const records = [{
+  siteId: "example",
+  profiles: {
+    mobile: {
+      matched: false,
+      allObservedRoutesCovered: null,
+      attempts: [],
+      relayInventory: { attempts: [{ finalPath: "/desktop/view.php" }] },
+    },
+  },
+}];
+finalizeProfileLandingCoverage(records, [{
+  siteId: "example",
+  profile: "mobile",
+  source: "algumon-latest",
+  requestedUrl: "https://m.example.com/mobile/view.php?id=deal&no=7",
+  routeFamily: "m.example.com/mobile/view.php?id=:article-token&no=:article-token",
+  approvedRouteMatched: true,
+  matchedApprovedPath: "|/mobile/view.php?id=deal^",
+  relayAcquisition: { ageMs: 1 },
+  routeObservation: { algumonDealId: "7" },
+  profileLanding: {
+    evidenceKind: "profile-user-agent-final-landing",
+    finalUrl: "https://m.example.com/mobile/view.php?id=deal&no=7",
+    layoutId: "mobile",
+    classification: "configured-exact",
+    configuredPathMatchCount: 1,
+    baselineApprovedPathMatchCount: 1,
+  },
+}]);
+if (
+  records[0].profiles.mobile.allObservedRoutesCovered !== true ||
+  records[0].profiles.mobile.attempts.length !== 1 ||
+  records[0].profiles.mobile.attempts[0].evidenceKind !==
+    "profile-user-agent-final-landing"
+) throw new Error("profile landing coverage was not finalized from actual UA evidence");
+
+const now = 1_800_000_000_000;
+const signature = "0123456789abcdef0123456789abcdef";
+const fresh = signedRelayAcquisitionEvidence(
+  `https://www.algumon.com/l/d/7?v=${signature}&t=${now - 1000}`,
+  "7",
+  now,
+);
+if (fresh.ageMs !== 1000) throw new Error("fresh signed relay age was not preserved");
+let staleRejected = false;
+try {
+  signedRelayAcquisitionEvidence(
+    `https://www.algumon.com/l/d/7?v=${signature}&t=${now - 300001}`,
+    "7",
+    now,
+  );
+} catch { staleRejected = true; }
+if (!staleRejected) throw new Error("stale signed relay was accepted");
+
+const committed = committedProjectionEvidence({
+  semanticProjectionCount: 1,
+  classes: [{ aliases: ["committed"] }],
+  oracleExecutionWorld: "chromium-isolated-v1",
+});
+if (committed.count !== 1 || committed.exactCount !== 1) {
+  throw new Error("committed projection count was not independently reported");
+}
+const completeSemanticOracle = {
+  ok: true,
+  structuralOk: true,
+  oracleSource: "verified-userscript-export",
+  oracleExecutionWorld: "chromium-isolated-v1",
+  pageRoot: ".root",
+  roles: {},
+  cardinality: {},
+  productOrder: null,
+  policyProposal: {
+    schemaVersion: 1,
+    source: "independent-projection-tuple",
+    complete: true,
+    pageRoot: ".root",
+    pageRootEvidence: "all-role-lowest-common-ancestor",
+    product: { cardinality: "zero", order: null, selectors: [] },
+    bodyIgnored: [],
+    productIgnored: [],
+    commentIgnored: [],
+    safety: {
+      strictDescendantsOnly: true,
+      strongStructuralNoiseOnly: true,
+      meaningfulTextPriceAndPurchaseLinksExcluded: true,
+    },
+    shapeFingerprint: "projection-policy-v1-0123abcd",
+    promotionGate: {
+      promotable: false,
+      requiredDistinctUrlsPerProfile: 3,
+      requiredProfilesSource: "auditor-layout-contract",
+      requiredMatchingShapeFingerprint: true,
+    },
+  },
+};
+if (semanticOracleContractFailures(completeSemanticOracle).length !== 0) {
+  throw new Error("a complete independent semantic oracle was rejected");
+}
+for (const incomplete of [
+  { ...completeSemanticOracle, ok: false },
+  { ...completeSemanticOracle, structuralOk: false },
+  { ...completeSemanticOracle, oracleSource: "page-global" },
+  { ...completeSemanticOracle, oracleExecutionWorld: "main-world" },
+]) {
+  if (semanticOracleContractFailures(incomplete).length === 0) {
+    throw new Error("an incomplete semantic oracle was accepted");
+  }
+}
+""" % json.dumps(audit_uri)
+        completed = subprocess.run(
+            ["node", "--input-type=module", "--eval", script],
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+
+    def test_discovery_enforces_actual_profile_coverage_and_jit_budget(self) -> None:
+        self.assertIn("refreshLatestTargetRelayProof(", AUDIT_SCRIPT)
+        self.assertIn("justInTimeRelayAcquisitionsPerTarget: 1", AUDIT_SCRIPT)
+        self.assertIn("justInTimeSignedRelayFetchesPerTarget: 1", AUDIT_SCRIPT)
+        self.assertIn("profile?.allObservedRoutesCovered !== true", AUDIT_SCRIPT)
+        self.assertIn("attempt.configuredPathMatchCount !== 1", AUDIT_SCRIPT)
+        self.assertIn('runtimeExpectation: "direct-negative"', AUDIT_SCRIPT)
+        self.assertIn('runtimeExpectation: "relay-positive"', AUDIT_SCRIPT)
+
+    def test_destination_network_response_and_access_lease_are_fail_closed(self) -> None:
+        audit_uri = (PROJECT_ROOT / "scripts" / "audit_pages.mjs").as_uri()
+        script = r"""
+import {
+  acquireArticleAccessLease,
+  articleIdentitiesLogicallyEquivalent,
+  candidateGenerationAllowed,
+  canonicalArticleIdentity,
+  classifyDestinationResponse,
+  consumeArticleAccessLease,
+  createArticleAccessLease,
+  networkFidelityFailures,
+  networkRequestDecision,
+  selectFinalMainDocumentResponse,
+  staticRuntimeConsistencyFailures,
+} from %s;
+
+const allowedChallenge = networkRequestDecision(
+  "https://challenges.cloudflare.com/cdn-cgi/challenge-platform/h/g/orchestrate/jsch/v1",
+  false,
+  ["arca.live"],
+  ["arca.live"],
+  ["challenges.cloudflare.com"],
+);
+if (!allowedChallenge.allowed || allowedChallenge.reason !== "exact-challenge-subresource") {
+  throw new Error("exact Arca challenge subresource was not allowed");
+}
+if (networkRequestDecision(
+  "https://challenges.cloudflare.com/",
+  true,
+  ["arca.live"],
+  ["arca.live"],
+  ["challenges.cloudflare.com"],
+).allowed) throw new Error("challenge host was allowed as a top-level navigation");
+if (networkRequestDecision(
+  "https://nested.challenges.cloudflare.com/",
+  false,
+  ["arca.live"],
+  ["arca.live"],
+  ["challenges.cloudflare.com"],
+).allowed) throw new Error("challenge host allowlist was not exact");
+for (const deniedUrl of [
+  "https://user:secret@arca.live/b/hotdeal/7",
+  "https://arca.live:8443/b/hotdeal/7",
+]) {
+  if (networkRequestDecision(
+    deniedUrl,
+    false,
+    ["arca.live"],
+    ["arca.live"],
+    ["challenges.cloudflare.com"],
+  ).allowed) throw new Error("credentialed or non-default-port request was allowed");
+}
+const blockedNetworkEvidence = {
+  blockedHostOverflowCount: 0,
+  blockedHosts: [
+    { hostname: "analytics.example", count: 2 },
+    { hostname: "article-cdn.example", count: 1 },
+  ],
+};
+if (networkFidelityFailures(blockedNetworkEvidence).length !== 0) {
+  throw new Error("intentional unrelated third-party blocking became a fidelity failure");
+}
+if (networkFidelityFailures(
+  blockedNetworkEvidence,
+  [],
+  ["article-cdn.example"],
+).length !== 1) throw new Error("blocked role-referenced CDN was not a fidelity failure");
+
+const articleUrl = "https://example.com/deal/7";
+const responseChain = [
+  { sequence: 0, url: articleUrl, status: 403, contentType: "text/html" },
+  { sequence: 1, url: articleUrl, status: 200, contentType: "text/html; charset=utf-8" },
+];
+const finalResponse = selectFinalMainDocumentResponse(responseChain, `${articleUrl}#ignored`);
+if (finalResponse?.status !== 200 || finalResponse?.sequence !== 1) {
+  throw new Error("final main-document response did not supersede the initial WAF response");
+}
+const article = classifyDestinationResponse({
+  finalUrl: articleUrl,
+  mainDocumentResponseChain: responseChain,
+  title: "Exact product article",
+  bodyText: "A normal article body with price and delivery details.",
+  challengeSelectors: [],
+});
+if (article.kind !== "article-response" || article.candidateEligible !== true) {
+  throw new Error("a final 200 HTML article was rejected");
+}
+const waf = classifyDestinationResponse({
+  finalUrl: articleUrl,
+  mainDocumentResponseChain: [responseChain[0]],
+  title: "Just a moment...",
+  bodyText: "Checking your browser before accessing the site. Cloudflare Ray ID",
+  challengeSelectors: ["#challenge-running"],
+});
+if (waf.kind !== "source-or-infrastructure-failure" || waf.candidateEligible !== false) {
+  throw new Error("WAF content was allowed to generate a selector candidate");
+}
+if (
+  candidateGenerationAllowed("direct-negative", article, 0) ||
+  candidateGenerationAllowed("relay-positive", waf, 0) ||
+  candidateGenerationAllowed("relay-positive", article, 1) ||
+  !candidateGenerationAllowed("relay-positive", article, 0)
+) throw new Error("candidate generation policy did not fail closed by source and fidelity");
+
+const now = 1_800_000_000_000;
+const identity = canonicalArticleIdentity(articleUrl);
+const binding = {
+  siteId: "example",
+  profileName: "desktop",
+  requestedArticleIdentitySha256: identity.sha256,
+  resolvedArticleIdentitySha256: identity.sha256,
+  resolvedRouteFamily: identity.routeFamily,
+};
+const cookie = (overrides = {}) => ({
+  name: "clearance",
+  value: "secret-cookie-value",
+  domain: ".example.com",
+  path: "/",
+  expires: -1,
+  httpOnly: true,
+  secure: true,
+  sameSite: "None",
+  ...overrides,
+});
+const lease = createArticleAccessLease(
+  [cookie(), cookie({ name: "foreign", domain: ".unrelated.test" }),
+   cookie({ name: "challenge", domain: ".challenges.cloudflare.com" }),
+   cookie({ name: "insecure", secure: false })],
+  binding,
+  ["example.com"],
+  now,
+);
+if (
+  lease.evidence.cookieCount !== 1 ||
+  lease.storageState.origins.length !== 0 ||
+  JSON.stringify(lease.evidence).includes("secret-cookie-value")
+) throw new Error("lease evidence exposed or retained invalid browser storage");
+const storageState = consumeArticleAccessLease(lease, binding, now + 1);
+if (
+  storageState.cookies.length !== 1 ||
+  storageState.cookies[0].value !== "secret-cookie-value" ||
+  storageState.origins.length !== 0 ||
+  lease.storageState !== null
+) throw new Error("one-use cookies-only storage state was not consumed exactly");
+let reused = false;
+try { consumeArticleAccessLease(lease, binding, now + 2); } catch { reused = true; }
+if (!reused) throw new Error("article access lease was reusable");
+const staleLease = createArticleAccessLease([cookie()], binding, ["example.com"], now);
+let stale = false;
+try { consumeArticleAccessLease(staleLease, binding, now + 60_001); } catch { stale = true; }
+if (!stale) throw new Error("stale article access lease was accepted");
+const wrongProfileLease = createArticleAccessLease([cookie()], binding, ["example.com"], now);
+let wrongProfile = false;
+try {
+  consumeArticleAccessLease(
+    wrongProfileLease,
+    { ...binding, profileName: "mobile" },
+    now + 1,
+  );
+} catch { wrongProfile = true; }
+if (!wrongProfile) throw new Error("profile-mismatched article access lease was accepted");
+
+const ppomppuDesktop = canonicalArticleIdentity(
+  "https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu&no=721171",
+  "ppomppu",
+);
+const ppomppuMobile = canonicalArticleIdentity(
+  "https://m.ppomppu.co.kr/new/bbs_view.php?id=ppomppu&no=721171",
+  "ppomppu",
+);
+if (!articleIdentitiesLogicallyEquivalent(ppomppuDesktop, ppomppuMobile)) {
+  throw new Error("canonical desktop/mobile identity alias was rejected");
+}
+let duplicateIdentityQuery = false;
+try {
+  canonicalArticleIdentity(
+    "https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu&no=721171&no=721172",
+    "ppomppu",
+  );
+} catch { duplicateIdentityQuery = true; }
+if (!duplicateIdentityQuery) throw new Error("duplicate article identity query was accepted");
+let identityPort = false;
+try {
+  canonicalArticleIdentity("https://zod.kr:8443/deal/8452555", "zod");
+} catch { identityPort = true; }
+if (!identityPort) throw new Error("non-default-port canonical identity was accepted");
+let redirectedToDifferentArticle = false;
+try {
+  await acquireArticleAccessLease(
+    { cookies: async () => [] },
+    { id: "ppomppu", layouts: [{ domain: "ppomppu.co.kr" }] },
+    "desktop",
+    "https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu&no=721171",
+    "https://m.ppomppu.co.kr/new/bbs_view.php?id=ppomppu&no=721172",
+    now,
+  );
+} catch { redirectedToDifferentArticle = true; }
+if (!redirectedToDifferentArticle) {
+  throw new Error("requested/resolved different-article lease was issued");
+}
+
+const consistency = staticRuntimeConsistencyFailures(
+  {
+    layoutId: "article",
+    resolvedArticleIdentitySha256: identity.sha256,
+    resolvedRouteFamily: identity.routeFamily,
+    semanticProjectionCount: 1,
+    projectionAliases: ["article"],
+  },
+  { finalUrl: articleUrl },
+  { diagnostics: { semanticProjectionCount: 1, layoutAliases: ["article"] } },
+  "article",
+);
+if (consistency.length !== 0) throw new Error("equal static/runtime identity was rejected");
+if (staticRuntimeConsistencyFailures(
+  {
+    layoutId: "article",
+    resolvedArticleIdentitySha256: identity.sha256,
+    resolvedRouteFamily: identity.routeFamily,
+    semanticProjectionCount: 1,
+    projectionAliases: ["article"],
+  },
+  { finalUrl: "https://example.com/deal/8" },
+  { diagnostics: { semanticProjectionCount: 1, layoutAliases: ["article"] } },
+  "article",
+).length === 0) throw new Error("different canonical article identity was accepted");
+""" % json.dumps(audit_uri)
+        completed = subprocess.run(
+            ["node", "--input-type=module", "--eval", script],
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+
+    def test_projected_hide_selector_uses_native_document_qsa_semantics(self) -> None:
+        audit_uri = (PROJECT_ROOT / "scripts" / "audit_pages.mjs").as_uri()
+        script = r"""
+import { chromium } from "playwright";
+import { buildProjectedHideSelector, settlePage } from %s;
+const browser = await chromium.launch({ headless: true });
+try {
+  const page = await browser.newPage();
+  await page.setContent(`<!doctype html><body>
+    <div id="D_"><article><div class="rhymix_content"><p id="kept">article</p></div></article></div>
+    <aside id="noise">noise</aside>
+  </body>`);
+  const selector = buildProjectedHideSelector({
+    ancestor_markers: ["#D_ article > .rhymix_content"],
+    preserve_deep: [".rhymix_content"],
+    preserve_shallow: [],
+  });
+  const matched = await page.evaluate((nativeSelector) =>
+    [...document.querySelectorAll(nativeSelector)].map((element) => element.id || element.tagName),
+    selector,
+  );
+  if (JSON.stringify(matched) !== JSON.stringify(["noise"])) {
+    throw new Error(`native document.querySelectorAll projection mismatch: ${JSON.stringify(matched)}`);
+  }
+  await page.setContent(`<!doctype html><body><main style="height:2000px">article</main>
+    <script>
+      addEventListener("scroll", () => {
+        const growth = document.createElement("div");
+        growth.style.height = "1000px";
+        document.body.append(growth);
+      });
+    </script></body>`);
+  let unboundedScrollRejected = false;
+  try {
+    await settlePage(page, 1_000);
+  } catch (error) {
+    unboundedScrollRejected = String(error).includes("bounded scroll settlement");
+  }
+  if (!unboundedScrollRejected) throw new Error("infinite-scroll settlement was not rejected");
+} finally {
+  await browser.close();
+}
+""" % json.dumps(audit_uri)
+        completed = subprocess.run(
+            ["node", "--input-type=module", "--eval", script],
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        if (
+            completed.returncode != 0
+            and "Executable doesn't exist" in completed.stderr
+        ):
+            self.skipTest(
+                "Playwright Chromium is installed after the preflight unit-test stage"
+            )
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+
+    def test_live_audits_are_headed_under_xvfb_and_modes_are_separated(self) -> None:
+        self.assertEqual(3, WATCH_WORKFLOW.count("xvfb-run -a"))
+        for invocation in WATCH_WORKFLOW.split("xvfb-run -a")[1:]:
+            self.assertIn("--headed", invocation[:500])
+        self.assertIn(
+            '"direct-negative provenance-only; bootstrap, lease, and static semantic audit omitted"',
+            AUDIT_SCRIPT,
+        )
+        self.assertIn(
+            '"runtime-only candidate verification; source and access lease still verified"',
+            AUDIT_SCRIPT,
+        )
+        self.assertIn("const liveSites = sites;", AUDIT_SCRIPT)
+        self.assertNotIn("live navigation is CI-only", AUDIT_SCRIPT)
+        self.assertNotIn("safetySkips", AUDIT_SCRIPT)
+        self.assertLess(
+            AUDIT_SCRIPT.index("accessLease = await acquireArticleAccessLease("),
+            AUDIT_SCRIPT.index("const userscriptSession = await createPageContext("),
+        )
+        self.assertIn("return { result, candidates: [] };", AUDIT_SCRIPT)
+
+
+class BehaviorAuditContractTests(unittest.TestCase):
+    def test_gate_snapshot_waits_for_the_atomic_released_protocol_state(self) -> None:
+        gate = AUDIT_SCRIPT[
+            AUDIT_SCRIPT.index("async function auditUserscriptGate"):
+            AUDIT_SCRIPT.index("function commentControlProjectionFailures")
+        ]
+        self.assertIn(".waitForFunction(", gate)
+        self.assertIn(
+            ".some((rect) => rect.width > 0 && rect.height > 0)",
+            gate,
+        )
+        self.assertNotIn("getClientRects().length > 0", gate)
+        self.assertIn("paintProbe.firstReadyFrame !== null", gate)
+        self.assertIn("diagnostics?.semanticProjectionCount === 1", gate)
+        self.assertIn("preauthorized?.extendedCssCallbacks >= 2", gate)
+        self.assertIn(".length === 1", gate)
+        self.assertNotIn("hotdeal-audit-marker-projection", gate)
+
+    def test_edge_gate_uses_complete_css_and_terminal_reason_prefixes(self) -> None:
+        edge = AUDIT_SCRIPT[
+            AUDIT_SCRIPT.index("async function auditSyntheticEdgeFixtures"):
+            AUDIT_SCRIPT.index("function fixtureCoverageFailures")
+        ]
+        self.assertIn(".map((rule) => rule.cssText)", edge)
+        self.assertIn('dialogDisplay: dialogStyle?.display ?? null', edge)
+        self.assertIn('lockedState.dialogDisplay !== "none"', edge)
+        self.assertIn(
+            '!String(edgeState.status ?? "").startsWith(fixture.expectedStatusPrefix)',
+            edge,
+        )
 
 
 class ReleaseManifestCanonicalHashTests(unittest.TestCase):
