@@ -150,7 +150,14 @@ BRANCH_GOVERNANCE_PR_RULESET_NAME = "Hotdeal Focus / PR and verified CI"
 BRANCH_GOVERNANCE_HISTORY_RULESET_NAME = (
     "Hotdeal Focus / immutable fast-forward history"
 )
-GATE_TAG_RULESET_NAME = "Hotdeal Focus / immutable gate-v2 tag"
+GATE_TAG_CREATION_RULESET_NAME = "Hotdeal Focus / controlled gate-v2 tag creation"
+GATE_TAG_FREEZE_RULESET_NAME = "Hotdeal Focus / immutable gate-v2 tag"
+GOVERNANCE_RULESET_MUTATION_ORDER = (
+    "immutableFastForwardHistory",
+    "prAndVerifiedCi",
+    "gateTagCreation",
+    "immutableGateTag",
+)
 GITHUB_ACTIONS_INTEGRATION_ID = 15368
 GITHUB_VERIFY_STATUS_CONTEXT = "verify"
 SSH_SHA256_FINGERPRINT_RE = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
@@ -1931,13 +1938,13 @@ def _required_branch_ruleset_contracts() -> dict[str, dict[str, Any]]:
                 {"type": "required_linear_history"},
             ],
         },
-        "immutableGateTag": {
-            "name": GATE_TAG_RULESET_NAME,
+        "gateTagCreation": {
+            "name": GATE_TAG_CREATION_RULESET_NAME,
             "target": "tag",
             "enforcement": "active",
             "bypass_actors": [{
-                "actor_id": GITHUB_ACTIONS_INTEGRATION_ID,
-                "actor_type": "Integration",
+                "actor_id": None,
+                "actor_type": "DeployKey",
                 "bypass_mode": "always",
             }],
             "conditions": {
@@ -1946,8 +1953,20 @@ def _required_branch_ruleset_contracts() -> dict[str, dict[str, Any]]:
                     "exclude": [],
                 }
             },
+            "rules": [{"type": "creation"}],
+        },
+        "immutableGateTag": {
+            "name": GATE_TAG_FREEZE_RULESET_NAME,
+            "target": "tag",
+            "enforcement": "active",
+            "bypass_actors": [],
+            "conditions": {
+                "ref_name": {
+                    "include": ["refs/tags/gate-v2.0.2"],
+                    "exclude": [],
+                }
+            },
             "rules": [
-                {"type": "creation"},
                 {
                     "type": "update",
                     "parameters": {"update_allows_fetch_and_merge": False},
@@ -1956,6 +1975,14 @@ def _required_branch_ruleset_contracts() -> dict[str, dict[str, Any]]:
             ],
         },
     }
+
+
+def _gate_tag_bootstrap_freeze_contract() -> dict[str, Any]:
+    contract = json.loads(canonical_json_bytes(
+        _required_branch_ruleset_contracts()["immutableGateTag"]
+    ).decode("utf-8"))
+    contract["rules"] = [{"type": "creation"}, *contract["rules"]]
+    return contract
 
 
 def _ruleset_mutation_payload(contract: Mapping[str, Any]) -> dict[str, Any]:
@@ -2851,42 +2878,129 @@ def _configure_cloud(
     governance_before = before["branchGovernance"]
     staged_governance: Mapping[str, Any] = governance_before
     governance_observation_error: str | None = None
-    if governance_before.get("exact") is not True:
-        required_rulesets = _required_branch_ruleset_contracts()
-        observed_rulesets = governance_before["namedRulesets"]
-        for contract_name in (
-            "immutableFastForwardHistory", "prAndVerifiedCi", "immutableGateTag"
-        ):
-            observed_ruleset = observed_rulesets[contract_name]
-            if observed_ruleset["exact"] is True:
-                continue
-            contract = required_rulesets[contract_name]
-            payload = _ruleset_mutation_payload(contract)
-            ruleset_id = observed_ruleset["id"]
-            method = "POST" if ruleset_id is None else "PUT"
-            endpoint = (
-                f"repos/{repo}/rulesets"
-                if ruleset_id is None
-                else f"repos/{repo}/rulesets/{ruleset_id}"
-            )
-            label = f"configure-ruleset-{contract_name}"
-            mutate(
-                lambda endpoint=endpoint, method=method, payload=payload, label=label: (
-                    _github_api_mutation(
-                        endpoint,
-                        label,
-                        method=method,
-                        payload=payload,
-                    )
-                ),
-                label,
-            )
+
+    def observe_governance(phase: str) -> bool:
+        nonlocal ambiguous, governance_observation_error, staged_governance
         try:
             staged_governance = _github_branch_governance_state(repo, default_branch)
         except (CliFailure, OSError) as error:
             ambiguous = True
-            governance_observation_error = _safe_error(str(error))
-            staged_governance = governance_before
+            governance_observation_error = _safe_error(f"{phase}: {error}")
+            return False
+        return True
+
+    def write_ruleset(
+        contract_name: str, contract: Mapping[str, Any], label: str
+    ) -> bool:
+        named_rulesets = staged_governance.get("namedRulesets")
+        if not isinstance(named_rulesets, Mapping):
+            raise IntegrityFailure("GitHub named ruleset state is unavailable")
+        observed_ruleset = named_rulesets.get(contract_name)
+        if not isinstance(observed_ruleset, Mapping):
+            raise IntegrityFailure(f"GitHub ruleset state is missing: {contract_name}")
+        ruleset_id = observed_ruleset.get("id")
+        if ruleset_id is not None and (type(ruleset_id) is not int or ruleset_id < 1):
+            raise IntegrityFailure(f"GitHub ruleset ID is malformed: {contract_name}")
+        payload = _ruleset_mutation_payload(contract)
+        method = "POST" if ruleset_id is None else "PUT"
+        endpoint = (
+            f"repos/{repo}/rulesets"
+            if ruleset_id is None
+            else f"repos/{repo}/rulesets/{ruleset_id}"
+        )
+        require_head(f"before-{label}")
+        return mutate(
+            lambda: _github_api_mutation(
+                endpoint,
+                label,
+                method=method,
+                payload=payload,
+            ),
+            label,
+        )
+
+    if governance_before.get("exact") is not True:
+        required_rulesets = _required_branch_ruleset_contracts()
+        if set(GOVERNANCE_RULESET_MUTATION_ORDER) != set(required_rulesets):
+            raise IntegrityFailure("governance ruleset mutation order is incomplete")
+
+        governance_sequence_ready = True
+        for contract_name in GOVERNANCE_RULESET_MUTATION_ORDER[:2]:
+            observed_ruleset = staged_governance["namedRulesets"][contract_name]
+            if observed_ruleset["exact"] is True:
+                continue
+            label = f"configure-ruleset-{contract_name}"
+            if not write_ruleset(contract_name, required_rulesets[contract_name], label):
+                governance_sequence_ready = False
+                break
+            governance_sequence_ready = observe_governance(f"observe-{contract_name}")
+            if not governance_sequence_ready:
+                break
+            if staged_governance["namedRulesets"][contract_name]["exact"] is not True:
+                ambiguous = True
+                governance_observation_error = f"{label} was not observed exact"
+                governance_sequence_ready = False
+                break
+
+        if governance_sequence_ready:
+            named_rulesets = staged_governance["namedRulesets"]
+            creation_state = named_rulesets["gateTagCreation"]
+            freeze_state = named_rulesets["immutableGateTag"]
+            if creation_state["exact"] is not True or freeze_state["exact"] is not True:
+                bootstrap_freeze = _gate_tag_bootstrap_freeze_contract()
+                if freeze_state.get("contract") != bootstrap_freeze:
+                    governance_sequence_ready = write_ruleset(
+                        "immutableGateTag",
+                        bootstrap_freeze,
+                        "bootstrap-gate-tag-freeze",
+                    )
+                    if governance_sequence_ready:
+                        governance_sequence_ready = observe_governance(
+                            "observe-bootstrap-gate-tag-freeze"
+                        )
+                if governance_sequence_ready:
+                    freeze_state = staged_governance["namedRulesets"]["immutableGateTag"]
+                    if freeze_state.get("contract") != bootstrap_freeze:
+                        ambiguous = True
+                        governance_observation_error = (
+                            "bootstrap gate-tag freeze was not observed exact"
+                        )
+                        governance_sequence_ready = False
+
+                if governance_sequence_ready:
+                    creation_state = staged_governance["namedRulesets"]["gateTagCreation"]
+                    if creation_state["exact"] is not True:
+                        governance_sequence_ready = write_ruleset(
+                            "gateTagCreation",
+                            required_rulesets["gateTagCreation"],
+                            "configure-ruleset-gateTagCreation",
+                        )
+                        if governance_sequence_ready:
+                            governance_sequence_ready = observe_governance(
+                                "observe-controlled-gate-tag-creation"
+                            )
+                if governance_sequence_ready:
+                    creation_state = staged_governance["namedRulesets"]["gateTagCreation"]
+                    freeze_state = staged_governance["namedRulesets"]["immutableGateTag"]
+                    if (
+                        creation_state["exact"] is not True
+                        or freeze_state.get("contract") != bootstrap_freeze
+                    ):
+                        ambiguous = True
+                        governance_observation_error = (
+                            "controlled tag creation and bootstrap freeze were not both "
+                            "observed exact"
+                        )
+                        governance_sequence_ready = False
+
+                if governance_sequence_ready:
+                    governance_sequence_ready = write_ruleset(
+                        "immutableGateTag",
+                        required_rulesets["immutableGateTag"],
+                        "finalize-gate-tag-freeze",
+                    )
+                    if governance_sequence_ready:
+                        observe_governance("observe-final-gate-tag-freeze")
 
     require_head("after-governance")
 
@@ -4160,33 +4274,68 @@ def _require_gate_tag_lease(repo: str, tag: str, source_sha: str) -> dict[str, A
     return record
 
 
-def _ensure_remote_gate_tag(repo: str, tag: str, source_sha: str) -> dict[str, Any]:
-    existing = _remote_gate_tag_commit(repo, tag, allow_missing=True)
-    if existing is not None:
-        if existing != source_sha:
-            raise IntegrityFailure("pre-existing gate tag targets a different commit")
-        return {
-            "verified": True,
-            "status": "already-bound",
-            "sourceCommit": existing,
-            "mutationApplied": False,
-        }
-    capture: ExecutionCapture | None = None
-    creation_error: str | None = None
+def _remote_repository_file_bytes(
+    repo: str, path: str, source_sha: str, *, max_bytes: int
+) -> bytes:
+    encoded_path = urllib.parse.quote(path, safe="/")
+    encoded_ref = urllib.parse.quote(source_sha, safe="")
+    value = _gh_json(
+        (
+            "gh", "api", "-H", GITHUB_JSON_ACCEPT_HEADER, "-H",
+            GITHUB_API_VERSION_HEADER,
+            f"repos/{repo}/contents/{encoded_path}?ref={encoded_ref}",
+        ),
+        f"remote-source-file-{path.replace('/', '-')}",
+        prerequisite=True,
+    )
+    if (
+        not isinstance(value, dict)
+        or value.get("type") != "file"
+        or value.get("path") != path
+        or value.get("encoding") != "base64"
+        or type(value.get("size")) is not int
+        or value["size"] < 1
+        or value["size"] > max_bytes
+        or not isinstance(value.get("content"), str)
+    ):
+        raise IntegrityFailure(f"remote source file is malformed: {path}")
     try:
-        capture = _capture_command(
-            (
-                "gh", "api", "--method", "POST", "-H",
-                "X-GitHub-Api-Version: 2026-03-10", f"repos/{repo}/git/refs",
-                "-f", f"ref=refs/tags/{tag}", "-f", f"sha={source_sha}",
-            ),
-            label="create-gate-tag",
-            timeout_seconds=60,
+        content = base64.b64decode(
+            "".join(value["content"].split()).encode("ascii"), validate=True
         )
-        if capture.returncode:
-            creation_error = "GitHub CLI returned a nonzero tag-create result"
-    except (CliFailure, OSError) as error:
-        creation_error = _safe_error(str(error))
+    except (UnicodeEncodeError, ValueError) as error:
+        raise IntegrityFailure(f"remote source file is not base64: {path}") from error
+    if len(content) != value["size"]:
+        raise IntegrityFailure(f"remote source file size differs: {path}")
+    return content
+
+
+def _gate_tag_source_authority(
+    repo: str, tag: str, source_sha: str, gate_bytes: bytes
+) -> dict[str, Any]:
+    remote_gate_bytes = _remote_repository_file_bytes(
+        repo, "filter.txt", source_sha, max_bytes=MAX_HTTPS_BYTES
+    )
+    _validate_locked_gate_bytes(remote_gate_bytes)
+    if remote_gate_bytes != gate_bytes:
+        raise IntegrityFailure("frozen gate tag source contains different gate bytes")
+    return {
+        "tag": tag,
+        "sourceCommit": source_sha,
+        "filterBytes": len(remote_gate_bytes),
+        "filterSha256": sha256_bytes(remote_gate_bytes),
+        "exact": True,
+    }
+
+
+def _ensure_remote_gate_tag(
+    repo: str,
+    tag: str,
+    source_sha: str,
+    *,
+    gate_bytes: bytes | None = None,
+    allow_frozen_source: bool = False,
+) -> dict[str, Any]:
     observed: str | None = None
     observation_error: str | None = None
     for attempt in range(6):
@@ -4198,23 +4347,32 @@ def _ensure_remote_gate_tag(repo: str, tag: str, source_sha: str) -> dict[str, A
             observation_error = _safe_error(str(error))
         if attempt < 5:
             time.sleep(5)
-    accepted = capture is not None and capture.returncode == 0
-    if observed == source_sha:
+    if observed is None:
         return {
-            "verified": True,
-            "status": "created" if accepted else "observed-exact",
-            "sourceCommit": observed,
-            "mutationApplied": True if accepted else None,
-            "creation": capture.summary() if capture else {"error": creation_error},
+            "verified": False,
+            "status": "prebound-tag-missing",
+            "sourceCommit": None,
+            "expectedSourceCommit": source_sha,
+            "mutationApplied": False,
+            "observationError": observation_error,
         }
+    if observed != source_sha and not allow_frozen_source:
+        raise IntegrityFailure("pre-existing gate tag targets a different commit")
+    authority = None
+    if observed != source_sha:
+        if gate_bytes is None:
+            raise IntegrityFailure("frozen gate recovery requires exact gate bytes")
+        authority = _gate_tag_source_authority(repo, tag, observed, gate_bytes)
     return {
-        "verified": False,
-        "status": "conflicting-target" if observed else "terminal-state-unknown",
+        "verified": True,
+        "status": (
+            "already-bound" if observed == source_sha else "frozen-source-recovery"
+        ),
         "sourceCommit": observed,
         "expectedSourceCommit": source_sha,
-        "mutationApplied": True if accepted else None,
-        "creation": capture.summary() if capture else {"error": creation_error},
-        "observationError": observation_error,
+        "sourceMatchesWorkflow": observed == source_sha,
+        "sourceAuthority": authority,
+        "mutationApplied": False,
     }
 
 
@@ -4753,6 +4911,120 @@ def _command_gate_policy(args: argparse.Namespace, repo: str) -> dict[str, Any]:
     return _attach_post_mutation_evidence(result, args.evidence_dir)
 
 
+def _gate_release_source_context(repo: str, source_sha: str) -> dict[str, Any]:
+    repository = _gh_json(
+        (
+            "gh", "repo", "view", repo, "--json",
+            "nameWithOwner,visibility,defaultBranchRef",
+        ),
+        "gate-release-repository",
+        prerequisite=True,
+    )
+    default_branch_ref = repository.get("defaultBranchRef") \
+        if isinstance(repository, dict) else None
+    default_branch = default_branch_ref.get("name") \
+        if isinstance(default_branch_ref, dict) else None
+    if (
+        not isinstance(repository, dict)
+        or str(repository.get("nameWithOwner", "")).casefold() != repo.casefold()
+        or repository.get("visibility") != "PUBLIC"
+        or not isinstance(default_branch, str)
+        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}", default_branch)
+        or ".." in default_branch
+        or "//" in default_branch
+        or default_branch.endswith(("/", ".", ".lock"))
+    ):
+        raise IntegrityFailure("gate release repository is not the exact public repository")
+    commit = _gh_json(
+        ("gh", "api", f"repos/{repo}/commits/{source_sha}"),
+        "gate-release-source-commit",
+        prerequisite=True,
+    )
+    if not isinstance(commit, dict) or str(commit.get("sha", "")).lower() != source_sha:
+        raise IntegrityFailure("gate release source commit is not present in the repository")
+    return {"repository": repository, "defaultBranch": default_branch}
+
+
+def _prepare_gate_publication(
+    args: argparse.Namespace,
+    repo: str,
+    tag: str,
+    subscription_url: str,
+    gate_bytes: bytes,
+    artifacts: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    if args.apply or not args.source_ref:
+        raise UsageFailure("gate-release prepare-publish is read-only and requires --source-ref")
+    source_sha = _git_source_binding(args.source_ref)
+    source_context = _gate_release_source_context(repo, source_sha)
+    default_branch = str(source_context["defaultBranch"])
+    existing = _gate_release_view(repo, tag, allow_missing=True)
+    if existing is not None and existing.get("isDraft") is not True:
+        proof = _verify_gate_release_with_retry(
+            repo, tag, subscription_url, gate_bytes
+        )
+        result = _base_result(
+            "gate-release.prepare-publish",
+            ok=True,
+            status="already-published",
+            source_sha=source_sha,
+            artifacts=artifacts,
+            gateRelease=proof,
+            tagPresent=True,
+            tagSourceCommit=proof["sourceCommit"],
+            releaseComplete=True,
+            mutationApplied=False,
+        )
+        return _attach_command_evidence(result, args.evidence_dir)
+
+    policy = _immutable_release_policy(repo)
+    if policy["enabled"] is not True:
+        raise IntegrityFailure("repository immutable releases are not enabled")
+    tag_source_sha = _remote_gate_tag_commit(repo, tag, allow_missing=True)
+    tag_authority = None
+    if tag_source_sha is None:
+        if existing is not None:
+            raise IntegrityFailure("recoverable gate draft has no frozen tag")
+        head = _gate_default_head_observation(
+            repo, default_branch, source_sha, "prepare-before-tag"
+        )
+        _require_exact_gate_head_observation(head)
+    else:
+        tag_authority = _gate_tag_source_authority(
+            repo, tag, tag_source_sha, gate_bytes
+        )
+        head = _gate_default_head_observation(
+            repo, default_branch, source_sha, "prepare-existing-tag"
+        )
+        if existing is not None:
+            _exact_gate_draft_has_asset(
+                existing,
+                repo,
+                tag,
+                subscription_url,
+                gate_bytes,
+                tag_source_sha,
+            )
+    result = _base_result(
+        "gate-release.prepare-publish",
+        ok=True,
+        status=("ready-to-bind-tag" if tag_source_sha is None else "ready-to-recover"),
+        source_sha=source_sha,
+        artifacts=artifacts,
+        immutableReleasePolicy=policy,
+        defaultHeadObservation=head,
+        release=(
+            _gate_release_view_summary(existing) if existing is not None else None
+        ),
+        tagPresent=tag_source_sha is not None,
+        tagSourceCommit=tag_source_sha,
+        tagSourceAuthority=tag_authority,
+        releaseComplete=False,
+        mutationApplied=False,
+    )
+    return _attach_command_evidence(result, args.evidence_dir)
+
+
 def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
     repo = _require_repo(args.repo)
     if not _command_exists("gh"):
@@ -4766,6 +5038,15 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
     gate_bytes = (PROJECT_ROOT / "filter.txt").read_bytes()
     _validate_locked_gate_bytes(gate_bytes)
     subscription_url = manifest["filterSubscriptionUrl"]
+    if args.action == "prepare-publish":
+        return _prepare_gate_publication(
+            args,
+            bound_repo,
+            tag,
+            subscription_url,
+            gate_bytes,
+            artifacts,
+        )
     if args.action == "verify":
         if args.apply or args.source_ref:
             raise UsageFailure("gate-release verify is read-only")
@@ -4787,37 +5068,8 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
     if not args.apply or not args.source_ref:
         raise UsageFailure("gate-release publish requires --source-ref and --apply")
     source_sha = _git_source_binding(args.source_ref)
-    repository = _gh_json(
-        (
-            "gh", "repo", "view", bound_repo, "--json",
-            "nameWithOwner,visibility,defaultBranchRef",
-        ),
-        "gate-release-repository",
-        prerequisite=True,
-    )
-    default_branch_ref = repository.get("defaultBranchRef") \
-        if isinstance(repository, dict) else None
-    default_branch = default_branch_ref.get("name") \
-        if isinstance(default_branch_ref, dict) else None
-    if (
-        not isinstance(repository, dict)
-        or str(repository.get("nameWithOwner", "")).casefold()
-        != bound_repo.casefold()
-        or repository.get("visibility") != "PUBLIC"
-        or not isinstance(default_branch, str)
-        or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/-]{0,254}", default_branch)
-        or ".." in default_branch
-        or "//" in default_branch
-        or default_branch.endswith(("/", ".", ".lock"))
-    ):
-        raise IntegrityFailure("gate release repository is not the exact public repository")
-    commit = _gh_json(
-        ("gh", "api", f"repos/{bound_repo}/commits/{source_sha}"),
-        "gate-release-source-commit",
-        prerequisite=True,
-    )
-    if not isinstance(commit, dict) or str(commit.get("sha", "")).lower() != source_sha:
-        raise IntegrityFailure("gate release source commit is not present in the repository")
+    source_context = _gate_release_source_context(bound_repo, source_sha)
+    default_branch = str(source_context["defaultBranch"])
     existing = _gate_release_view(bound_repo, tag, allow_missing=True)
     if existing is not None and existing.get("isDraft") is not True:
         proof = _verify_gate_release_with_retry(
@@ -4839,19 +5091,57 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
     policy = _immutable_release_policy(bound_repo)
     if policy["enabled"] is not True:
         raise IntegrityFailure("repository immutable releases are not enabled")
+    tag_binding = _ensure_remote_gate_tag(
+        bound_repo,
+        tag,
+        source_sha,
+        gate_bytes=gate_bytes,
+        allow_frozen_source=True,
+    )
+    head_observations = [
+        _gate_default_head_observation(
+            bound_repo, default_branch, source_sha, "frozen-tag-commit-point"
+        )
+    ]
+    if not tag_binding["verified"]:
+        result = _base_result(
+            "gate-release.publish",
+            ok=False,
+            status="gate-tag-binding-unverified",
+            source_sha=source_sha,
+            artifacts=artifacts,
+            defaultHeadObservations=head_observations,
+            gateTag=tag_binding,
+            immutableReleasePublished=False,
+            mutationApplied=tag_binding["mutationApplied"],
+            mutationState="unknown",
+        )
+        result["_processExitCode"] = EXIT_ROLLBACK_INCOMPLETE
+        return _attach_post_mutation_evidence(result, args.evidence_dir)
+    gate_source_sha = str(tag_binding.get("sourceCommit", "")).lower()
+    if not GIT_SHA_RE.fullmatch(gate_source_sha):
+        raise IntegrityFailure("verified frozen gate tag has no exact source commit")
+    if _github_gate_publisher_context(bound_repo, source_sha):
+        workflow_gate_source = os.environ.get("HDF_GATE_TAG_SOURCE_SHA", "").lower()
+        workflow_creation_state = os.environ.get("HDF_GATE_TAG_CREATED", "")
+        if (
+            workflow_gate_source != gate_source_sha
+            or workflow_creation_state not in {"true", "false", "unknown"}
+        ):
+            raise IntegrityFailure("publisher workflow gate-tag evidence is malformed")
+        tag_binding["workflowCreationState"] = workflow_creation_state
+        tag_binding["mutationApplied"] = (
+            True if workflow_creation_state == "true"
+            else False if workflow_creation_state == "false"
+            else None
+        )
     if existing is not None and existing.get("isDraft") is True:
-        head_observations = [
-            _gate_default_head_observation(
-                bound_repo, default_branch, source_sha, "before-draft-recovery"
-            )
-        ]
-        _require_exact_gate_head_observation(head_observations[-1])
         recovery = _recover_exact_gate_draft(
             bound_repo,
             tag,
             subscription_url,
             gate_bytes,
-            source_sha,
+            gate_source_sha,
             existing,
         )
         head_observations.append(
@@ -4859,28 +5149,6 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
                 bound_repo, default_branch, source_sha, "after-draft-recovery"
             )
         )
-        if head_observations[-1]["exact"] is not True:
-            result = _base_result(
-                "gate-release.publish",
-                ok=False,
-                status="default-head-drift-after-draft-recovery",
-                source_sha=source_sha,
-                artifacts=artifacts,
-                defaultHeadObservations=head_observations,
-                gateDraftRecovery={
-                    key: value for key, value in recovery.items() if key != "proof"
-                },
-                gateRelease=recovery.get("proof"),
-                mutationApplied=recovery.get("mutationApplied"),
-                mutationState=recovery.get("mutationState", "unknown"),
-                immutableReleasePublished=(
-                    recovery.get("ok") is True
-                    and isinstance(recovery.get("proof"), Mapping)
-                    and recovery["proof"].get("immutable") is True
-                ),
-            )
-            result["_processExitCode"] = EXIT_ROLLBACK_INCOMPLETE
-            return _attach_post_mutation_evidence(result, args.evidence_dir)
         if not recovery["ok"]:
             result = _base_result(
                 "gate-release.publish",
@@ -4915,60 +5183,14 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
             mutationState=recovery["mutationState"],
         )
         return _attach_post_mutation_evidence(result, args.evidence_dir)
-    head_observations = [
-        _gate_default_head_observation(
-            bound_repo, default_branch, source_sha, "immediately-before-tag"
-        )
-    ]
-    _require_exact_gate_head_observation(head_observations[-1])
-    tag_binding = _ensure_remote_gate_tag(bound_repo, tag, source_sha)
     head_observations.append(
         _gate_default_head_observation(
             bound_repo, default_branch, source_sha, "after-tag-before-release"
         )
     )
-    if not tag_binding["verified"]:
-        result = _base_result(
-            "gate-release.publish",
-            ok=False,
-            status="gate-tag-binding-unverified",
-            source_sha=source_sha,
-            artifacts=artifacts,
-            defaultHeadObservations=head_observations,
-            gateTag=tag_binding,
-            immutableReleasePublished=False,
-            mutationApplied=tag_binding["mutationApplied"],
-            mutationState=(
-                "partially-applied-unverified"
-                if tag_binding["mutationApplied"] is True else "unknown"
-            ),
-        )
-        result["_processExitCode"] = EXIT_ROLLBACK_INCOMPLETE
-        return _attach_post_mutation_evidence(result, args.evidence_dir)
-    if head_observations[-1]["exact"] is not True:
-        tag_mutated = tag_binding["mutationApplied"] is True
-        result = _base_result(
-            "gate-release.publish",
-            ok=False,
-            status="default-head-drift-after-tag-before-release",
-            source_sha=source_sha,
-            artifacts=artifacts,
-            defaultHeadObservations=head_observations,
-            gateTag=tag_binding,
-            releaseCreation=None,
-            immutableReleasePublished=False,
-            mutationApplied=True if tag_mutated else False,
-            mutationState=("partially-applied-verified" if tag_mutated else "unchanged"),
-        )
-        result["_processExitCode"] = (
-            EXIT_ROLLBACK_INCOMPLETE if tag_mutated else EXIT_INTEGRITY
-        )
-        return (
-            _attach_post_mutation_evidence(result, args.evidence_dir)
-            if tag_mutated
-            else _attach_command_evidence(result, args.evidence_dir)
-        )
-    pre_release_tag_lease = _require_gate_tag_lease(bound_repo, tag, source_sha)
+    pre_release_tag_lease = _require_gate_tag_lease(
+        bound_repo, tag, gate_source_sha
+    )
     creation: ExecutionCapture | None = None
     creation_error: str | None = None
     try:
@@ -4993,7 +5215,7 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
     creation_accepted = creation is not None and creation.returncode == 0
     try:
         proof = _verify_gate_release_with_retry(
-            bound_repo, tag, subscription_url, gate_bytes, source_sha
+            bound_repo, tag, subscription_url, gate_bytes, gate_source_sha
         )
     except (CliFailure, OSError) as verification_error:
         head_observations.append(
@@ -5003,13 +5225,10 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
         )
         recovery: dict[str, Any] | None = None
         recovery_error: str | None = None
-        if (
-            not creation_accepted
-            and head_observations[-1]["exact"] is True
-        ):
+        if not creation_accepted:
             try:
                 recovery = _resume_gate_draft_after_ambiguous_create(
-                    bound_repo, tag, subscription_url, gate_bytes, source_sha
+                    bound_repo, tag, subscription_url, gate_bytes, gate_source_sha
                 )
             except (CliFailure, OSError) as error:
                 recovery_error = _safe_error(str(error))
@@ -5030,32 +5249,6 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
             )
             mutation_state = str(recovery.get("mutationState", "unknown"))
             if recovery.get("ok") is True:
-                if head_observations[-1]["exact"] is not True:
-                    result = _base_result(
-                        "gate-release.publish",
-                        ok=False,
-                        status="default-head-drift-after-release",
-                        source_sha=source_sha,
-                        artifacts=artifacts,
-                        defaultHeadObservations=head_observations,
-                        gateRelease=recovery["proof"],
-                        gateDraftRecovery={
-                            key: value for key, value in recovery.items()
-                            if key != "proof"
-                        },
-                        releaseCreation=creation_record,
-                        gateTag=tag_binding,
-                        gateTagLease=pre_release_tag_lease,
-                        initialVerificationError=_safe_error(str(verification_error)),
-                        immutableReleasePublished=(
-                            isinstance(recovery.get("proof"), Mapping)
-                            and recovery["proof"].get("immutable") is True
-                        ),
-                        mutationApplied=mutation_applied,
-                        mutationState=mutation_state,
-                    )
-                    result["_processExitCode"] = EXIT_ROLLBACK_INCOMPLETE
-                    return _attach_post_mutation_evidence(result, args.evidence_dir)
                 result = _base_result(
                     "gate-release.publish",
                     ok=True,
@@ -5085,9 +5278,7 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
                 "gate-release.publish",
                 ok=False,
                 status=(
-                    "default-head-drift-after-draft-recovery"
-                    if head_observations[-1]["exact"] is not True
-                    else str(recovery.get("status", "draft-recovery-failed"))
+                    str(recovery.get("status", "draft-recovery-failed"))
                 ),
                 source_sha=source_sha,
                 artifacts=artifacts,
@@ -5104,14 +5295,11 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
             result["_processExitCode"] = EXIT_ROLLBACK_INCOMPLETE
             return _attach_post_mutation_evidence(result, args.evidence_dir)
         known_mutation = creation_accepted or tag_binding["mutationApplied"] is True
-        head_drift = head_observations[-1]["exact"] is not True
         result = _base_result(
             "gate-release.publish",
             ok=False,
             status=(
-                "default-head-drift-after-release-attempt"
-                if head_drift
-                else "published-unverified"
+                "published-unverified"
                 if creation_accepted else "publication-terminal-state-unknown"
             ),
             source_sha=source_sha,
@@ -5158,28 +5346,11 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
     else:
         status = "published-after-ambiguous-client-result"
         mutation_applied = True if tag_binding["mutationApplied"] is True else None
-    if head_observations[-1]["exact"] is not True:
-        result = _base_result(
-            "gate-release.publish",
-            ok=False,
-            status="default-head-drift-after-release",
-            source_sha=source_sha,
-            artifacts=artifacts,
-            defaultHeadObservations=head_observations,
-            gateRelease=proof,
-            releaseCreation=creation_record,
-            gateTag=tag_binding,
-            gateTagLease=pre_release_tag_lease,
-            immutableReleasePublished=(
-                isinstance(proof, Mapping) and proof.get("immutable") is True
-            ),
-            mutationApplied=mutation_applied,
-            mutationState=(
-                "applied" if mutation_applied is True else "observed-exact"
-            ),
-        )
-        result["_processExitCode"] = EXIT_ROLLBACK_INCOMPLETE
-        return _attach_post_mutation_evidence(result, args.evidence_dir)
+    head_drift_observed = any(
+        observation.get("exact") is not True for observation in head_observations
+    )
+    if head_drift_observed:
+        status = f"{status}-after-default-head-drift"
     result = _base_result(
         "gate-release.publish",
         ok=True,
@@ -5191,6 +5362,7 @@ def command_gate_release(args: argparse.Namespace) -> dict[str, Any]:
         releaseCreation=creation_record,
         gateTag=tag_binding,
         gateTagLease=pre_release_tag_lease,
+        defaultHeadDriftObserved=head_drift_observed,
         immutableReleasePublished=(
             isinstance(proof, Mapping) and proof.get("immutable") is True
         ),
@@ -5216,8 +5388,9 @@ def _github_gate_publisher_context(repo: str, source_ref: str | None) -> bool:
         and os.environ.get("GITHUB_SHA", "").lower() == source_ref.lower()
         and os.environ.get("GITHUB_WORKFLOW_SHA", "").lower() == source_ref.lower()
         and workflow_ref.startswith(expected_prefix)
+        and os.environ.get("GITHUB_JOB") == "publish"
         and os.environ.get("HDF_PRIVILEGED_ENVIRONMENT")
-        == RELEASE_PUBLISHER_ENVIRONMENT
+        == MAIN_AUTOMATION_ENVIRONMENT
     )
 
 
@@ -5914,7 +6087,7 @@ def build_parser() -> JsonArgumentParser:
 
     gate_release = commands.add_parser("gate-release")
     gate_release.add_argument(
-        "action", choices=("enable-policy", "verify", "publish")
+        "action", choices=("enable-policy", "verify", "prepare-publish", "publish")
     )
     gate_release.add_argument("--repo", required=True)
     gate_release.add_argument("--source-ref")
