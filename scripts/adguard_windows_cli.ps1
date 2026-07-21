@@ -6,18 +6,22 @@ Safely inspects, backs up, deploys, and verifies Hotdeal Focus in AdGuard for Wi
 .DESCRIPTION
 This command uses AdGuard's own authenticated UiApplicationApiClient. It never edits
 AdGuard databases or ACLs, never overwrites the User filter, and never stops the
-AdGuard service. The explicit migrate-legacy command can only disable the exact,
-preconditioned current-snapshot rules whose cosmetic scope is exclusive to the seven
-target domains, and can re-enable that exact transaction delta during rollback. Scope
-does not prove rule provenance, so applying that migration requires a second approval
-switch after reviewing its hash/index-only WhatIf plan.
+AdGuard service. The normal deploy path installs only the authenticated Userscript
+and proves that the complete User filter and every installed standard-filter
+subscription inventory remain byte-for-byte equivalent. The explicit migrate-legacy
+command first authenticates the standalone Userscript against its schema-v2 release
+manifest and requires that exact script to already be installed and enabled. It can
+then only disable the exact, preconditioned current-snapshot rules whose cosmetic
+scope is exclusive to the seven target domains, and can re-enable that exact
+transaction delta during rollback. Scope does not prove rule provenance, so applying
+that migration requires a second approval switch after reviewing its hash/index-only
+WhatIf plan.
 Every API client is disconnected with Disconnect(false, true).
 
-Mutating commands require -Apply. A deploy installs and enables the userscript,
-reversibly disables the explicitly approved exclusive-target snapshot rules, and only
-then installs or enables the
-marker-only custom filter. Existing target subscriptions are disabled, not deleted,
-so a failed deployment can roll back without reconstructing an old remote filter.
+Mutating commands require -Apply. A deploy installs or updates and enables only the
+Userscript. It does not install, enable, disable, delete, or rewrite any filter or User
+filter rule. Existing marker subscriptions are left unchanged pending an explicit,
+separately inspected legacy-removal decision.
 Schema-v2 backups contain raw payload hashes and an atomic complete marker. Each
 mutation writes an append-only transaction journal. restore-backup accepts only an
 exact authorized before/after state and is safe to repeat. Legacy schema-v1 backups
@@ -38,21 +42,24 @@ powershell.exe -NoProfile -File .\scripts\adguard_windows_cli.ps1 restore-backup
   -BackupPath <completed-schema-v2-backup-directory> -Apply
 
 .EXAMPLE
-powershell.exe -NoProfile -File .\scripts\adguard_windows_cli.ps1 migrate-legacy -WhatIf
+powershell.exe -NoProfile -File .\scripts\adguard_windows_cli.ps1 migrate-legacy `
+  -UserscriptSource .\hotdeal-focus.user.js `
+  -ReleaseManifestSource .\release-manifest.json `
+  -ExpectedUserscriptSha256 <canonical-text-sha256> `
+  -WhatIf
 
 .EXAMPLE
 powershell.exe -NoProfile -File .\scripts\adguard_windows_cli.ps1 migrate-legacy `
+  -UserscriptSource .\hotdeal-focus.user.js `
+  -ReleaseManifestSource .\release-manifest.json `
+  -ExpectedUserscriptSha256 <canonical-text-sha256> `
   -ApproveExclusiveTargetMigration -Apply
 
 .EXAMPLE
 powershell.exe -NoProfile -File .\scripts\adguard_windows_cli.ps1 deploy `
   -UserscriptSource .\hotdeal-focus.user.js `
-  -FilterUrl https://github.com/heelee912/adguard-hotdeal-focus/releases/download/gate-v2.0.2/filter.txt `
   -ReleaseManifestSource https://heelee912.github.io/adguard-hotdeal-focus/release-manifest.json `
   -ExpectedUserscriptSha256 <canonical-text-sha256> `
-  -ExpectedFilterSha256 <raw-file-sha256> `
-  -ExpectedInstalledFilterRulesSha256 <canonical-installed-rules-sha256> `
-  -ApproveExclusiveTargetMigration `
   -Apply
 #>
 [CmdletBinding(SupportsShouldProcess = $true, ConfirmImpact = 'Medium')]
@@ -100,7 +107,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:ToolVersion = '0.5.6'
+$script:ToolVersion = '0.6.4'
 $script:MaximumSourceBytes = 8MB
 $script:AdGuardInstallDirectory = $null
 $script:AdGuardProcess = $null
@@ -118,7 +125,9 @@ $script:HistoricalSnapshotRules = @()
 $script:RecoveryBackupPath = $null
 $script:RecoveryCommand = $null
 $script:ReaderGateProtocolVersion = 2
-$script:ReaderGateGrant = 'GM_addElement'
+$script:ReaderGateGrants = @('GM_addElement', 'window.onurlchange')
+$script:ReleaseUserscriptUrl = ('https://heelee912.github.io/' +
+    'adguard-hotdeal-focus/hotdeal-focus.user.js')
 $script:MarkerGateArtifactVersion = '2.0.2'
 $script:MarkerGateSubscriptionUrl = ('https://github.com/heelee912/' +
     'adguard-hotdeal-focus/releases/download/gate-v2.0.2/filter.txt')
@@ -951,12 +960,14 @@ function Invoke-LegacyMigration {
     param(
         [Parameter(Mandatory = $true)] $Client,
         [Parameter(Mandatory = $true)] $Plan,
-        [AllowNull()][string] $JournalDirectory,
-        [switch] $CurrentMatchesBackup
+        [Parameter(Mandatory = $true)] $DesiredUserscript,
+        [AllowNull()][string] $JournalDirectory
     )
-    if (-not $CurrentMatchesBackup) {
-        [void] (Assert-LegacyMigrationPlanCurrent -Client $Client -Plan $Plan)
-    }
+    # These are the final read-only preconditions immediately before the first
+    # User-filter write. The backup check in the caller binds the same exact
+    # Userscript snapshot, while these bounded reads close the post-backup gap.
+    [void] (Assert-UserscriptInstalled -Client $Client -Desired $DesiredUserscript)
+    [void] (Assert-LegacyMigrationPlanCurrent -Client $Client -Plan $Plan)
     $changedRules = @($Plan.EnabledCandidateRules)
     $transaction = [pscustomobject]@{
         Plan = $Plan
@@ -1248,15 +1259,25 @@ function Get-UserscriptSource {
             $metadata, '(?m)^//\s+@run-at\s+(?<value>\S+)\s*$'))
     $grantDirectives = @([regex]::Matches(
             $metadata, '(?m)^//\s+@grant\s+(?<value>\S+)\s*$'))
+    $downloadUrlDirectives = @([regex]::Matches(
+            $metadata, '(?m)^//\s+@downloadURL\s+(?<value>\S+)\s*$'))
+    $updateUrlDirectives = @([regex]::Matches(
+            $metadata, '(?m)^//\s+@updateURL\s+(?<value>\S+)\s*$'))
     $noframesDirectives = @([regex]::Matches(
             $metadata, '(?m)^//\s+@noframes\s*$'))
     if ($runAtDirectives.Count -ne 1 -or
         $runAtDirectives[0].Groups['value'].Value -cne 'document-start' -or
-        $grantDirectives.Count -ne 1 -or
-        $grantDirectives[0].Groups['value'].Value -cne $script:ReaderGateGrant -or
+        -not (Test-ExactStringSequence `
+            -Left @($grantDirectives | ForEach-Object { $_.Groups['value'].Value }) `
+            -Right $script:ReaderGateGrants) -or
         $noframesDirectives.Count -ne 1) {
         throw ("Reader Gate v2 must declare exactly one document-start, one @noframes, " +
-            "and exactly one @grant GM_addElement")
+            "and the exact ordered grants GM_addElement and window.onurlchange")
+    }
+    if ($downloadUrlDirectives.Count -ne 1 -or $updateUrlDirectives.Count -ne 1 -or
+        $downloadUrlDirectives[0].Groups['value'].Value -cne $script:ReleaseUserscriptUrl -or
+        $updateUrlDirectives[0].Groups['value'].Value -cne $script:ReleaseUserscriptUrl) {
+        throw "Reader Gate v2 update metadata must use the exact release Userscript URL"
     }
     foreach ($hostToken in @('algumon.com', 'clien.net', 'ppomppu.co.kr', 'ruliweb.com',
             'quasarzone.com', 'eomisae.co.kr', 'zod.kr', 'arca.live')) {
@@ -1304,11 +1325,7 @@ function Get-UserscriptSource {
         throw "Reader Gate v2 diagnostics protocol marker is not unique"
     }
 
-    foreach ($urlMatch in [regex]::Matches(
-            $metadata,
-            '(?m)^//\s+@(downloadURL|updateURL)\s+(?<value>\S+)\s*$')) {
-        [void] (Assert-PublicHttpsUri -Value $urlMatch.Groups['value'].Value)
-    }
+    [void] (Assert-PublicHttpsUri -Value $script:ReleaseUserscriptUrl)
 
     if ($ExpectedUserscriptSha256) {
         $actual = Get-CanonicalTextSha256 -Text $text
@@ -1326,7 +1343,8 @@ function Get-UserscriptSource {
         Name = $name
         Version = $version
         ProtocolVersion = $script:ReaderGateProtocolVersion
-        Grant = $script:ReaderGateGrant
+        Grants = @($script:ReaderGateGrants)
+        InstallUrl = $script:ReleaseUserscriptUrl
         Sha256 = Get-CanonicalTextSha256 -Text $text
         MetadataSha256 = Get-CanonicalTextSha256 -Text $metadata
         CodeSha256 = Get-CanonicalTextSha256 -Text $code
@@ -1542,43 +1560,39 @@ function Get-ReleaseManifestContract {
     $text = ConvertFrom-StrictUtf8 -Bytes $bytes
     try { $manifest = $text | ConvertFrom-Json }
     catch { throw "Release manifest is malformed JSON" }
-    Assert-JsonProperties -Value $manifest -Names @('schemaVersion', 'releaseVersion',
-        'protocolVersion', 'gateArtifactVersion', 'filterSubscriptionUrl',
-        'status', 'artifacts') -Label 'release manifest'
-    if ([int] $manifest.schemaVersion -ne 1 -or
+    Assert-ExactJsonProperties -Value $manifest -Names @(
+        'schemaVersion', 'status', 'releaseVersion', 'protocolVersion', 'installUrl',
+        'generatorVersion', 'rollback_of', 'configSha256', 'coverage', 'promotion',
+        'artifacts', 'sourceIntegrity') -Label 'release manifest'
+    if ([int] $manifest.schemaVersion -ne 2 -or
         [string] $manifest.status -cne 'release-ready') {
-        throw "Release manifest is not a release-ready schema-v1 document"
+        throw "Release manifest is not a release-ready schema-v2 document"
     }
-    $filterEntry = $manifest.artifacts.'filter.txt'
+    Assert-ExactJsonProperties -Value $manifest.artifacts `
+        -Names @('hotdeal-focus.user.js') -Label 'release manifest artifacts'
     $userscriptEntry = $manifest.artifacts.'hotdeal-focus.user.js'
-    if (-not $filterEntry -or -not $userscriptEntry) {
-        throw "Release manifest is missing required public artifacts"
+    if (-not $userscriptEntry) {
+        throw "Release manifest is missing the Userscript public artifact"
     }
-    Assert-JsonProperties -Value $filterEntry -Names @(
-        'version', 'sha256', 'installedRulesSha256') `
-        -Label 'release manifest filter artifact'
-    Assert-JsonProperties -Value $userscriptEntry -Names @(
-        'version', 'sha256', 'canonicalTextSha256') `
+    Assert-ExactJsonProperties -Value $userscriptEntry -Names @(
+        'version', 'bytes', 'sha256', 'canonicalTextSha256') `
         -Label 'release manifest userscript artifact'
-    $gateArtifactVersion = [string] $manifest.gateArtifactVersion
-    $filterSubscriptionUrl = [string] $manifest.filterSubscriptionUrl
     $protocolValue = $manifest.protocolVersion
     $protocolIsInteger = $protocolValue -is [int] -or $protocolValue -is [long]
     $protocolVersion = if ($protocolIsInteger) { [int] $protocolValue } else { -1 }
-    if ($gateArtifactVersion -cne $script:MarkerGateArtifactVersion -or
-        [string] $filterEntry.version -cne $gateArtifactVersion -or
-        [string] $userscriptEntry.version -cne [string] $manifest.releaseVersion -or
+    $byteValue = $userscriptEntry.bytes
+    $bytesAreInteger = $byteValue -is [int] -or $byteValue -is [long]
+    if ([string] $userscriptEntry.version -cne [string] $manifest.releaseVersion -or
         -not $protocolIsInteger -or
         $protocolVersion -ne $script:ReaderGateProtocolVersion -or
-        $filterSubscriptionUrl -cne $script:MarkerGateSubscriptionUrl -or
-        (Assert-PublicHttpsUri -Value $filterSubscriptionUrl).AbsoluteUri -cne
-            $filterSubscriptionUrl) {
-        throw "Release manifest is not the exact protocol-2 gate contract"
+        [string] $manifest.installUrl -cne $script:ReleaseUserscriptUrl -or
+        (Assert-PublicHttpsUri -Value ([string] $manifest.installUrl)).AbsoluteUri -cne
+            $script:ReleaseUserscriptUrl -or
+        -not $bytesAreInteger -or [long] $byteValue -lt 1 -or
+        [string] $manifest.releaseVersion -notmatch '^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$') {
+        throw "Release manifest is not the exact standalone protocol-2 contract"
     }
     foreach ($entry in @(
-            [pscustomobject]@{ Value = [string] $filterEntry.sha256; Name = 'filter sha256' },
-            [pscustomobject]@{ Value = [string] $filterEntry.installedRulesSha256;
-                Name = 'filter installedRulesSha256' },
             [pscustomobject]@{ Value = [string] $userscriptEntry.sha256;
                 Name = 'userscript sha256' },
             [pscustomobject]@{ Value = [string] $userscriptEntry.canonicalTextSha256;
@@ -1591,11 +1605,8 @@ function Get-ReleaseManifestContract {
         RawSha256 = Get-Sha256Hex -Bytes $bytes
         ReleaseVersion = [string] $manifest.releaseVersion
         ProtocolVersion = $protocolVersion
-        GateArtifactVersion = $gateArtifactVersion
-        FilterSubscriptionUrl = $filterSubscriptionUrl
-        FilterRawSha256 = ([string] $filterEntry.sha256).ToLowerInvariant()
-        FilterInstalledRulesSha256 = (
-            [string] $filterEntry.installedRulesSha256).ToLowerInvariant()
+        InstallUrl = [string] $manifest.installUrl
+        UserscriptBytes = [long] $userscriptEntry.bytes
         UserscriptRawSha256 = ([string] $userscriptEntry.sha256).ToLowerInvariant()
         UserscriptCanonicalTextSha256 = (
             [string] $userscriptEntry.canonicalTextSha256).ToLowerInvariant()
@@ -1615,22 +1626,15 @@ function Assert-ReleaseInputsMatchManifest {
             $DesiredUserscript.RawSha256 -cne $ManifestContract.UserscriptRawSha256 -or
             $DesiredUserscript.Version -cne $ManifestContract.ReleaseVersion -or
             $DesiredUserscript.ProtocolVersion -ne $ManifestContract.ProtocolVersion -or
-            $DesiredUserscript.Grant -cne $script:ReaderGateGrant) {
+            $DesiredUserscript.Bytes.Length -ne $ManifestContract.UserscriptBytes -or
+            $DesiredUserscript.InstallUrl -cne $ManifestContract.InstallUrl -or
+            -not (Test-ExactStringSequence -Left $DesiredUserscript.Grants `
+                -Right $script:ReaderGateGrants)) {
             throw "Userscript source or expected hash differs from the release manifest"
         }
     }
     if ($DesiredFilter) {
-        if ($ExpectedFilterSha256.ToLowerInvariant() -cne $ManifestContract.FilterRawSha256 -or
-            $ExpectedInstalledFilterRulesSha256.ToLowerInvariant() -cne
-                $ManifestContract.FilterInstalledRulesSha256 -or
-            $DesiredFilter.RawSha256 -cne $ManifestContract.FilterRawSha256 -or
-            $DesiredFilter.SourceRulesSha256 -cne
-                $ManifestContract.FilterInstalledRulesSha256 -or
-            $DesiredFilter.Url -cne $ManifestContract.FilterSubscriptionUrl -or
-            $DesiredFilter.Version -cne $ManifestContract.GateArtifactVersion -or
-            $DesiredFilter.ProtocolVersion -ne $ManifestContract.ProtocolVersion) {
-            throw "Filter source or expected hashes differ from the release manifest"
-        }
+        throw "Standalone schema-v2 release inputs do not accept a filter artifact"
     }
 }
 
@@ -2243,6 +2247,191 @@ function Get-UserFilter {
     return $filters[0]
 }
 
+function Get-CanonicalJsonEvidence {
+    param([Parameter(Mandatory = $true)][AllowEmptyCollection()] $Value)
+    $json = ConvertTo-Json -InputObject $Value -Depth 14 -Compress
+    $bytes = $script:Utf8NoBom.GetBytes($json)
+    return [pscustomobject]@{
+        Bytes = [long] $bytes.Length
+        Sha256 = Get-Sha256Hex -Bytes $bytes
+    }
+}
+
+function Get-ProtectedFilterStateSnapshot {
+    param([Parameter(Mandatory = $true)] $Client)
+    $userFilter = Get-UserFilter -Client $Client
+    $userRules = $Client.GetFilterSubscriptionRules(
+        $userFilter.FilterId,
+        $script:StandardFilterType
+    )
+    Assert-BackupRuleListCanonical -Rules $userRules.Rules
+    Assert-BackupRuleListCanonical -Rules $userRules.DisabledRules
+    $subscriptions = New-Object 'System.Collections.Generic.List[object]'
+    $seenIds = New-Object 'System.Collections.Generic.HashSet[int]'
+    foreach ($filter in @(Get-InstalledStandardFilters -Client $Client | Sort-Object FilterId)) {
+        if ([int] $filter.FilterId -eq [int] $userFilter.FilterId) { continue }
+        if (-not $seenIds.Add([int] $filter.FilterId)) {
+            throw "Installed standard-filter inventory contains a duplicate FilterId"
+        }
+        $rules = $Client.GetFilterSubscriptionRules(
+            $filter.FilterId,
+            $script:StandardFilterType
+        )
+        Assert-BackupRuleListCanonical -Rules $rules.Rules
+        Assert-BackupRuleListCanonical -Rules $rules.DisabledRules
+        $subscriptions.Add([ordered]@{
+                filter_id = [int] $filter.FilterId
+                filter_type = [string] $filter.FilterType
+                name = [string] $filter.Name
+                version = [string] $filter.Version
+                subscription_url = [string] $filter.SubscriptionUrl
+                is_enabled = [bool] $filter.IsEnabled
+                is_trusted = [bool] $filter.IsTrusted
+                is_custom = [bool] $filter.IsCustom
+                is_editable = [bool] $filter.IsEditable
+                rules = @($rules.Rules | ForEach-Object { [string] $_ })
+                disabled_rules = @($rules.DisabledRules | ForEach-Object { [string] $_ })
+            })
+    }
+    return [pscustomobject]@{
+        UserFilter = [ordered]@{
+            filter_id = [int] $userFilter.FilterId
+            filter_type = [string] $userFilter.FilterType
+            name = [string] $userFilter.Name
+            is_editable = [bool] $userFilter.IsEditable
+            is_custom = [bool] $userFilter.IsCustom
+            rules = @($userRules.Rules | ForEach-Object { [string] $_ })
+            disabled_rules = @($userRules.DisabledRules | ForEach-Object { [string] $_ })
+        }
+        SubscriptionInventory = @($subscriptions | ForEach-Object { $_ })
+    }
+}
+
+function Get-ProtectedFilterStateEvidenceFromSnapshot {
+    param([Parameter(Mandatory = $true)] $Snapshot)
+    $userEvidence = Get-CanonicalJsonEvidence -Value $Snapshot.UserFilter
+    $inventoryEvidence = Get-CanonicalJsonEvidence -Value @(
+        $Snapshot.SubscriptionInventory)
+    $combinedEvidence = Get-CanonicalJsonEvidence -Value ([ordered]@{
+            user_filter = $Snapshot.UserFilter
+            subscription_inventory = @($Snapshot.SubscriptionInventory)
+        })
+    return [pscustomobject]@{
+        StateSha256 = [string] $combinedEvidence.Sha256
+        UserFilterBytes = [long] $userEvidence.Bytes
+        UserFilterSha256 = [string] $userEvidence.Sha256
+        UserRuleCount = @($Snapshot.UserFilter.rules).Count
+        UserDisabledRuleCount = @($Snapshot.UserFilter.disabled_rules).Count
+        UserRulesSha256 = Get-RuleListSha256 -Rules $Snapshot.UserFilter.rules
+        UserDisabledRulesSha256 = Get-RuleListSha256 `
+            -Rules $Snapshot.UserFilter.disabled_rules
+        SubscriptionCount = @($Snapshot.SubscriptionInventory).Count
+        SubscriptionInventoryBytes = [long] $inventoryEvidence.Bytes
+        SubscriptionInventorySha256 = [string] $inventoryEvidence.Sha256
+    }
+}
+
+function Get-StableProtectedFilterStateEvidence {
+    param(
+        [Parameter(Mandatory = $true)] $Client,
+        [ValidateRange(2, 100)]
+        [int] $MaximumObservations = $script:AdGuardStateVisibilityMaxObservations,
+        [ValidateRange(0, 5000)]
+        [int] $RetryDelayMilliseconds = $script:AdGuardStateVisibilityDelayMilliseconds,
+        [ValidateRange(2, 10)]
+        [int] $RequiredConsecutiveReads = `
+            $script:AdGuardStateVisibilityRequiredConsecutiveReads
+    )
+    if ($RequiredConsecutiveReads -gt $MaximumObservations) {
+        throw "Required consecutive reads exceed the bounded observation count"
+    }
+    $previous = $null
+    $consecutiveReads = 0
+    for ($observation = 1; $observation -le $MaximumObservations; $observation++) {
+        $snapshot = Get-ProtectedFilterStateSnapshot -Client $Client
+        $evidence = Get-ProtectedFilterStateEvidenceFromSnapshot -Snapshot $snapshot
+        if ($previous -and $evidence.StateSha256 -ceq $previous.StateSha256) {
+            $consecutiveReads++
+        } else {
+            $consecutiveReads = 1
+        }
+        if ($consecutiveReads -ge $RequiredConsecutiveReads) {
+            return [pscustomobject]@{
+                Evidence = $evidence
+                Read1Sha256 = [string] $previous.StateSha256
+                Read2Sha256 = [string] $evidence.StateSha256
+                ObservationCount = $observation
+                ConsecutiveReadCount = $consecutiveReads
+            }
+        }
+        $previous = $evidence
+        if ($observation -lt $MaximumObservations -and $RetryDelayMilliseconds -gt 0) {
+            Start-Sleep -Milliseconds $RetryDelayMilliseconds
+        }
+    }
+    throw ("Two consecutive protected filter-state snapshots were not identical " +
+        "within $MaximumObservations bounded observations")
+}
+
+function ConvertTo-ProtectedFilterStateManifestRecord {
+    param([Parameter(Mandatory = $true)] $StableEvidence)
+    $evidence = $StableEvidence.Evidence
+    return [ordered]@{
+        authority = 'two-read-stable-adguard-api'
+        read_1_sha256 = [string] $StableEvidence.Read1Sha256
+        read_2_sha256 = [string] $StableEvidence.Read2Sha256
+        identical = $true
+        user_filter = [ordered]@{
+            bytes = [long] $evidence.UserFilterBytes
+            sha256 = [string] $evidence.UserFilterSha256
+            rule_count = [int] $evidence.UserRuleCount
+            disabled_rule_count = [int] $evidence.UserDisabledRuleCount
+            rules_sha256 = [string] $evidence.UserRulesSha256
+            disabled_rules_sha256 = [string] $evidence.UserDisabledRulesSha256
+        }
+        subscription_inventory = [ordered]@{
+            count = [int] $evidence.SubscriptionCount
+            bytes = [long] $evidence.SubscriptionInventoryBytes
+            sha256 = [string] $evidence.SubscriptionInventorySha256
+        }
+    }
+}
+
+function Assert-ProtectedFilterStateEqualsBackup {
+    param(
+        [Parameter(Mandatory = $true)] $Client,
+        [Parameter(Mandatory = $true)] $Backup,
+        [Parameter(Mandatory = $true)][string] $Phase
+    )
+    $expected = $Backup.Manifest.protected_filter_state
+    if (-not $expected) {
+        throw "Backup does not contain the protected filter-state contract"
+    }
+    $current = Get-StableProtectedFilterStateEvidence -Client $Client
+    $actual = ConvertTo-ProtectedFilterStateManifestRecord -StableEvidence $current
+    if (
+        [string] $actual.read_2_sha256 -cne [string] $expected.read_2_sha256 -or
+        [long] $actual.user_filter.bytes -ne [long] $expected.user_filter.bytes -or
+        [string] $actual.user_filter.sha256 -cne [string] $expected.user_filter.sha256 -or
+        [int] $actual.user_filter.rule_count -ne [int] $expected.user_filter.rule_count -or
+        [int] $actual.user_filter.disabled_rule_count -ne
+            [int] $expected.user_filter.disabled_rule_count -or
+        [string] $actual.user_filter.rules_sha256 -cne
+            [string] $expected.user_filter.rules_sha256 -or
+        [string] $actual.user_filter.disabled_rules_sha256 -cne
+            [string] $expected.user_filter.disabled_rules_sha256 -or
+        [int] $actual.subscription_inventory.count -ne
+            [int] $expected.subscription_inventory.count -or
+        [long] $actual.subscription_inventory.bytes -ne
+            [long] $expected.subscription_inventory.bytes -or
+        [string] $actual.subscription_inventory.sha256 -cne
+            [string] $expected.subscription_inventory.sha256
+    ) {
+        throw "Protected User filter or subscription inventory changed during $Phase"
+    }
+    return $actual
+}
+
 function Get-TargetUserscripts {
     param([Parameter(Mandatory = $true)] $Client)
     return @($Client.GetUserscripts() | Where-Object { $_.Name -ceq $UserscriptName })
@@ -2589,6 +2778,8 @@ function New-StateBackup {
         $payloads = New-Object 'System.Collections.Generic.List[object]'
         $stableState = Get-StableCompleteTargetStateSnapshot -Client $Client `
             -ExactFilterUrl $ExactFilterUrl
+        $stableProtectedFilterState = Get-StableProtectedFilterStateEvidence `
+            -Client $Client
         $targetState = $stableState.Snapshot
         $userFilter = $targetState.UserFilter
         $userRules = $targetState.UserRules
@@ -2709,6 +2900,8 @@ function New-StateBackup {
             }
             target_userscript = $userscriptRecord
             target_filters = @($filterRecords | ForEach-Object { $_ })
+            protected_filter_state = ConvertTo-ProtectedFilterStateManifestRecord `
+                -StableEvidence $stableProtectedFilterState
             complete_target_state = [ordered]@{
                 read_1_sha256 = $stableState.Read1Sha256
                 read_2_sha256 = $stableState.Read2Sha256
@@ -2922,6 +3115,18 @@ function Assert-JsonProperties {
     $available = @($Value.PSObject.Properties | ForEach-Object { $_.Name })
     foreach ($name in $Names) {
         if ($available -notcontains $name) { throw "$Label is missing property: $name" }
+    }
+}
+
+function Assert-ExactJsonProperties {
+    param(
+        [Parameter(Mandatory = $true)] $Value,
+        [Parameter(Mandatory = $true)][string[]] $Names,
+        [Parameter(Mandatory = $true)][string] $Label
+    )
+    $available = @($Value.PSObject.Properties | ForEach-Object { [string] $_.Name })
+    if (-not (Test-ExactStringMultiset -Left $available -Right $Names)) {
+        throw "$Label property set is not exact"
     }
 }
 
@@ -3256,6 +3461,28 @@ function Test-UserscriptSnapshotExact {
         [bool] $Left.Info.IsStyle -eq [bool] $Right.Info.IsStyle -and
         [string] $Left.Code -ceq [string] $Right.Code -and
         [string] $Left.GmProperties -ceq [string] $Right.GmProperties
+}
+
+function Assert-LegacyMigrationUserscriptUnchanged {
+    param(
+        [Parameter(Mandatory = $true)] $Client,
+        [Parameter(Mandatory = $true)] $BackupSnapshot,
+        [Parameter(Mandatory = $true)] $DesiredUserscript
+    )
+    $current = Get-UserscriptSnapshot -Client $Client
+    if (-not (Test-UserscriptSnapshotExact -Left $current -Right $BackupSnapshot)) {
+        throw "Standalone Userscript changed during legacy migration"
+    }
+    Assert-BackupUserscriptMatchesDesired -Snapshot $current -Desired $DesiredUserscript
+    return [ordered]@{
+        verified = $true
+        name = [string] $current.Info.Name
+        version = [string] $current.Info.Version
+        enabled = [bool] $current.Info.IsEnabled
+        code_sha256 = Get-CanonicalTextSha256 -Text ([string] $current.Code)
+        gm_properties_sha256 = Get-CanonicalTextSha256 `
+            -Text ([string] $current.GmProperties)
+    }
 }
 
 function Get-AllowedLegacyRestoreDelta {
@@ -4661,12 +4888,17 @@ function Assert-DeploymentVerified {
     param(
         [Parameter(Mandatory = $true)] $Client,
         [AllowNull()] $DesiredUserscript,
-        [AllowNull()] $DesiredFilter
+        [AllowNull()] $ProtectedBaseline
     )
     [void] (Assert-GlobalProtection -Client $Client)
-    [void] (Assert-NoLegacyHotdealConflict -Client $Client)
     $userscript = Assert-UserscriptInstalled -Client $Client -Desired $DesiredUserscript
-    $filter = Assert-FilterInstalled -Client $Client -Desired $DesiredFilter
+    $protectedFilterState = if ($ProtectedBaseline) {
+        Assert-ProtectedFilterStateEqualsBackup -Client $Client `
+            -Backup $ProtectedBaseline -Phase 'Userscript deployment'
+    } else {
+        ConvertTo-ProtectedFilterStateManifestRecord `
+            -StableEvidence (Get-StableProtectedFilterStateEvidence -Client $Client)
+    }
     return [ordered]@{
         verified = $true
         service_running = $true
@@ -4675,11 +4907,10 @@ function Assert-DeploymentVerified {
         installed_userscript_code_sha256 = $userscript.InstalledCodeSha256
         installed_userscript_gm_properties_sha256 = `
             $userscript.InstalledGmPropertiesSha256
-        filter = ConvertTo-FilterMetadataRecord -Filter $filter.Filter
-        installed_filter_rule_count = $filter.RuleCount
-        installed_filter_rules_sha256 = $filter.RulesSha256
-        installed_filter_disabled_rule_count = $filter.DisabledRuleCount
-        installed_filter_disabled_rules_sha256 = $filter.DisabledRulesSha256
+        userscript_only = $true
+        user_filter_unchanged = [bool] ($null -ne $ProtectedBaseline)
+        subscription_inventory_unchanged = [bool] ($null -ne $ProtectedBaseline)
+        protected_filter_state = $protectedFilterState
     }
 }
 
@@ -4738,6 +4969,11 @@ function Assert-ExclusiveTargetMigrationAuthorized {
 
 $isCspProbeCommand = $Command -in @(
     'csp-probe-inspect', 'csp-probe-install', 'csp-probe-restore')
+$isStandaloneUserscriptCommand = $Command -in @(
+    'install-userscript', 'deploy', 'verify')
+$isLegacyMigrationCommand = $Command -eq 'migrate-legacy'
+$requiresAuthenticatedStandaloneUserscript =
+    $isStandaloneUserscriptCommand -or $isLegacyMigrationCommand
 $cspProbeForbiddenParameters = @(
     'UserscriptSource', 'FilterUrl', 'ReleaseManifestSource',
     'UserscriptName', 'FilterName', 'ExpectedUserscriptSha256',
@@ -4781,24 +5017,47 @@ try {
             throw "csp-probe-restore does not accept -BackupRoot"
         }
     }
-    if ($Command -in @('install-userscript', 'install-filter', 'deploy', 'verify') -and
+    if ($requiresAuthenticatedStandaloneUserscript -and
         -not $UserscriptSource) {
         throw "$Command requires -UserscriptSource"
     }
-    if ($Command -in @('install-filter', 'deploy', 'verify') -and -not $FilterUrl) {
-        throw "$Command requires -FilterUrl"
-    }
-    if ($Command -in @('install-userscript', 'install-filter', 'deploy', 'verify') -and
+    if ($requiresAuthenticatedStandaloneUserscript -and
         -not $ExpectedUserscriptSha256) {
         throw "$Command requires -ExpectedUserscriptSha256, including with -WhatIf"
     }
-    if ($Command -in @('install-filter', 'deploy', 'verify') -and
-        -not $ExpectedFilterSha256) {
-        throw "$Command requires -ExpectedFilterSha256, including with -WhatIf"
+    if ($isLegacyMigrationCommand -and -not $ReleaseManifestSource) {
+        throw "migrate-legacy requires -ReleaseManifestSource, including with -WhatIf"
     }
-    if ($Command -in @('install-filter', 'deploy', 'verify') -and
+    if ($Command -eq 'install-filter' -and -not $FilterUrl) {
+        throw "install-filter requires -FilterUrl"
+    }
+    if ($Command -eq 'install-filter' -and
+        -not $ExpectedFilterSha256) {
+        throw "install-filter requires -ExpectedFilterSha256, including with -WhatIf"
+    }
+    if ($Command -eq 'install-filter' -and
         -not $ExpectedInstalledFilterRulesSha256) {
-        throw "$Command requires -ExpectedInstalledFilterRulesSha256, including with -WhatIf"
+        throw ("install-filter requires -ExpectedInstalledFilterRulesSha256, " +
+            "including with -WhatIf")
+    }
+    if ($isStandaloneUserscriptCommand) {
+        foreach ($forbiddenParameter in @(
+                'FilterUrl', 'ExpectedFilterSha256',
+                'ExpectedInstalledFilterRulesSha256',
+                'ApproveExclusiveTargetMigration')) {
+            if ($PSBoundParameters.ContainsKey($forbiddenParameter)) {
+                throw "$Command is Userscript-only and rejects -$forbiddenParameter"
+            }
+        }
+    }
+    if ($isLegacyMigrationCommand) {
+        foreach ($forbiddenParameter in @(
+                'FilterUrl', 'FilterName', 'ExpectedFilterSha256',
+                'ExpectedInstalledFilterRulesSha256')) {
+            if ($PSBoundParameters.ContainsKey($forbiddenParameter)) {
+                throw "migrate-legacy rejects filter input: -$forbiddenParameter"
+            }
+        }
     }
     if ($Command -eq 'restore-backup' -and -not $BackupPath) {
         throw "restore-backup requires -BackupPath"
@@ -4816,11 +5075,11 @@ try {
     if ($FilterUrl) {
         $desiredFilter = Get-FilterSource -Url $FilterUrl
     }
-    if ($Command -in @('install-userscript', 'install-filter', 'deploy', 'verify')) {
+    if ($requiresAuthenticatedStandaloneUserscript) {
         $manifestSource = Get-DefaultReleaseManifestSource
         $releaseManifestContract = Get-ReleaseManifestContract -Source $manifestSource
         Assert-ReleaseInputsMatchManifest -ManifestContract $releaseManifestContract `
-            -DesiredUserscript $desiredUserscript -DesiredFilter $desiredFilter
+            -DesiredUserscript $desiredUserscript -DesiredFilter $null
     }
     if ($Command -eq 'restore-backup') {
         $validatedBackup = Get-ValidatedBackup -Path $BackupPath
@@ -4947,7 +5206,7 @@ try {
         }
         'verify' {
             $verified = Assert-DeploymentVerified -Client $client `
-                -DesiredUserscript $desiredUserscript -DesiredFilter $desiredFilter
+                -DesiredUserscript $desiredUserscript -ProtectedBaseline $null
             $verified.command = 'verify'
             Write-JsonResult -Value $verified
         }
@@ -4966,6 +5225,8 @@ try {
                 try {
                     [void] (Assert-CurrentStateEqualsBackup -Client $client `
                             -Backup $mutationBackup -ExactFilterUrl $null)
+                    [void] (Assert-ProtectedFilterStateEqualsBackup -Client $client `
+                            -Backup $mutationBackup -Phase 'pre-write verification')
                     $installed = Invoke-UserscriptMutation -Client $client -Snapshot $snapshot `
                         -Desired $desiredUserscript -JournalDirectory $backup
                     Write-TransactionJournalEvent -Directory $backup `
@@ -4975,6 +5236,8 @@ try {
                                 gm_properties_sha256 = `
                                     $installed.InstalledGmPropertiesSha256
                             })
+                    $protected = Assert-ProtectedFilterStateEqualsBackup -Client $client `
+                        -Backup $mutationBackup -Phase 'Userscript installation'
                     Write-TransactionJournalEvent -Directory $backup `
                         -Event 'transaction-complete' -Details $null
                     Write-JsonResult -Value ([ordered]@{
@@ -4984,6 +5247,9 @@ try {
                             userscript = ConvertTo-UserscriptMetadataRecord -Info $installed
                             code_sha256 = $installed.InstalledCodeSha256
                             gm_properties_sha256 = $installed.InstalledGmPropertiesSha256
+                            user_filter_unchanged = $true
+                            subscription_inventory_unchanged = $true
+                            protected_filter_state = $protected
                         })
                 }
                 catch {
@@ -4991,6 +5257,8 @@ try {
                         Invoke-Rollback -Client $client -UserscriptSnapshot $snapshot `
                             -FilterSnapshot $null -ExactFilterUrl $null `
                             -JournalDirectory $backup
+                        [void] (Assert-ProtectedFilterStateEqualsBackup -Client $client `
+                                -Backup $mutationBackup -Phase 'Userscript rollback')
                         try { Write-TransactionJournalEvent -Directory $backup `
                                 -Event 'rollback-complete' -Details $null } catch { }
                     }
@@ -5110,12 +5378,17 @@ try {
         'migrate-legacy' {
             Assert-MutationAuthorized
             [void] (Assert-GlobalProtection -Client $client)
+            $migrationUserscript = Assert-UserscriptInstalled -Client $client `
+                -Desired $desiredUserscript
             if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess(
                     'AdGuard User filter exclusive-target rules',
                     'Disable the explicitly approved backup-derived rule delta')) {
                 $backup = New-StateBackup -Client $client -ExactFilterUrl $null
                 Set-RecoveryContext -Directory $backup
                 $mutationBackup = Get-ValidatedBackup -Path $backup
+                Assert-BackupUserscriptMatchesDesired `
+                    -Snapshot $mutationBackup.UserscriptSnapshot `
+                    -Desired $desiredUserscript
                 $migrationPlan = Get-LegacyMigrationPlanFromBackup -Backup $mutationBackup
                 if (-not $migrationPlan.CanMigrate) {
                     throw ("Legacy migration exact precondition failed: " +
@@ -5131,10 +5404,17 @@ try {
                     [void] (Assert-CurrentStateEqualsBackup -Client $client `
                             -Backup $mutationBackup -ExactFilterUrl $null)
                     $migration = Invoke-LegacyMigration -Client $client -Plan $migrationPlan `
-                        -JournalDirectory $backup -CurrentMatchesBackup
+                        -DesiredUserscript $desiredUserscript -JournalDirectory $backup
+                    $userscriptUnchanged = Assert-LegacyMigrationUserscriptUnchanged `
+                        -Client $client `
+                        -BackupSnapshot $mutationBackup.UserscriptSnapshot `
+                        -DesiredUserscript $desiredUserscript
                     Write-TransactionJournalEvent -Directory $backup `
                         -Event 'legacy-migration-applied' `
                         -Details ([ordered]@{ changed = [bool] $migration.PublicReport.changed })
+                    Write-TransactionJournalEvent -Directory $backup `
+                        -Event 'migration-userscript-unchanged' `
+                        -Details $userscriptUnchanged
                     Write-TransactionJournalEvent -Directory $backup `
                         -Event 'transaction-complete' -Details $null
                     Write-JsonResult -Value ([ordered]@{
@@ -5142,6 +5422,7 @@ try {
                             changed = [bool] $migration.PublicReport.changed
                             backup = $backup
                             migration = $migration.PublicReport
+                            userscript_unchanged = $userscriptUnchanged
                         })
                 }
                 catch {
@@ -5163,16 +5444,28 @@ try {
                     throw ("Legacy migration exact precondition failed: " +
                         (@($migrationPlan.PublicReport.block_reasons) -join ', '))
                 }
+                $migrationUserscript = Assert-UserscriptInstalled -Client $client `
+                    -Desired $desiredUserscript
                 Write-JsonResult -Value ([ordered]@{
                         command = 'migrate-legacy'
                         what_if = $true
                         plan = $migrationPlan.PublicReport
-                        mutation_order = @('full-authoritative-backup',
+                        mutation_order = @('authenticated-standalone-userscript',
+                            'full-authoritative-backup',
                             'DisableFilterRules(exact candidate delta)', 'postcondition-verification')
                         rollback = 'EnableFilterRules(exact transaction delta)'
                         approval_required = @($migrationPlan.EnabledCandidateRules).Count -gt 0
                         approval_switch = '-ApproveExclusiveTargetMigration'
                         approval_supplied = [bool] $ApproveExclusiveTargetMigration
+                        userscript_precondition = [ordered]@{
+                            verified = $true
+                            name = [string] $migrationUserscript.Name
+                            version = [string] $migrationUserscript.Version
+                            enabled = [bool] $migrationUserscript.IsEnabled
+                            code_sha256 = [string] $migrationUserscript.InstalledCodeSha256
+                            gm_properties_sha256 = [string] (
+                                $migrationUserscript.InstalledGmPropertiesSha256)
+                        }
                         adguard_configuration_changed = $false
                     })
             }
@@ -5257,31 +5550,20 @@ try {
             Assert-MutationAuthorized
             [void] (Assert-GlobalProtection -Client $client)
             if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess('AdGuard Hotdeal Focus',
-                    'Deploy userscript, disable approved exclusive-target rules, then trusted marker filter')) {
-                $backup = New-StateBackup -Client $client -ExactFilterUrl $desiredFilter.Url
+                    'Deploy only the authenticated Userscript and preserve every filter')) {
+                $backup = New-StateBackup -Client $client -ExactFilterUrl $null
                 Set-RecoveryContext -Directory $backup
                 $mutationBackup = Get-ValidatedBackup -Path $backup
                 $userscriptSnapshot = $mutationBackup.UserscriptSnapshot
-                $filterSnapshot = $mutationBackup.FilterSnapshot
-                $migrationPlan = Get-LegacyMigrationPlanFromBackup -Backup $mutationBackup
-                if (-not $migrationPlan.CanMigrate) {
-                    throw ("Legacy migration exact precondition failed: " +
-                        (@($migrationPlan.PublicReport.block_reasons) -join ', '))
-                }
-                if ([int] $migrationPlan.PublicReport.protected.enabled_mixed_target_rule_count -gt 0) {
-                    throw "Enabled mixed-target User filter rules are preserved and block deployment"
-                }
-                Assert-ExclusiveTargetMigrationAuthorized -Plan $migrationPlan
-                Assert-FilterSnapshotMutationPreconditions -Snapshot $filterSnapshot `
-                    -Desired $desiredFilter
                 Initialize-TransactionJournal -Directory $backup -CommandName 'deploy' `
                     -DesiredUserscript $desiredUserscript `
-                    -BeforeUserscriptSnapshot $userscriptSnapshot -DesiredFilter $desiredFilter `
-                    -MigrationPlan $migrationPlan
-                $migrationTransaction = $null
+                    -BeforeUserscriptSnapshot $userscriptSnapshot -DesiredFilter $null `
+                    -MigrationPlan $null
                 try {
                     [void] (Assert-CurrentStateEqualsBackup -Client $client `
-                            -Backup $mutationBackup -ExactFilterUrl $desiredFilter.Url)
+                            -Backup $mutationBackup -ExactFilterUrl $null)
+                    [void] (Assert-ProtectedFilterStateEqualsBackup -Client $client `
+                            -Backup $mutationBackup -Phase 'pre-write verification')
                     $appliedUserscript = Invoke-UserscriptMutation -Client $client `
                         -Snapshot $userscriptSnapshot `
                         -Desired $desiredUserscript -JournalDirectory $backup
@@ -5292,37 +5574,23 @@ try {
                                 gm_properties_sha256 = `
                                     $appliedUserscript.InstalledGmPropertiesSha256
                             })
-                    $migrationTransaction = Invoke-LegacyMigration -Client $client `
-                        -Plan $migrationPlan -JournalDirectory $backup
-                    Write-TransactionJournalEvent -Directory $backup `
-                        -Event 'legacy-migration-applied' `
-                        -Details ([ordered]@{ changed = [bool] $migrationTransaction.PublicReport.changed })
-                    Invoke-FilterMutation -Client $client -Snapshot $filterSnapshot `
-                        -Desired $desiredFilter -JournalDirectory $backup
-                    $appliedFilter = Assert-FilterInstalled -Client $client `
-                        -Desired $desiredFilter
-                    Write-TransactionJournalEvent -Directory $backup `
-                        -Event 'filter-applied' `
-                        -Details ([ordered]@{ filter_id = [int] $appliedFilter.Filter.FilterId
-                                rules_sha256 = $appliedFilter.RulesSha256
-                                disabled_rule_count = $appliedFilter.DisabledRuleCount
-                                disabled_rules_sha256 = $appliedFilter.DisabledRulesSha256 })
                     $verified = Assert-DeploymentVerified -Client $client `
-                        -DesiredUserscript $desiredUserscript -DesiredFilter $desiredFilter
+                        -DesiredUserscript $desiredUserscript `
+                        -ProtectedBaseline $mutationBackup
                     Write-TransactionJournalEvent -Directory $backup `
                         -Event 'transaction-complete' -Details $null
                     $verified.command = 'deploy'
                     $verified.backup = $backup
-                    $verified.legacy_migration = $migrationTransaction.PublicReport
                     Write-JsonResult -Value $verified
                 }
                 catch {
                     try {
                         Invoke-Rollback -Client $client `
                             -UserscriptSnapshot $userscriptSnapshot `
-                            -FilterSnapshot $filterSnapshot `
-                            -MigrationTransaction $migrationTransaction `
-                            -ExactFilterUrl $desiredFilter.Url -JournalDirectory $backup
+                            -FilterSnapshot $null -MigrationTransaction $null `
+                            -ExactFilterUrl $null -JournalDirectory $backup
+                        [void] (Assert-ProtectedFilterStateEqualsBackup -Client $client `
+                                -Backup $mutationBackup -Phase 'Userscript rollback')
                         try { Write-TransactionJournalEvent -Directory $backup `
                                 -Event 'rollback-complete' -Details $null } catch { }
                     }
@@ -5330,31 +5598,19 @@ try {
                     throw
                 }
             } else {
-                $migrationPlan = Get-LegacyMigrationPlan -Client $client
-                if (-not $migrationPlan.CanMigrate) {
-                    throw ("Legacy migration exact precondition failed: " +
-                        (@($migrationPlan.PublicReport.block_reasons) -join ', '))
-                }
-                if ([int] $migrationPlan.PublicReport.protected.enabled_mixed_target_rule_count -gt 0) {
-                    throw "Enabled mixed-target User filter rules are preserved and block deployment"
-                }
+                $protected = ConvertTo-ProtectedFilterStateManifestRecord `
+                    -StableEvidence (Get-StableProtectedFilterStateEvidence -Client $client)
                 Write-JsonResult -Value ([ordered]@{
                         command = 'deploy'
                         what_if = $true
-                        order = @('full-authoritative-backup', 'userscript',
-                            'approved-exclusive-target-rule-disable', 'custom-marker-filter',
-                            'verification')
-                        migration_plan = $migrationPlan.PublicReport
-                        migration_approval_required = @(
-                            $migrationPlan.EnabledCandidateRules).Count -gt 0
-                        migration_approval_switch = '-ApproveExclusiveTargetMigration'
-                        migration_approval_supplied = [bool] $ApproveExclusiveTargetMigration
+                        order = @('two-read-protected-filter-inventory',
+                            'full-authoritative-backup', 'userscript-only',
+                            'exact-filter-inventory-postcondition')
                         userscript_version = $desiredUserscript.Version
                         userscript_sha256 = $desiredUserscript.Sha256
-                        filter_version = $desiredFilter.Version
-                        filter_url = $desiredFilter.Url
-                        filter_raw_sha256 = $desiredFilter.RawSha256
-                        filter_source_rules_sha256 = $desiredFilter.SourceRulesSha256
+                        user_filter_will_change = $false
+                        subscription_inventory_will_change = $false
+                        protected_filter_state = $protected
                         adguard_configuration_changed = $false
                     })
             }

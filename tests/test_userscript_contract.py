@@ -27,21 +27,13 @@ from build_filter import (  # noqa: E402
     build_candidate_draft_bundle,
     load_config,
     render_filter,
-)
-from build_gate_filter import (  # noqa: E402
-    GATE_ARTIFACT_VERSION,
-    PROTOCOL_VERSION,
-    iter_gate_rules,
-    render_gate_filter,
+    validate_config,
 )
 from build_release import (  # noqa: E402
-    GATE_FILTER_SUBSCRIPTION_URL,
     canonical_text_sha256,
     check_outputs,
-    installed_filter_rules_sha256,
     render_materialized_release_manifest,
     render_release,
-    validate_gate_artifact_lock,
 )
 
 
@@ -199,7 +191,10 @@ class UserscriptMetadataTests(unittest.TestCase):
         cls.source = userscript_text()
 
     def test_document_start_metadata_and_update_placeholders(self) -> None:
-        self.assertEqual(["GM_addElement"], metadata_values(self.source, "grant"))
+        self.assertEqual(
+            ["GM_addElement", "window.onurlchange"],
+            metadata_values(self.source, "grant"),
+        )
         self.assertEqual(["document-start"], metadata_values(self.source, "run-at"))
         self.assertEqual(
             ["https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js"],
@@ -234,10 +229,6 @@ class UserscriptMetadataTests(unittest.TestCase):
         )
 
     def test_release_code_has_no_remote_execution_or_network_api(self) -> None:
-        source_without_exact_signed_relay_fetch = self.source.replace(
-            "browserRoot.fetch(cacheKey, {", "SIGNED_RELAY_FETCH({", 1
-        )
-        self.assertEqual(1, self.source.count("browserRoot.fetch(cacheKey, {"))
         forbidden_patterns = {
             "dynamic code": r"\beval\s*\(|\bnew\s+Function\s*\(",
             "network request": r"\bfetch\s*\(|\bXMLHttpRequest\b|\bWebSocket\b|\bEventSource\b|sendBeacon\s*\(",
@@ -245,7 +236,108 @@ class UserscriptMetadataTests(unittest.TestCase):
         }
         for label, pattern in forbidden_patterns.items():
             with self.subTest(label=label):
-                self.assertIsNone(re.search(pattern, source_without_exact_signed_relay_fetch))
+                self.assertIsNone(re.search(pattern, self.source))
+
+    def test_algumon_capture_uses_only_the_normal_user_navigation(self) -> None:
+        javascript = r"""
+const fs = require("fs");
+const vm = require("vm");
+const moduleRecord = { exports: {} };
+const calls = { fetch: 0, xhr: 0, beacon: 0, domWrites: 0, prevented: 0 };
+const listeners = {};
+const documentRecord = {
+  location: { href: "https://www.algumon.com/deals" },
+  addEventListener(type, listener) { listeners[type] = listener; },
+  createElement() { calls.domWrites += 1; return {}; },
+};
+let navigationName = "";
+const browserRoot = {
+  document: documentRecord,
+  location: { hostname: "www.algumon.com" },
+  crypto: {
+    getRandomValues(words) {
+      for (let index = 0; index < words.length; index += 1) words[index] = index + 1;
+      return words;
+    },
+  },
+  btoa(value) { return Buffer.from(value, "binary").toString("base64"); },
+  atob(value) { return Buffer.from(value, "base64").toString("binary"); },
+  fetch() { calls.fetch += 1; throw new Error("unexpected fetch"); },
+  XMLHttpRequest: function unexpectedXhr() { calls.xhr += 1; },
+  navigator: { sendBeacon() { calls.beacon += 1; return false; } },
+  get name() { return navigationName; },
+  set name(value) { navigationName = String(value); },
+};
+const sandbox = {
+  module: moduleRecord, URL, Set, Map, WeakMap, WeakSet, Object, Array, String,
+  Number, RegExp, JSON, Date, Math, encodeURIComponent, decodeURIComponent,
+  escape, unescape, Uint32Array, Buffer,
+};
+vm.runInNewContext(fs.readFileSync("hotdeal-focus.user.js", "utf8"), sandbox);
+const api = moduleRecord.exports;
+api.start(browserRoot);
+const title = { textContent: "Normal user navigation deal", getAttribute() { return null; } };
+const card = {
+  getAttribute(name) { return name === "data-site-type" ? "clien" : null; },
+  querySelector(selector) {
+    return selector.includes("data-title") ? title : null;
+  },
+  querySelectorAll() { return []; },
+};
+const anchor = {
+  nodeType: 1,
+  ownerDocument: documentRecord,
+  textContent: "Normal user navigation deal",
+  getAttribute(name) {
+    if (name === "href") {
+      return "https://www.algumon.com/l/d/123?v=" + "a".repeat(32) + "&t=" + Date.now();
+    }
+    return null;
+  },
+  closest(selector) { return selector === "a[href]" ? anchor : card; },
+  setAttribute() { calls.domWrites += 1; },
+  removeAttribute() { calls.domWrites += 1; },
+};
+listeners.click({
+  type: "click", isTrusted: true, defaultPrevented: false, button: 0,
+  ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, target: anchor,
+  preventDefault() { calls.prevented += 1; },
+});
+process.stdout.write(JSON.stringify({ calls, navigationName, listenerCount: Object.keys(listeners).length }));
+"""
+        completed = subprocess.run(
+            ["node", "-e", javascript],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+        self.assertEqual(3, result["listenerCount"])
+        self.assertEqual(
+            {"fetch": 0, "xhr": 0, "beacon": 0, "domWrites": 0, "prevented": 0},
+            result["calls"],
+        )
+        self.assertTrue(result["navigationName"].startswith("hdf-provenance:"))
+        capture = self.source[
+            self.source.index("function installAlgumonSeedCapture"):
+            self.source.index("function createRunNonce")
+        ]
+        for forbidden in (
+            ".setAttribute(",
+            ".removeAttribute(",
+            ".appendChild(",
+            "createNativeMutationObserver",
+            "GM_addElement",
+            "preventDefault",
+            "stopImmediatePropagation",
+            ".fetch(",
+            "XMLHttpRequest",
+            "sendBeacon",
+        ):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, capture)
 
     def test_protocol_markers_and_no_text_diagnostics_are_explicit(self) -> None:
         for token in (
@@ -506,8 +598,11 @@ class SemanticContractTests(unittest.TestCase):
         self.assertIn("commitAuthorizedCommentCountIncrease", self.source)
         self.assertIn('failureReason = "comment-removal"', self.source)
         self.assertIn('failureReason = "comment-count"', self.source)
-        self.assertNotIn("COMMENT_CONTINUATION_PATTERN", self.source)
-        self.assertNotIn("isCommentContinuationControl", self.source)
+        self.assertIn("COMMENT_CONTINUATION_PATTERN", self.source)
+        self.assertIn("isCommentContinuationControl", self.source)
+        self.assertIn("hasVisibleCommentContinuationControl", resolver)
+        self.assertIn('reason: "incomplete-comment-control"', resolver)
+        self.assertIn("knownCommentTotal", resolver)
 
     def test_projection_noise_metadata_is_bounded_and_canonicalized(self) -> None:
         noise = self.source[
@@ -540,7 +635,7 @@ class SemanticContractTests(unittest.TestCase):
         self.assertIn('subscribe(document, "beforetoggle"', observer)
         self.assertIn('subscribe(document, "toggle"', observer)
         self.assertIn('subscribe(document, "fullscreenchange"', observer)
-        self.assertIn('target?.matches?.("[popover]")', observer)
+        self.assertIn('target?.matches?.("[popover], dialog")', observer)
         self.assertIn("NATIVE.removeEventListener", observer)
         self.assertIn("runtime.unsubscribeProjectionEvents", stop)
         self.assertIn("initializeShadowTracker", self.source)
@@ -680,14 +775,19 @@ class SemanticContractTests(unittest.TestCase):
     def test_seed_is_short_lived_public_and_never_a_solo_trusted_signal(self) -> None:
         self.assertIn("SEED_MAX_AGE_MS = 10 * 60 * 1000", self.source)
         self.assertIn("SEED_MAX_BYTES = 1024", self.source)
-        self.assertIn('SEED_FRAGMENT_KEY = "hdf-seed"', self.source)
-        self.assertIn("function writeSeedFragment", self.source)
-        self.assertIn("function readAndClearFragmentSeed", self.source)
-        self.assertIn("browserRoot.history.replaceState", self.source)
+        self.assertIn('SEED_WINDOW_NAME_PREFIX = "hdf-provenance:"', self.source)
+        self.assertIn("function encodeSeedCarrier", self.source)
+        self.assertIn("function decodeSeedCarrier", self.source)
+        self.assertIn("function readAndClearSeed", self.source)
         self.assertIn('document.addEventListener("auxclick"', self.source)
         self.assertIn('document.addEventListener("keydown"', self.source)
         self.assertIn('event.key === "Enter"', self.source)
         self.assertIn('browserRoot.name = ""', self.source)
+        self.assertIn("staysInCurrentBrowsingContext", self.source)
+        self.assertNotIn("event.preventDefault()", self.source[
+            self.source.index("function installAlgumonSeedCapture"):
+            self.source.index("function createRunNonce")
+        ])
         self.assertIn('"seed-title-match"', self.source)
         self.assertIn('"seed-count-match"', self.source)
         self.assertIn("UNTRUSTED_SIGNALS", self.source)
@@ -870,6 +970,7 @@ class SemanticContractTests(unittest.TestCase):
         self.assertIn('runtime.enterTerminal("cascade-scan-budget")', cascade)
         self.assertIn("runtime.prepareCascadeRelease", cascade)
         self.assertIn("runtime.verifyCascadeRelease", cascade)
+        self.assertIn("runtime.verifyUnlockedCascadeRelease", cascade)
         release_verification = cascade[
             cascade.index("runtime.verifyCascadeRelease"):
             cascade.index("const verifyCascade")
@@ -887,7 +988,7 @@ class SemanticContractTests(unittest.TestCase):
         unlock = attempt.index("removeAttribute(ATTR.lock)")
         ready = attempt.index('setAttribute(ATTR.ready, "1")')
         ready_class = attempt.index("classList.add(CLASS.ready)")
-        proof = attempt.index("return proveExtendedCssRelease(")
+        proof = attempt.index("return proveStandaloneCascadeRelease(")
         release_callback = attempt.index("function releaseProvedProjection()")
         phase_released = attempt.index('runtime.releasePhase = "released"')
         self.assertLess(prepare, authorize)
@@ -897,15 +998,33 @@ class SemanticContractTests(unittest.TestCase):
         self.assertLess(proof, release_callback)
         self.assertLess(release_callback, phase_released)
         self.assertLess(phase_released, unlock)
+        unlocked_proof = attempt.index("runtime.verifyUnlockedCascadeRelease()")
+        integrity_observer = attempt.index("installIntegrityObserver(")
+        self.assertLess(unlock, unlocked_proof)
+        self.assertLess(unlocked_proof, integrity_observer)
+
+        unlocked_verification = cascade[
+            cascade.index("runtime.verifyUnlockedCascadeRelease"):
+            cascade.index("const verifyCascade")
+        ]
+        self.assertIn("collectBoundedFullScan()", unlocked_verification)
+        self.assertIn("verifyOwnedState(document, runtime.projectionState)", unlocked_verification)
+        self.assertIn("exposesRootPaint()", unlocked_verification)
+        self.assertIn("exposesTopLayer()", unlocked_verification)
+        self.assertIn("exposesUnowned(releaseCandidates)", unlocked_verification)
+        self.assertIn('runtime.enterTerminal("cascade-visible-leak")', unlocked_verification)
 
         release_proof = self.source[
-            self.source.index("function proveExtendedCssRelease"):
+            self.source.index("function proveStandaloneCascadeRelease"):
             self.source.index("function installIntegrityObserver")
         ]
-        self.assertIn("RELEASE_PROOF_FRAMES = 2", self.source)
+        self.assertIn("CASCADE_PROOF_FRAMES = 2", self.source)
         self.assertIn("runtime.verifyCascadeRelease(cascadeSnapshot)", release_proof)
-        self.assertIn('probe.style.getPropertyValue("display") === "none"', release_proof)
-        self.assertIn('probe.style.getPropertyPriority("display") === "important"', release_proof)
+        self.assertIn('probe.style.getPropertyValue("display") === "block"', release_proof)
+        self.assertIn('probe.style.getPropertyPriority("display") === ""', release_proof)
+        self.assertIn('computed.getPropertyValue("--hdf-v2-cascade-proof")', release_proof)
+        self.assertIn('computed.display === "none"', release_proof)
+        self.assertNotIn("extendedCss", release_proof)
 
         activation = self.source[
             self.source.index("function activateCurrentLocation"):
@@ -915,6 +1034,95 @@ class SemanticContractTests(unittest.TestCase):
         runtime_stop = activation.index("activeRuntime.stop()")
         self.assertLess(same_identity_return, runtime_stop)
         self.assertIn('terminalNavigationBlock("navigation-identity")', activation)
+
+    def test_post_ready_changes_relock_or_terminal_by_mutation_class(self) -> None:
+        runtime = self.source[
+            self.source.index("function createReaderRuntime"):
+            self.source.index("function lockWhenHtmlExists")
+        ]
+        relock = runtime[
+            runtime.index("runtime.relockForReprojection"):
+            runtime.index("function attemptResolution")
+        ]
+        self.assertIn('runtime.releasePhase = "relocking"', relock)
+        self.assertIn('document.documentElement.classList.add(CLASS.lock)', relock)
+        self.assertIn('document.documentElement.setAttribute(ATTR.lock, "1")', relock)
+        self.assertIn("writeRuntimeGateStyle(styleElement, null, runtime)", relock)
+        self.assertIn("clearProtocolState(document)", relock)
+        self.assertIn("claimBootstrapLock(document, false)", relock)
+        self.assertIn("runtime.beginDiscovery()", relock)
+        self.assertLess(
+            relock.index('document.documentElement.classList.add(CLASS.lock)'),
+            relock.index("writeRuntimeGateStyle(styleElement, null, runtime)"),
+        )
+        self.assertLess(
+            relock.index("writeRuntimeGateStyle(styleElement, null, runtime)"),
+            relock.index("clearProtocolState(document)"),
+        )
+        self.assertLess(
+            relock.index("clearProtocolState(document)"),
+            relock.index("runtime.beginDiscovery()"),
+        )
+
+        cascade = self.source[
+            self.source.index("function installCascadeGuard"):
+            self.source.index("function proveStandaloneCascadeRelease")
+        ]
+        mutation_guard = cascade[
+            cascade.index("function keepGateStyleLast"):
+            cascade.index("let stylesheetChanged")
+        ]
+        self.assertIn('runtime.releasePhase === "released"', mutation_guard)
+        self.assertIn("runtime.relockForReprojection(", mutation_guard)
+        self.assertIn('"post-ready-stylesheet"', mutation_guard)
+        self.assertIn('"post-ready-dom"', mutation_guard)
+        self.assertIn('"post-ready-cssom"', cascade)
+        self.assertIn("subscribeAdoptedStyleSheetMutations", cascade)
+        self.assertIn('"post-ready-adopted-stylesheet"', cascade)
+        self.assertIn("subscribeStyleSheetStateMutations", cascade)
+        self.assertIn('"post-ready-stylesheet-state"', cascade)
+        self.assertIn("runtime.discardCascadeRecords", cascade)
+        self.assertIn('"open", "popover"', cascade)
+
+        integrity = self.source[
+            self.source.index("function installIntegrityObserver"):
+            self.source.index("function createReaderRuntime")
+        ]
+        self.assertIn("COMMENT_CONTROL_STATE_ATTRIBUTES.has(name)", integrity)
+        self.assertIn("commentProjectionChanged = true", integrity)
+        self.assertIn("terminalBlock(failureReason)", integrity)
+        self.assertIn('runtime.enterTerminal("role-projection-top-layer-activation")', integrity)
+
+        navigation = self.source[
+            self.source.index("function activateCurrentLocation"):
+            self.source.index("activateCurrentLocation();")
+        ]
+        self.assertIn(
+            'activeRuntime.relockForReprojection("same-article-navigation")',
+            navigation,
+        )
+        self.assertIn("characterData: true", runtime)
+        self.assertIn("attributes: true", runtime)
+
+        resolver = self.source[
+            self.source.index("function resolveApprovedLayoutWithPublisherStyles"):
+            self.source.index("function resolveProjectionClasses")
+        ]
+        self.assertIn("hasVisibleCommentContinuationControl(commentControls)", resolver)
+        self.assertIn('reason: "incomplete-comment-control"', resolver)
+
+        stylesheet = self.source[
+            self.source.index("function gateStyleText"):
+            self.source.index("function installRuntimeGateStyle")
+        ]
+        self.assertIn(
+            '${owned}.${CLASS.deep}[${ATTR.deep}]',
+            stylesheet,
+        )
+        self.assertIn(
+            '${owned}.${roleClass("comment-item")}',
+            stylesheet,
+        )
 
     def test_first_terminal_navigation_reason_is_immutable(self) -> None:
         start = self.source[
@@ -1262,9 +1470,21 @@ const seed = api.validateSeed({
   navigationNonce: `hdf-${"a".repeat(28)}`,
   destinationUrl: "https://www.clien.net/service/board/jirum/99999000",
 }, now, true);
+const carrierSeed = api.validateSeed({
+  v: 1,
+  siteType: "clien",
+  dealId: "99999000",
+  title: rawTitle,
+  commentCount: null,
+  ts: now,
+  relayV: "0".repeat(32),
+  relayT: String(now),
+  navigationNonce: `hdf-${"a".repeat(28)}`,
+}, now, true);
 process.stdout.write(JSON.stringify({
   title: seed?.title ?? null,
   evidence: seed ? api.titleConsistency(seed.title, rawTitle) : null,
+  carrierNavigation: Boolean(carrierSeed?.navigationNonce) && carrierSeed.destinationUrl === null,
 }));
 """
         completed = subprocess.run(
@@ -1278,6 +1498,7 @@ process.stdout.write(JSON.stringify({
         result = json.loads(completed.stdout)
         self.assertEqual("Synthetic PS5/NS2 marker-style-tamper", result["title"])
         self.assertTrue(result["evidence"]["ok"], result)
+        self.assertTrue(result["carrierNavigation"], result)
 
     def test_tamper_and_spa_revalidation_contracts_exist(self) -> None:
         for token in (
@@ -1290,6 +1511,8 @@ process.stdout.write(JSON.stringify({
             "__HOTDEAL_FOCUS_AUDIT__",
             '"pushState"',
             '"replaceState"',
+            '"urlchange"',
+            '"hashchange"',
             '"popstate"',
             '"pageshow"',
         ):
@@ -1313,6 +1536,14 @@ process.stdout.write(JSON.stringify({
         self.assertIn("activeRuntime.terminallyBlocked", navigation)
         self.assertIn('setAttribute(ATTR.status, "terminal-tamper")', navigation)
         self.assertIn("event.persisted === true", self.source)
+        navigation_guard = self.source[
+            self.source.index("function installNavigationRevalidation"):
+            self.source.index("function start(browserRoot)")
+        ]
+        self.assertIn('["urlchange", revalidate, true]', navigation_guard)
+        self.assertIn('["hashchange", revalidate, true]', navigation_guard)
+        self.assertIn("urlchange event remains the authoritative SPA trigger", navigation_guard)
+        self.assertIn("return true", navigation_guard)
 
         terminal_guardian = self.source[
             self.source.index("function installPersistentTerminalGuardian"):
@@ -1382,11 +1613,14 @@ process.stdout.write(JSON.stringify({
         )
         self.assertLess(
             attempt.index("classList.add(CLASS.ready)"),
-            attempt.index("proveExtendedCssRelease("),
+            attempt.index("proveStandaloneCascadeRelease("),
         )
 
-    def test_reader_gate_v2_uses_only_exact_gm_style_authority(self) -> None:
-        self.assertEqual(["GM_addElement"], metadata_values(self.source, "grant"))
+    def test_reader_gate_v2_uses_only_standalone_gm_style_authority(self) -> None:
+        self.assertEqual(
+            ["GM_addElement", "window.onurlchange"],
+            metadata_values(self.source, "grant"),
+        )
         self.assertEqual(1, self.source.count('GM_addElement(parent, "style", {'))
         install = self.source[
             self.source.index("function installRuntimeGateStyle"):
@@ -1402,7 +1636,7 @@ process.stdout.write(JSON.stringify({
             self.source.index("function installPersistentTerminalGuardian")
         ]
         proof = self.source[
-            self.source.index("function proveExtendedCssRelease"):
+            self.source.index("function proveStandaloneCascadeRelease"):
             self.source.index("function installIntegrityObserver")
         ]
         for section in (integrity, proof):
@@ -1410,23 +1644,33 @@ process.stdout.write(JSON.stringify({
                 section,
                 r'getAttribute\(["\'](?:nonce|data-source)["\']\)',
             )
-        self.assertIn('styleElement.hasAttribute("nonce")', proof)
-        self.assertIn('styleElement.hasAttribute("data-source")', proof)
+        self.assertNotIn('styleElement.hasAttribute("nonce")', proof)
+        self.assertNotIn('styleElement.hasAttribute("data-source")', proof)
+        self.assertIn('authority: "userscript-runtime-style"', proof)
+        self.assertIn('computed.getPropertyValue("--hdf-v2-cascade-proof")', proof)
+        self.assertIn("inlineStateIntact", proof)
+        diagnostics = self.source[
+            self.source.index("function publishDiagnostics"):
+            self.source.index("function structuralRoleDiagnostics")
+        ]
+        self.assertIn("standaloneCascadeProof: details.standaloneCascadeProof", diagnostics)
 
         audit_source = (SCRIPTS_DIR / "audit_pages.mjs").read_text(encoding="utf-8")
         control_source = (SCRIPTS_DIR / "preauthorized_adguard_control.mjs").read_text(
             encoding="utf-8"
         )
+        oracle_source = (PROJECT_ROOT / "tests" / "test_projection_tuple_oracle.mjs").read_text(
+            encoding="utf-8"
+        )
         self.assertNotIn("bypassCSP", audit_source)
-        self.assertIn('CONTROL_KIND = "preauthorized-nonce-control"', control_source)
-        self.assertRegex(
-            control_source,
-            r"not evidence that\s+\* AdGuard injected the style",
-        )
         self.assertIn(
-            'data-hdf-v2-release-probe="unowned-inline-important"',
+            'CONTROL_KIND = "preauthorized-userscript-style-control"',
             control_source,
         )
+        self.assertNotIn("extendedCssCallbacks", control_source)
+        self.assertNotIn("data-hdf-v2-release-probe", control_source)
+        self.assertNotIn("build_gate_filter.py", oracle_source)
+        self.assertNotIn("adguardGateCss", oracle_source)
         self.assertNotIn('document.body?.querySelectorAll("*")', control_source)
 
     def test_reader_gate_v2_bootstrap_and_release_order_are_fail_closed(self) -> None:
@@ -1893,6 +2137,56 @@ class CandidatePromotionContractTests(unittest.TestCase):
             ):
                 build_candidate_draft_bundle(path)
 
+    def test_candidate_release_version_requires_stable_x_y_z(self) -> None:
+        invalid_versions = (
+            f"{FIRST_CANDIDATE_VERSION}-rc.1",
+            f"{FIRST_CANDIDATE_VERSION}+build.1",
+            f"0{FIRST_CANDIDATE_VERSION}",
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            for index, invalid_version in enumerate(invalid_versions):
+                with self.subTest(release_version=invalid_version):
+                    draft = self.draft_envelope(
+                        f"unstable-release-{index}", invalid_version
+                    )
+                    path = root / f"unstable-release-{index}.json"
+                    self.write_envelope(path, draft)
+                    with self.assertRaisesRegex(
+                        ConfigError,
+                        "releaseVersion must be a stable x.y.z version",
+                    ):
+                        build_candidate_draft_bundle(path)
+
+    def test_config_and_rollback_versions_require_stable_x_y_z(self) -> None:
+        base_config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        invalid_versions = (
+            f"{BASE_RELEASE_VERSION}-rc.1",
+            f"{BASE_RELEASE_VERSION}+build.1",
+            f"0{BASE_RELEASE_VERSION}",
+        )
+        for invalid_version in invalid_versions:
+            with self.subTest(config_version=invalid_version):
+                config = json.loads(json.dumps(base_config))
+                config["metadata"]["version"] = invalid_version
+                with self.assertRaisesRegex(
+                    ConfigError,
+                    "metadata.version must be a stable x.y.z version",
+                ):
+                    validate_config(config)
+
+            with self.subTest(rollback_version=invalid_version):
+                config = json.loads(json.dumps(base_config))
+                config["metadata"]["rollback_of"] = {
+                    "version": invalid_version,
+                    "sha256": "0" * 64,
+                }
+                with self.assertRaisesRegex(
+                    ConfigError,
+                    "rollback_of.version must be a stable x.y.z version",
+                ):
+                    validate_config(config)
+
     def test_comparable_comment_lower_bound_requires_exact_consistency(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             temporary_root = Path(temporary_directory)
@@ -1923,7 +2217,6 @@ class CandidatePromotionContractTests(unittest.TestCase):
             )["status"])
             self.assertEqual(
                 {
-                    "filter.txt",
                     "filter-static.txt",
                     "config/sites.json",
                     "package.json",
@@ -1931,15 +2224,18 @@ class CandidatePromotionContractTests(unittest.TestCase):
                     "hotdeal-focus.user.js",
                     "candidate-manifest.json",
                     "state/approved-variants.json",
+                    "state/release-high-water.json",
                     "release-manifest.json",
                 },
                 set(bundle),
             )
             for core_path in (
-                "filter.txt", "filter-static.txt", "hotdeal-focus.user.js",
+                "filter-static.txt", "hotdeal-focus.user.js",
                 "config/sites.json", "package.json", "package-lock.json",
             ):
                 self.assertEqual(draft_bundle[core_path], bundle[core_path])
+            self.assertNotIn("filter.txt", draft_bundle)
+            self.assertNotIn("filter.txt", bundle)
             self.assertIn(
                 f"@version      {FIRST_CANDIDATE_VERSION}".encode(),
                 bundle["hotdeal-focus.user.js"],
@@ -1956,7 +2252,7 @@ class CandidatePromotionContractTests(unittest.TestCase):
             self.assertEqual(1, manifest["approvedVariantCount"])
             release_manifest = json.loads(bundle["release-manifest.json"])
             self.assertEqual(
-                {"filter.txt", "hotdeal-focus.user.js"},
+                {"hotdeal-focus.user.js"},
                 set(release_manifest["artifacts"]),
             )
             materialized_config_path = temporary_root / "materialized-sites.json"
@@ -1966,17 +2262,31 @@ class CandidatePromotionContractTests(unittest.TestCase):
                 bundle["filter-static.txt"],
                 render_filter(normalized_overlay).encode("utf-8"),
             )
-            rebuilt_manifest = render_materialized_release_manifest(
+            rebuilt_manifest = json.loads(render_materialized_release_manifest(
                 overlay,
-                gate_bytes=bundle["filter.txt"],
                 static_bytes=bundle["filter-static.txt"],
                 userscript_bytes=bundle["hotdeal-focus.user.js"],
                 config_bytes=bundle["config/sites.json"],
                 package_bytes=bundle["package.json"],
                 package_lock_bytes=bundle["package-lock.json"],
                 approved_state_bytes=bundle["state/approved-variants.json"],
-            )
-            self.assertEqual(bundle["release-manifest.json"], rebuilt_manifest)
+                high_water_bytes=bundle["state/release-high-water.json"],
+            ))
+            rebuilt_manifest["artifacts"] = {
+                "hotdeal-focus.user.js": rebuilt_manifest["artifacts"][
+                    "hotdeal-focus.user.js"
+                ]
+            }
+            rebuilt_manifest_bytes = (
+                json.dumps(
+                    rebuilt_manifest,
+                    ensure_ascii=False,
+                    indent=2,
+                    sort_keys=True,
+                )
+                + "\n"
+            ).encode("utf-8")
+            self.assertEqual(bundle["release-manifest.json"], rebuilt_manifest_bytes)
             self.assertEqual(
                 release_manifest["coverage"]["layoutFamilyCount"]
                 + manifest["approvedVariantCount"],
@@ -2022,24 +2332,24 @@ class CandidatePromotionContractTests(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "canonical deployment identity"):
                 render_materialized_release_manifest(
                     tampered_overlay,
-                    gate_bytes=bundle["filter.txt"],
                     static_bytes=bundle["filter-static.txt"],
                     userscript_bytes=bundle["hotdeal-focus.user.js"],
                     config_bytes=bundle["config/sites.json"],
                     package_bytes=bundle["package.json"],
                     package_lock_bytes=bundle["package-lock.json"],
                     approved_state_bytes=bundle["state/approved-variants.json"],
+                    high_water_bytes=bundle["state/release-high-water.json"],
                 )
             with self.assertRaisesRegex(ConfigError, "must match exactly"):
                 render_materialized_release_manifest(
                     overlay,
-                    gate_bytes=bundle["filter.txt"],
                     static_bytes=bundle["filter-static.txt"],
                     userscript_bytes=bundle["hotdeal-focus.user.js"],
                     config_bytes=bundle["config/sites.json"],
                     package_bytes=bundle["package.json"],
                     package_lock_bytes=bundle["package-lock.json"],
                     approved_state_bytes=b'{"schemaVersion":1,"variants":[]}',
+                    high_water_bytes=bundle["state/release-high-water.json"],
                 )
 
     def test_approved_state_is_append_only_and_release_version_is_monotonic(self) -> None:
@@ -2131,11 +2441,7 @@ class CandidatePromotionContractTests(unittest.TestCase):
             draft_path = root / "route-draft.json"
             self.write_envelope(draft_path, draft)
             draft_bundle = build_candidate_draft_bundle(draft_path)
-            rendered_gate = draft_bundle["filter.txt"].decode("utf-8")
-            self.assertEqual(
-                render_gate_filter(load_config(CONFIG_PATH)),
-                rendered_gate,
-            )
+            self.assertNotIn("filter.txt", draft_bundle)
             overlay = json.loads(draft_bundle["config/sites.json"])
             clien_layout = overlay["sites"][0]["layouts"][0]
             self.assertEqual(["|/service/board/jirum/"], raw_layout_paths(clien_layout))
@@ -2297,7 +2603,7 @@ class CandidatePromotionContractTests(unittest.TestCase):
                 with self.subTest(url=url):
                     self.assertEqual(owners, self.route_owners(clien_layout, url))
 
-    def test_profile_specific_mobile_variant_does_not_require_desktop_proof(self) -> None:
+    def test_shared_layout_rejects_mobile_only_candidate_proof(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             draft = self.draft_envelope(
@@ -2312,17 +2618,83 @@ class CandidatePromotionContractTests(unittest.TestCase):
             self.refresh_draft_hashes(draft)
             path = root / "mobile-draft.json"
             self.write_envelope(path, draft)
-            bundle = build_candidate_draft_bundle(path)
-            contracts = userscript_contracts(
-                bundle["hotdeal-focus.user.js"].decode("utf-8")
+            with self.assertRaisesRegex(
+                ConfigError,
+                "proofProfiles must equal every applicable base layout profile",
+            ):
+                build_candidate_draft_bundle(path)
+
+    def test_promotion_requires_three_fresh_algumon_targets_per_profile(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            draft = self.draft_envelope(
+                "jirum-three-targets-v2", FIRST_CANDIDATE_VERSION
             )
-            clien = next(site for site in contracts if site["id"] == "clien")
-            variant = next(
-                layout for layout in clien["layouts"]
-                if layout["id"] == f"jirum--{draft['candidate']['variantId']}"
+            draft_path = root / "three-targets-draft.json"
+            self.write_envelope(draft_path, draft)
+            draft_bundle = build_candidate_draft_bundle(draft_path)
+            artifact_hash = json.loads(draft_bundle["draft-manifest.json"])[
+                "artifactSetSha256"
+            ]
+            proven = self.proven_envelope(draft, artifact_hash)
+            removed_mobile_url = draft["candidate"]["sampleUrls"][-1]
+            proven["proof"]["observations"] = [
+                observation
+                for observation in proven["proof"]["observations"]
+                if not (
+                    observation["profile"] == "mobile"
+                    and observation["url"] == removed_mobile_url
+                )
+            ]
+            proven["proof"]["evidenceSha256"] = self.digest(
+                {
+                    "observations": proven["proof"]["observations"],
+                    "routeEvidence": proven["proof"]["routeEvidence"],
+                }
             )
-            self.assertEqual(["desktop", "mobile"], variant["applicableProfiles"])
-            self.assertEqual(["mobile"], variant["proofProfiles"])
+            proven_path = root / "three-targets-proven.json"
+            self.write_envelope(proven_path, proven)
+            with self.assertRaisesRegex(
+                ConfigError,
+                "three distinct target URLs for profile 'mobile'",
+            ):
+                build_candidate_bundle(proven_path)
+
+    def test_partial_profile_approved_state_has_no_migration_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            _draft, bundle, _proven = self.build_pair(
+                root, "jirum-state-v2", FIRST_CANDIDATE_VERSION
+            )
+            state = json.loads(bundle["state/approved-variants.json"])
+            state["variants"][0]["proofProfiles"] = ["mobile"]
+            state_path = root / "legacy-partial-profile-state.json"
+            self.write_envelope(state_path, state)
+            materialized_config = json.loads(bundle["config/sites.json"])
+            with self.assertRaisesRegex(
+                ConfigError,
+                "proofProfiles must equal every applicable layout profile",
+            ):
+                _load_approved_state(state_path, materialized_config)
+
+    def test_approved_state_release_version_has_no_suffix_migration(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            _draft, bundle, _proven = self.build_pair(
+                root, "jirum-state-version-v2", FIRST_CANDIDATE_VERSION
+            )
+            state = json.loads(bundle["state/approved-variants.json"])
+            state["variants"][0]["releaseVersion"] = (
+                f"{FIRST_CANDIDATE_VERSION}+legacy"
+            )
+            state_path = root / "legacy-suffixed-version-state.json"
+            self.write_envelope(state_path, state)
+            materialized_config = json.loads(bundle["config/sites.json"])
+            with self.assertRaisesRegex(
+                ConfigError,
+                "releaseVersion is invalid",
+            ):
+                _load_approved_state(state_path, materialized_config)
 
     def test_unavailable_algumon_count_requires_independent_comment_structure(self) -> None:
         import copy
@@ -2438,85 +2810,7 @@ class FilterAndReleaseContractTests(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.config = load_config(CONFIG_PATH)
 
-    def test_gate_is_marker_only_and_uses_official_prefix_modifiers(self) -> None:
-        rendered = render_gate_filter(self.config)
-        rules = [
-            line for line in rendered.splitlines()
-            if "#$?#" in line or "#$#" in line
-        ]
-        domain_count = len({
-            layout["domain"]
-            for site in self.config["sites"]
-            for layout in site["layouts"]
-        })
-        self.assertEqual(domain_count * 13, len(rules))
-        self.assertEqual(domain_count * 7, sum("#$#" in rule for rule in rules))
-        self.assertEqual(domain_count * 6, sum("#$?#" in rule for rule in rules))
-        for rule in rules:
-            self.assertRegex(rule, r"^\[\$domain=[^,]+\](?:#\$#|#\$\?#)")
-            self.assertNotIn(",path=", rule)
-            self.assertNotIn("$path=", rule)
-            self.assertNotRegex(
-                rule,
-                r"post_|article-body|view_content|comment_view|reply-list|app-article",
-            )
-        self.assertIn('data-hotdeal-focus-state="ready"', rendered)
-        self.assertIn(f'data-hotdeal-focus-protocol="{PROTOCOL_VERSION}"', rendered)
-        self.assertIn("visibility: hidden !important", rendered)
-        self.assertIn("transition: none !important", rendered)
-        self.assertIn("animation: none !important", rendered)
-        self.assertIn("opacity: 0 !important", rendered)
-        self.assertIn("clip-path: inset(50%) !important", rendered)
-        self.assertIn("pointer-events: none !important", rendered)
-        self.assertIn("caret-color: transparent !important", rendered)
-        self.assertIn("html.hdf-v2-lock", rendered)
-        self.assertIn("dialog::backdrop", rendered)
-        self.assertIn("[popover]::backdrop", rendered)
-        self.assertIn(":fullscreen::backdrop", rendered)
-        self.assertEqual(
-            "! Title: AdGuard Hotdeal Focus Marker Gate",
-            rendered.splitlines()[0],
-        )
-        self.assertNotIn("�", rendered.splitlines()[0])
-
-    def test_auditor_binds_every_marker_to_the_exact_gate_v2_lock(self) -> None:
-        auditor = (SCRIPTS_DIR / "audit_pages.mjs").read_text(encoding="utf-8")
-        for token in (
-            'const READER_GATE_ARTIFACT_VERSION = "2.0.2"',
-            '"gate-v2.0.2/filter.txt"',
-            "const gateArtifactLockContract",
-            "const gateArtifactLockMatchesRelease",
-            'gateLockEntry.path === "filter.txt"',
-            "gateLockEntry.bytes === markerFilter.bytes",
-            "gateLockEntry.sha256 === markerFilter.sha256",
-            "installedFilterRulesSha256(markerFilter.content)",
-            "releaseGateEntry?.installedRulesSha256 === gateLockEntry.installedRulesSha256",
-        ):
-            self.assertIn(token, auditor)
-        self.assertIn(
-            '/data-hotdeal-focus-protocol=["\']([^"\']+)["\']/gu',
-            auditor,
-        )
-        self.assertIn("rule.selector.matchAll", auditor)
-
-    def test_gate_artifact_is_independent_from_semantic_release_versions(self) -> None:
-        import copy
-
-        original = render_gate_filter(self.config)
-        future = copy.deepcopy(self.config)
-        future["metadata"]["version"] = "999.999.999"
-        self.assertEqual(original, render_gate_filter(future))
-        self.assertIn(f"! Version: {GATE_ARTIFACT_VERSION}", original)
-        self.assertEqual(
-            GATE_FILTER_SUBSCRIPTION_URL,
-            validate_gate_artifact_lock(original.encode("utf-8"))[0][
-                "filterSubscriptionUrl"
-            ],
-        )
-        with self.assertRaises(ConfigError):
-            validate_gate_artifact_lock(original.replace("Clien", "Changed", 1).encode("utf-8"))
-
-    def test_static_analysis_filter_uses_repeated_has_and_official_scope(self) -> None:
+    def test_static_analysis_filter_is_an_offline_oracle(self) -> None:
         rendered = render_filter(self.config)
         rules = [line for line in rendered.splitlines() if "#?#" in line]
         self.assertTrue(rules)
@@ -2525,25 +2819,68 @@ class FilterAndReleaseContractTests(unittest.TestCase):
             self.assertNotIn("$path=", rule)
         self.assertNotRegex(rendered, r":has\([^)]*,[^)]*\)")
 
-    def test_release_manifest_is_deterministic_and_hashes_all_inputs(self) -> None:
+    def test_auditor_has_no_external_marker_filter_authority(self) -> None:
+        auditor = (SCRIPTS_DIR / "audit_pages.mjs").read_text(encoding="utf-8")
+        for stale_token in (
+            "markerFilter",
+            "markerSelectorsForUrl",
+            "gateArtifactLock",
+            "buildLegacyIntegrityManifest",
+            "filter.txt",
+            "extendedCssCallbacks",
+        ):
+            self.assertNotIn(stale_token, auditor)
+        self.assertIn("standaloneRuntimeCoverage", auditor)
+        self.assertIn('exactObjectKeys(releaseManifest.artifacts, ["hotdeal-focus.user.js"])', auditor)
+        self.assertIn("userscriptContent", auditor)
+
+    def test_release_manifest_is_deterministic_and_userscript_only(self) -> None:
         generated_one, manifest_one = render_release()
         generated_two, manifest_two = render_release()
         self.assertEqual(generated_one, generated_two)
         self.assertEqual(manifest_one, manifest_two)
-        manifest = json.loads(manifest_one)
-        self.assertNotIn("release-manifest.json", manifest["artifacts"])
         self.assertEqual(
-            {"filter.txt", "hotdeal-focus.user.js"},
-            set(manifest["artifacts"]),
+            {"filter-static.txt", "state/release-high-water.json"},
+            set(generated_one),
         )
-        gate_bytes = generated_one["filter.txt"]
+
+        manifest = json.loads(manifest_one)
+        self.assertEqual(
+            {
+                "schemaVersion",
+                "status",
+                "releaseVersion",
+                "protocolVersion",
+                "installUrl",
+                "generatorVersion",
+                "rollback_of",
+                "configSha256",
+                "coverage",
+                "promotion",
+                "artifacts",
+                "sourceIntegrity",
+            },
+            set(manifest),
+        )
+        self.assertEqual(2, manifest["schemaVersion"])
+        self.assertEqual("release-ready", manifest["status"])
+        self.assertEqual(
+            "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
+            manifest["installUrl"],
+        )
+        self.assertEqual({"hotdeal-focus.user.js"}, set(manifest["artifacts"]))
+        self.assertNotIn("filterSubscriptionUrl", manifest)
+        self.assertNotIn("gateArtifactVersion", manifest)
+
         userscript_bytes = USERSCRIPT_PATH.read_bytes()
-        gate_entry = manifest["artifacts"]["filter.txt"]
         userscript_entry = manifest["artifacts"]["hotdeal-focus.user.js"]
         self.assertEqual(
-            installed_filter_rules_sha256(gate_bytes),
-            gate_entry["installedRulesSha256"],
+            {"sha256", "bytes", "version", "canonicalTextSha256"},
+            set(userscript_entry),
         )
+        self.assertEqual(hashlib.sha256(userscript_bytes).hexdigest(), userscript_entry["sha256"])
+        self.assertEqual(len(userscript_bytes), userscript_entry["bytes"])
+        self.assertEqual(BASE_RELEASE_VERSION, userscript_entry["version"])
         self.assertEqual(
             canonical_text_sha256(userscript_bytes),
             userscript_entry["canonicalTextSha256"],
@@ -2551,29 +2888,19 @@ class FilterAndReleaseContractTests(unittest.TestCase):
         self.assertNotEqual(
             userscript_entry["sha256"], userscript_entry["canonicalTextSha256"]
         )
-        installed_rule_lines = [
-            line
-            for line in gate_bytes.decode("utf-8").splitlines()
-            if line.strip() and not line.lstrip().startswith("!")
-        ]
-        domain_count = len({
-            layout["domain"]
-            for site in self.config["sites"]
-            for layout in site["layouts"]
-        })
-        self.assertEqual(domain_count * 13, len(installed_rule_lines))
-        self.assertEqual(
-            {
-                "filter-static.txt",
-                "config/sites.json",
-                "config/gate-artifacts.json",
-                "package.json",
-                "package-lock.json",
-                "tests/fixtures/dom-regressions.json",
-                "tests/fixtures/behavior-baseline.json",
-            },
-            set(manifest["sourceIntegrity"]),
-        )
+
+        expected_sources = {
+            "filter-static.txt",
+            "config/sites.json",
+            "package.json",
+            "package-lock.json",
+            "tests/fixtures/dom-regressions.json",
+            "tests/fixtures/behavior-baseline.json",
+            "state/release-high-water.json",
+        }
+        if (PROJECT_ROOT / "state" / "approved-variants.json").exists():
+            expected_sources.add("state/approved-variants.json")
+        self.assertEqual(expected_sources, set(manifest["sourceIntegrity"]))
         self.assertEqual(7, manifest["coverage"]["siteCount"])
         self.assertEqual(
             sum(len(site["layouts"]) for site in self.config["sites"]),
@@ -2593,7 +2920,6 @@ class FilterAndReleaseContractTests(unittest.TestCase):
         expected = canonical_text_sha256(b"alpha\nbeta")
         self.assertEqual(expected, canonical_text_sha256(b"\xef\xbb\xbfalpha\r\nbeta\r\n"))
         self.assertEqual(expected, canonical_text_sha256(b"alpha\rbeta\r"))
-
 
 if __name__ == "__main__":
     unittest.main()

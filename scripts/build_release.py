@@ -22,35 +22,32 @@ from build_filter import (
     render_filter,
     validate_config,
 )
-from build_gate_filter import (
-    GATE_ARTIFACT_VERSION,
-    GENERATOR_VERSION,
-    PROTOCOL_VERSION,
-    render_gate_filter,
-)
-
-
-GATE_FILTER_PATH = PROJECT_ROOT / "filter.txt"
 STATIC_FILTER_PATH = PROJECT_ROOT / "filter-static.txt"
 USERSCRIPT_PATH = PROJECT_ROOT / "hotdeal-focus.user.js"
 PACKAGE_PATH = PROJECT_ROOT / "package.json"
 PACKAGE_LOCK_PATH = PROJECT_ROOT / "package-lock.json"
 MANIFEST_PATH = PROJECT_ROOT / "release-manifest.json"
 APPROVED_STATE_PATH = PROJECT_ROOT / "state" / "approved-variants.json"
-GATE_ARTIFACT_LOCK_PATH = PROJECT_ROOT / "config" / "gate-artifacts.json"
+HIGH_WATER_PATH = PROJECT_ROOT / "state" / "release-high-water.json"
 FIXTURE_PATHS = (
     PROJECT_ROOT / "tests" / "fixtures" / "dom-regressions.json",
     PROJECT_ROOT / "tests" / "fixtures" / "behavior-baseline.json",
 )
 USERSCRIPT_VERSION_PATTERN = re.compile(r"^//\s*@version\s+([^\s]+)\s*$", re.MULTILINE)
 FILTER_VERSION_PATTERN = re.compile(r"^! Version:\s+([^\s]+)\s*$", re.MULTILINE)
+STABLE_SEMANTIC_VERSION_PATTERN = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
+)
+READER_PROTOCOL_VERSION = 2
+HIGH_WATER_SCHEMA_VERSION = 1
+PUBLIC_BUNDLE_FORMAT = "hdf-public-bundle-v1"
+HIGH_WATER_PREFIX_MODE = "append-only-prefix-v1"
 RELEASE_USERSCRIPT_URL = (
     "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js"
 )
-GATE_RELEASE_TAG = f"gate-v{GATE_ARTIFACT_VERSION}"
-GATE_FILTER_SUBSCRIPTION_URL = (
-    "https://github.com/heelee912/adguard-hotdeal-focus/releases/download/"
-    f"{GATE_RELEASE_TAG}/filter.txt"
+RELEASE_USERSCRIPT_NAME = "AdGuard Hotdeal Focus Reader Gate"
+RELEASE_USERSCRIPT_NAMESPACE = (
+    "https://github.com/heelee912/adguard-hotdeal-focus"
 )
 
 
@@ -72,30 +69,182 @@ def canonical_text_sha256(content: bytes) -> str:
     return sha256_bytes(canonical_text_bytes(content))
 
 
-def installed_filter_rules_sha256(content: bytes) -> str:
-    """Hash the ordered, non-comment rules as AdGuard installation verifies them."""
-    canonical_text = canonical_text_bytes(content).decode("utf-8")
-    rules = [
-        line
-        for line in canonical_text.split("\n")
-        if line.strip() and not line.lstrip().startswith("!")
-    ]
-    if not rules:
-        raise ConfigError("filter.txt must contain installable non-comment rules")
-    return canonical_text_sha256("\n".join(rules).encode("utf-8"))
-
-
 def relative_path(path: Path) -> str:
     return path.relative_to(PROJECT_ROOT).as_posix()
 
 
 def semantic_version_core(version: str) -> tuple[int, int, int]:
-    core = version.split("-", 1)[0].split("+", 1)[0]
+    match = STABLE_SEMANTIC_VERSION_PATTERN.fullmatch(version)
+    if not match:
+        raise ConfigError(f"invalid stable release version: {version}")
     try:
-        major, minor, patch = (int(part) for part in core.split("."))
+        major, minor, patch = (int(part) for part in match.groups())
     except (TypeError, ValueError) as error:
         raise ConfigError(f"invalid release version: {version}") from error
     return major, minor, patch
+
+
+def canonical_json_bytes(value: Any) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+
+
+def high_water_document(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    return {
+        "bundleFormat": PUBLIC_BUNDLE_FORMAT,
+        "records": list(records),
+        "schemaVersion": HIGH_WATER_SCHEMA_VERSION,
+    }
+
+
+def render_high_water_bytes(records: Sequence[Mapping[str, Any]]) -> bytes:
+    return (
+        json.dumps(
+            high_water_document(records),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _exact_keys(value: Any, expected: set[str], label: str) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or set(value) != expected:
+        raise ConfigError(f"{label} fields are not exact")
+    return value
+
+
+def _positive_byte_count(value: Any, label: str) -> int:
+    if type(value) is not int or value < 1:
+        raise ConfigError(f"{label} must be a positive integer")
+    return value
+
+
+def _sha256_value(value: Any, label: str) -> str:
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+        raise ConfigError(f"{label} must be a lowercase SHA-256 digest")
+    return value
+
+
+def validate_high_water_records(
+    records: Any,
+    *,
+    allow_empty: bool = False,
+) -> list[Mapping[str, Any]]:
+    if not isinstance(records, list) or (not allow_empty and not records):
+        raise ConfigError("release high-water records must be a non-empty list")
+    validated: list[Mapping[str, Any]] = []
+    for index, raw_record in enumerate(records):
+        record = _exact_keys(
+            raw_record,
+            {"bundleSha256", "manifest", "releaseVersion", "userscript"},
+            f"release high-water record {index}",
+        )
+        version = record["releaseVersion"]
+        if not isinstance(version, str):
+            raise ConfigError(f"release high-water record {index} has no releaseVersion")
+        semantic_version_core(version)
+        _sha256_value(record["bundleSha256"], f"release high-water record {index} bundle")
+        manifest = _exact_keys(
+            record["manifest"],
+            {"bytes", "sha256"},
+            f"release high-water record {index} manifest",
+        )
+        _positive_byte_count(manifest["bytes"], f"release high-water record {index} manifest bytes")
+        _sha256_value(manifest["sha256"], f"release high-water record {index} manifest")
+        userscript = _exact_keys(
+            record["userscript"],
+            {"bytes", "canonicalTextSha256", "sha256"},
+            f"release high-water record {index} userscript",
+        )
+        _positive_byte_count(
+            userscript["bytes"],
+            f"release high-water record {index} userscript bytes",
+        )
+        _sha256_value(
+            userscript["sha256"],
+            f"release high-water record {index} userscript",
+        )
+        _sha256_value(
+            userscript["canonicalTextSha256"],
+            f"release high-water record {index} userscript canonical text",
+        )
+        if validated and semantic_version_core(version) <= semantic_version_core(
+            str(validated[-1]["releaseVersion"])
+        ):
+            raise ConfigError("release high-water versions must be strictly increasing")
+        validated.append(copy.deepcopy(record))
+    return validated
+
+
+def parse_high_water_bytes(content: bytes | None) -> list[Mapping[str, Any]]:
+    if content is None:
+        return []
+    try:
+        value = json.loads(content.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ConfigError("release high-water must be strict UTF-8 JSON") from error
+    root = _exact_keys(
+        value,
+        {"bundleFormat", "records", "schemaVersion"},
+        "release high-water",
+    )
+    if (
+        root["schemaVersion"] != HIGH_WATER_SCHEMA_VERSION
+        or root["bundleFormat"] != PUBLIC_BUNDLE_FORMAT
+    ):
+        raise ConfigError("release high-water schema is not exact")
+    return validate_high_water_records(root["records"])
+
+
+def high_water_prefix_entry(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    prefix_bytes = canonical_json_bytes(high_water_document(records))
+    return {
+        "bytes": len(prefix_bytes),
+        "mode": HIGH_WATER_PREFIX_MODE,
+        "recordCount": len(records),
+        "sha256": sha256_bytes(prefix_bytes),
+    }
+
+
+def public_bundle_sha256(manifest_bytes: bytes, userscript_bytes: bytes) -> str:
+    digest = hashlib.sha256()
+    digest.update(f"{PUBLIC_BUNDLE_FORMAT}\0".encode("ascii"))
+    for name, content in (
+        ("release-manifest.json", manifest_bytes),
+        ("hotdeal-focus.user.js", userscript_bytes),
+    ):
+        name_bytes = name.encode("utf-8")
+        digest.update(len(name_bytes).to_bytes(4, "big"))
+        digest.update(name_bytes)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()
+
+
+def release_high_water_record(
+    release_version: str,
+    manifest_bytes: bytes,
+    userscript_bytes: bytes,
+) -> dict[str, Any]:
+    return {
+        "bundleSha256": public_bundle_sha256(manifest_bytes, userscript_bytes),
+        "manifest": {
+            "bytes": len(manifest_bytes),
+            "sha256": sha256_bytes(manifest_bytes),
+        },
+        "releaseVersion": release_version,
+        "userscript": {
+            "bytes": len(userscript_bytes),
+            "canonicalTextSha256": canonical_text_sha256(userscript_bytes),
+            "sha256": sha256_bytes(userscript_bytes),
+        },
+    }
 
 
 def read_required_bytes(path: Path) -> bytes:
@@ -131,7 +280,22 @@ def validate_userscript_release_metadata(content: bytes) -> None:
     for key in ("downloadURL", "updateURL"):
         values = re.findall(rf"^//\s*@{key}\s+(.+?)\s*$", source, re.MULTILINE)
         if values != [RELEASE_USERSCRIPT_URL]:
-            raise ConfigError(f"userscript @{key} must use the immutable GitHub Pages URL")
+            raise ConfigError(f"userscript @{key} must use the exact GitHub Pages URL")
+    exact_metadata = {
+        "name": RELEASE_USERSCRIPT_NAME,
+        "namespace": RELEASE_USERSCRIPT_NAMESPACE,
+        "run-at": "document-start",
+    }
+    for key, expected in exact_metadata.items():
+        values = re.findall(rf"^//\s*@{re.escape(key)}\s+(.+?)\s*$", source, re.MULTILINE)
+        if values != [expected]:
+            raise ConfigError(f"userscript @{key} must be exactly {expected}")
+    grants = re.findall(r"^//\s*@grant\s+(.+?)\s*$", source, re.MULTILINE)
+    if grants != ["GM_addElement", "window.onurlchange"]:
+        raise ConfigError("userscript grants must be the exact standalone contract")
+    for forbidden_key in ("connect", "require", "resource"):
+        if re.search(rf"^//\s*@{forbidden_key}\s+", source, re.MULTILINE):
+            raise ConfigError(f"userscript @{forbidden_key} is forbidden in the standalone release")
 
 
 def coverage_manifest(config: Mapping[str, Any]) -> dict[str, Any]:
@@ -271,66 +435,37 @@ def public_artifact_entry(path: str, content: bytes) -> dict[str, Any]:
     if path == relative_path(USERSCRIPT_PATH):
         entry["version"] = userscript_version(content)
         entry["canonicalTextSha256"] = canonical_text_sha256(content)
-    if path == relative_path(GATE_FILTER_PATH):
-        entry["version"] = filter_version(content, "filter.txt")
-        entry["installedRulesSha256"] = installed_filter_rules_sha256(content)
     return entry
 
 
-def validate_gate_artifact_lock(gate_bytes: bytes) -> tuple[dict[str, Any], bytes]:
-    lock_bytes = read_required_bytes(GATE_ARTIFACT_LOCK_PATH)
-    try:
-        lock = json.loads(lock_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ConfigError("config/gate-artifacts.json is malformed") from error
-    expected_keys = {
-        "schemaVersion",
-        "protocolVersion",
-        "gateArtifactVersion",
-        "filterSubscriptionUrl",
-        "artifact",
-    }
-    if not isinstance(lock, dict) or set(lock) != expected_keys:
-        raise ConfigError("gate artifact lock root has an unexpected schema")
-    artifact = lock.get("artifact")
-    if not isinstance(artifact, dict) or set(artifact) != {
-        "path", "bytes", "sha256", "installedRulesSha256"
-    }:
-        raise ConfigError("gate artifact lock entry has an unexpected schema")
-    expected_entry = {
-        "path": "filter.txt",
-        "bytes": len(gate_bytes),
-        "sha256": sha256_bytes(gate_bytes),
-        "installedRulesSha256": installed_filter_rules_sha256(gate_bytes),
-    }
-    if (
-        lock.get("schemaVersion") != 1
-        or lock.get("protocolVersion") != int(PROTOCOL_VERSION)
-        or lock.get("gateArtifactVersion") != GATE_ARTIFACT_VERSION
-        or lock.get("filterSubscriptionUrl") != GATE_FILTER_SUBSCRIPTION_URL
-        or artifact != expected_entry
-    ):
-        raise ConfigError(
-            "filter.txt differs from the immutable gate artifact lock; use a new gate version and URL"
-        )
-    return lock, lock_bytes
-
-
-def render_materialized_release_manifest(
-    config: Mapping[str, Any],
+def render_materialized_release_set(
+    config: Mapping[str, Any] | None = None,
     *,
-    gate_bytes: bytes,
     static_bytes: bytes,
     userscript_bytes: bytes,
     config_bytes: bytes,
     package_bytes: bytes,
     package_lock_bytes: bytes,
     approved_state_bytes: bytes | None = None,
-) -> bytes:
-    validated_config = validate_config(copy.deepcopy(config))
-    gate_lock, gate_lock_bytes = validate_gate_artifact_lock(gate_bytes)
+    high_water_bytes: bytes | None = None,
+) -> tuple[bytes, bytes]:
+    try:
+        raw_config = json.loads(config_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ConfigError("config/sites.json must be strict UTF-8 JSON") from error
+    if not isinstance(raw_config, Mapping):
+        raise ConfigError("config/sites.json root must be an object")
+    validated_config = validate_config(copy.deepcopy(raw_config))
+    if config is not None:
+        # Validate the caller-supplied mapping first so malformed candidate
+        # identities retain their precise fail-closed diagnostic. A different
+        # but valid mapping is still rejected before materialization.
+        validate_config(copy.deepcopy(config))
+        if config != raw_config:
+            raise ConfigError("config mapping must match config_bytes exactly")
     fixture_bytes = {path: read_required_bytes(path) for path in FIXTURE_PATHS}
     release_version = validated_config["metadata"]["version"]
+    semantic_version_core(release_version)
     try:
         package_version = json.loads(package_bytes.decode("utf-8"))["version"]
     except (json.JSONDecodeError, KeyError, TypeError) as error:
@@ -348,20 +483,16 @@ def render_materialized_release_manifest(
         raise ConfigError("package.json version must equal config.metadata.version")
     if package_lock_versions != {release_version}:
         raise ConfigError("package-lock.json versions must equal config.metadata.version")
-    if filter_version(gate_bytes, "filter.txt") != GATE_ARTIFACT_VERSION:
-        raise ConfigError("filter.txt Version must equal the stable gate artifact version")
     if filter_version(static_bytes, "filter-static.txt") != release_version:
         raise ConfigError("filter-static.txt Version must equal config.metadata.version")
     validate_userscript_release_metadata(userscript_bytes)
 
     content_by_path = {
-        relative_path(GATE_FILTER_PATH): gate_bytes,
         relative_path(STATIC_FILTER_PATH): static_bytes,
         relative_path(USERSCRIPT_PATH): userscript_bytes,
         relative_path(DEFAULT_CONFIG_PATH): config_bytes,
         relative_path(PACKAGE_PATH): package_bytes,
         relative_path(PACKAGE_LOCK_PATH): package_lock_bytes,
-        relative_path(GATE_ARTIFACT_LOCK_PATH): gate_lock_bytes,
     }
     content_by_path.update(
         {relative_path(path): content for path, content in fixture_bytes.items()}
@@ -390,7 +521,7 @@ def render_materialized_release_manifest(
             "materialized config variants and approved state must match exactly "
             f"(missing={missing_state}, extra={extra_state}, mismatched={mismatched})"
         )
-    public_paths = {relative_path(GATE_FILTER_PATH), relative_path(USERSCRIPT_PATH)}
+    public_paths = {relative_path(USERSCRIPT_PATH)}
     artifacts = {
         path: public_artifact_entry(path, content_by_path[path])
         for path in sorted(public_paths)
@@ -400,6 +531,25 @@ def render_materialized_release_manifest(
         for path, content in sorted(content_by_path.items())
         if path not in public_paths
     }
+    high_water_records = parse_high_water_bytes(high_water_bytes)
+    if high_water_records:
+        current_version = str(high_water_records[-1]["releaseVersion"])
+        comparison = (
+            semantic_version_core(release_version)
+            > semantic_version_core(current_version)
+        ) - (
+            semantic_version_core(release_version)
+            < semantic_version_core(current_version)
+        )
+        if comparison < 0:
+            raise ConfigError("release version is below the durable high-water floor")
+        prefix_records = high_water_records[:-1] if comparison == 0 else high_water_records
+    else:
+        comparison = 1
+        prefix_records = []
+    source_integrity[relative_path(HIGH_WATER_PATH)] = high_water_prefix_entry(
+        prefix_records
+    )
     coverage = coverage_manifest(validated_config)
     coverage["approvedVariantCount"] = len(approved_variants)
     promotion = None
@@ -418,13 +568,12 @@ def render_materialized_release_manifest(
         if any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value) for value in promotion.values()):
             raise ConfigError("latest approved state promotion hashes are invalid")
     manifest = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "status": "release-ready",
         "releaseVersion": release_version,
-        "protocolVersion": int(PROTOCOL_VERSION),
-        "gateArtifactVersion": gate_lock["gateArtifactVersion"],
-        "filterSubscriptionUrl": gate_lock["filterSubscriptionUrl"],
-        "generatorVersion": GENERATOR_VERSION,
+        "protocolVersion": READER_PROTOCOL_VERSION,
+        "installUrl": RELEASE_USERSCRIPT_URL,
+        "generatorVersion": release_version,
         "rollback_of": validated_config["metadata"]["rollback_of"],
         "configSha256": source_integrity[relative_path(DEFAULT_CONFIG_PATH)]["sha256"],
         "coverage": coverage,
@@ -432,9 +581,47 @@ def render_materialized_release_manifest(
         "artifacts": artifacts,
         "sourceIntegrity": source_integrity,
     }
-    return (
+    manifest_bytes = (
         json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     ).encode("utf-8")
+    current_record = release_high_water_record(
+        release_version,
+        manifest_bytes,
+        userscript_bytes,
+    )
+    if comparison == 0:
+        if high_water_records[-1] != current_record:
+            raise ConfigError(
+                "same-version public bundle differs from the durable high-water record"
+            )
+        materialized_records = high_water_records
+    else:
+        materialized_records = [*high_water_records, current_record]
+    return manifest_bytes, render_high_water_bytes(materialized_records)
+
+
+def render_materialized_release_manifest(
+    config: Mapping[str, Any] | None = None,
+    *,
+    static_bytes: bytes,
+    userscript_bytes: bytes,
+    config_bytes: bytes,
+    package_bytes: bytes,
+    package_lock_bytes: bytes,
+    approved_state_bytes: bytes | None = None,
+    high_water_bytes: bytes | None = None,
+) -> bytes:
+    manifest_bytes, _ = render_materialized_release_set(
+        config,
+        static_bytes=static_bytes,
+        userscript_bytes=userscript_bytes,
+        config_bytes=config_bytes,
+        package_bytes=package_bytes,
+        package_lock_bytes=package_lock_bytes,
+        approved_state_bytes=approved_state_bytes,
+        high_water_bytes=high_water_bytes,
+    )
+    return manifest_bytes
 
 
 def render_release() -> tuple[dict[str, bytes], bytes]:
@@ -444,7 +631,6 @@ def render_release() -> tuple[dict[str, bytes], bytes]:
     except json.JSONDecodeError as error:
         raise ConfigError("config/sites.json is malformed") from error
     config = load_config(DEFAULT_CONFIG_PATH)
-    gate_bytes = render_gate_filter(config).encode("utf-8")
     static_bytes = render_filter(config).encode("utf-8")
     userscript_bytes = read_required_bytes(USERSCRIPT_PATH)
     package_bytes = read_required_bytes(PACKAGE_PATH)
@@ -452,19 +638,22 @@ def render_release() -> tuple[dict[str, bytes], bytes]:
     approved_state_bytes = (
         APPROVED_STATE_PATH.read_bytes() if APPROVED_STATE_PATH.exists() else None
     )
-    manifest_bytes = render_materialized_release_manifest(
+    existing_high_water_bytes = (
+        HIGH_WATER_PATH.read_bytes() if HIGH_WATER_PATH.exists() else None
+    )
+    manifest_bytes, materialized_high_water_bytes = render_materialized_release_set(
         raw_config,
-        gate_bytes=gate_bytes,
         static_bytes=static_bytes,
         userscript_bytes=userscript_bytes,
         config_bytes=config_bytes,
         package_bytes=package_bytes,
         package_lock_bytes=package_lock_bytes,
         approved_state_bytes=approved_state_bytes,
+        high_water_bytes=existing_high_water_bytes,
     )
     generated = {
-        relative_path(GATE_FILTER_PATH): gate_bytes,
         relative_path(STATIC_FILTER_PATH): static_bytes,
+        relative_path(HIGH_WATER_PATH): materialized_high_water_bytes,
     }
     return generated, manifest_bytes
 
@@ -492,31 +681,18 @@ def enforce_monotonic_release(manifest_bytes: bytes, check_only: bool) -> None:
         raise ConfigError("existing manifest has no releaseVersion")
     existing_core = semantic_version_core(existing_version)
     proposed_core = semantic_version_core(proposed_version)
-    existing_gate_version = existing.get("gateArtifactVersion")
-    proposed_gate_version = proposed.get("gateArtifactVersion")
-    if isinstance(existing_gate_version, str):
-        if not isinstance(proposed_gate_version, str):
-            raise ConfigError("proposed manifest has no gateArtifactVersion")
-        existing_gate_core = semantic_version_core(existing_gate_version)
-        proposed_gate_core = semantic_version_core(proposed_gate_version)
-        if proposed_gate_core < existing_gate_core:
-            raise ConfigError("gate artifact version downgrade is forbidden")
-        if proposed_gate_core == existing_gate_core:
-            stable_gate_fields = (
-                "protocolVersion",
-                "gateArtifactVersion",
-                "filterSubscriptionUrl",
-            )
-            if any(existing.get(key) != proposed.get(key) for key in stable_gate_fields) or (
-                existing.get("artifacts", {}).get("filter.txt")
-                != proposed.get("artifacts", {}).get("filter.txt")
-            ):
-                raise ConfigError(
-                    "an existing gate artifact version is immutable; bump its version and URL"
-                )
     if proposed_core < existing_core:
         raise ConfigError("release version downgrade is forbidden")
     if proposed_core == existing_core and existing != proposed and not check_only:
+        existing_sources = existing.get("sourceIntegrity")
+        one_time_high_water_bootstrap = (
+            not HIGH_WATER_PATH.exists()
+            and isinstance(existing_sources, Mapping)
+            and relative_path(HIGH_WATER_PATH) not in existing_sources
+            and relative_path(HIGH_WATER_PATH) in proposed.get("sourceIntegrity", {})
+        )
+        if one_time_high_water_bootstrap:
+            return
         raise ConfigError(
             "release bytes changed without a version bump; rollback also requires a higher version"
         )
@@ -568,7 +744,10 @@ def main(arguments: Sequence[str] | None = None) -> int:
     except ConfigError as error:
         print(f"release error: {error}", file=sys.stderr)
         return 2
-    print("built filter.txt, filter-static.txt, and release-manifest.json")
+    print(
+        "built filter-static.txt, release high-water, and standalone userscript "
+        "release-manifest.json"
+    )
     return 0
 
 

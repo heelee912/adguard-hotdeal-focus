@@ -26,7 +26,9 @@ _DOMAIN_PATTERN = re.compile(
     r"^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
     r"(?:[a-z]{2,63}|xn--[a-z0-9-]{2,59})$"
 )
-_VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$")
+_VERSION_PATTERN = re.compile(
+    r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$"
+)
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _BASE_ROLE_NAMES = frozenset({"title", "body", "comments"})
 _ALLOWED_ROLE_NAMES = frozenset({"title", "product", "body", "comments"})
@@ -376,8 +378,10 @@ def _validate_materialized_variant(
             variant["proof_profiles"], f"{location}.proof_profiles"
         )
     )
-    if not proof_profiles or not set(proof_profiles) <= set(base_profiles):
-        raise ConfigError(f"{location}.proof_profiles is invalid")
+    if set(proof_profiles) != set(base_profiles):
+        raise ConfigError(
+            f"{location}.proof_profiles must equal every applicable runtime profile"
+        )
     required_roles = sorted(
         _expect_unique_texts(variant["required_roles"], f"{location}.required_roles")
     )
@@ -747,7 +751,7 @@ def validate_config(config_value: Any) -> dict[str, Any]:
     )
     version = _expect_text(metadata_value.get("version"), "config.metadata.version")
     if not _VERSION_PATTERN.fullmatch(version):
-        raise ConfigError("config.metadata.version must be a semantic version")
+        raise ConfigError("config.metadata.version must be a stable x.y.z version")
     expires_hours = metadata_value.get("expires_hours")
     if isinstance(expires_hours, bool) or not isinstance(expires_hours, int):
         raise ConfigError("config.metadata.expires_hours must be an integer")
@@ -767,13 +771,13 @@ def validate_config(config_value: Any) -> dict[str, Any]:
             rollback_mapping.get("sha256"), "config.metadata.rollback_of.sha256"
         )
         if not _VERSION_PATTERN.fullmatch(rollback_version):
-            raise ConfigError("config.metadata.rollback_of.version must be semantic")
+            raise ConfigError(
+                "config.metadata.rollback_of.version must be a stable x.y.z version"
+            )
         if not _SHA256_PATTERN.fullmatch(rollback_sha256):
             raise ConfigError("config.metadata.rollback_of.sha256 must be lowercase SHA-256")
-        current_core = tuple(int(part) for part in version.split("-", 1)[0].split("+", 1)[0].split("."))
-        rollback_core = tuple(
-            int(part) for part in rollback_version.split("-", 1)[0].split("+", 1)[0].split(".")
-        )
+        current_core = tuple(int(part) for part in version.split("."))
+        rollback_core = tuple(int(part) for part in rollback_version.split("."))
         if current_core <= rollback_core:
             raise ConfigError("rollback releases must use a higher version")
         rollback_of = {"version": rollback_version, "sha256": rollback_sha256}
@@ -1008,16 +1012,13 @@ def _automatic_variant_id(payload: Mapping[str, Any]) -> str:
 
 
 def _strictly_newer_version(candidate_version: str, current_version: str) -> bool:
-    if not _VERSION_PATTERN.fullmatch(candidate_version):
+    if (
+        not _VERSION_PATTERN.fullmatch(candidate_version)
+        or not _VERSION_PATTERN.fullmatch(current_version)
+    ):
         return False
-    candidate_core = tuple(
-        int(part)
-        for part in candidate_version.split("-", 1)[0].split("+", 1)[0].split(".")
-    )
-    current_core = tuple(
-        int(part)
-        for part in current_version.split("-", 1)[0].split("+", 1)[0].split(".")
-    )
+    candidate_core = tuple(int(part) for part in candidate_version.split("."))
+    current_core = tuple(int(part) for part in current_version.split("."))
     return candidate_core > current_core
 
 
@@ -1066,6 +1067,8 @@ def _validate_candidate_payload(
     if envelope.get("baseConfigSha256") != _sha256_bytes(base_config_bytes):
         raise ConfigError("candidate baseConfigSha256 does not match config/sites.json")
     release_version = _expect_text(envelope.get("releaseVersion"), "candidate.releaseVersion")
+    if not _VERSION_PATTERN.fullmatch(release_version):
+        raise ConfigError("candidate releaseVersion must be a stable x.y.z version")
     if not _strictly_newer_version(release_version, current_version):
         raise ConfigError(
             "candidate releaseVersion must be higher than the base and approved-state releases"
@@ -1128,12 +1131,9 @@ def _validate_candidate_payload(
     proof_profiles = _expect_unique_texts(
         payload["proofProfiles"], "candidate.proofProfiles"
     )
-    if (
-        not proof_profiles
-        or not set(proof_profiles) <= set(base_layout["applicable_profiles"])
-    ):
+    if set(proof_profiles) != set(base_layout["applicable_profiles"]):
         raise ConfigError(
-            "candidate proofProfiles must be a non-empty subset of the base layout profiles"
+            "candidate proofProfiles must equal every applicable base layout profile"
         )
     required_roles = _expect_unique_texts(payload["requiredRoles"], "candidate.requiredRoles")
     role_names = set(required_roles)
@@ -2128,11 +2128,10 @@ def _load_approved_state(
             raise ConfigError(f"{location} comment item/control/ignored selectors overlap")
         if payload["allowEmptyComments"] is not True:
             raise ConfigError(f"{location}.allowEmptyComments must be true")
-        if (
-            not payload["proofProfiles"]
-            or not set(payload["proofProfiles"]) <= set(layout["applicable_profiles"])
-        ):
-            raise ConfigError(f"{location}.proofProfiles is invalid")
+        if set(payload["proofProfiles"]) != set(layout["applicable_profiles"]):
+            raise ConfigError(
+                f"{location}.proofProfiles must equal every applicable layout profile"
+            )
         if set(role_values) != set(payload["requiredRoles"]):
             raise ConfigError(f"{location}.roles must match requiredRoles")
         role_names = set(payload["requiredRoles"])
@@ -2223,10 +2222,7 @@ def _maximum_release_version(base_version: str, records: Sequence[Mapping[str, A
     versions = [base_version, *(str(record["releaseVersion"]) for record in records)]
     return max(
         versions,
-        key=lambda version: tuple(
-            int(part)
-            for part in version.split("-", 1)[0].split("+", 1)[0].split(".")
-        ),
+        key=lambda version: tuple(int(part) for part in version.split(".")),
     )
 
 
@@ -2307,11 +2303,9 @@ def _render_candidate_core(
     package_lock_bytes = (
         json.dumps(package_lock, ensure_ascii=False, indent=2) + "\n"
     ).encode("utf-8")
-    validated_overlay = validate_config(copy.deepcopy(overlay))
-    from build_gate_filter import render_gate_filter
+    validate_config(copy.deepcopy(overlay))
 
     return {
-        "filter.txt": render_gate_filter(validated_overlay).encode("utf-8"),
         "filter-static.txt": render_filter(overlay).encode("utf-8"),
         "hotdeal-focus.user.js": userscript_source.encode("utf-8"),
         "config/sites.json": overlay_config_bytes,
@@ -2425,22 +2419,27 @@ def build_candidate_bundle(
     ).encode("utf-8")
     release_config = json.loads(core["config/sites.json"].decode("utf-8"))
     validate_config(copy.deepcopy(release_config))
-    from build_release import render_materialized_release_manifest
+    from build_release import HIGH_WATER_PATH, render_materialized_release_set
 
-    release_manifest_bytes = render_materialized_release_manifest(
+    high_water_bytes = HIGH_WATER_PATH.read_bytes() if HIGH_WATER_PATH.exists() else None
+    release_manifest_bytes, release_high_water_bytes = render_materialized_release_set(
         release_config,
-        gate_bytes=core["filter.txt"],
         static_bytes=core["filter-static.txt"],
         userscript_bytes=core["hotdeal-focus.user.js"],
         config_bytes=core["config/sites.json"],
         package_bytes=core["package.json"],
         package_lock_bytes=core["package-lock.json"],
         approved_state_bytes=approved_state_bytes,
+        high_water_bytes=high_water_bytes,
     )
+    release_manifest = json.loads(release_manifest_bytes)
+    if set(release_manifest.get("artifacts", {})) != {"hotdeal-focus.user.js"}:
+        raise ConfigError("candidate public release must contain only the userscript")
     manifest_artifacts = _artifact_entries(
         {
             **core,
             "state/approved-variants.json": approved_state_bytes,
+            "state/release-high-water.json": release_high_water_bytes,
             "release-manifest.json": release_manifest_bytes,
         }
     )
@@ -2464,6 +2463,7 @@ def build_candidate_bundle(
     return {
         **core,
         "state/approved-variants.json": approved_state_bytes,
+        "state/release-high-water.json": release_high_water_bytes,
         "release-manifest.json": release_manifest_bytes,
         "candidate-manifest.json": candidate_manifest_bytes,
     }

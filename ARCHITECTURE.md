@@ -1,14 +1,28 @@
 # AdGuard Hotdeal Focus architecture
 
-## Contract
+## Ubiquitous language and boundaries
 
-The public contract is deliberately narrower than an ad-blocking list:
+- **Standalone Reader Gate** — the only installed runtime and public executable artifact: `hotdeal-focus.user.js`.
+- **Content Contract** — one atomic site/layout/profile variant defining the page root, title, optional purchase boundary, body, comment mount, comment items, controls, and ignored comment chrome.
+- **Projection** — the exact original DOM node identities that a Content Contract owns and may reveal.
+- **Profile-complete proof** — live evidence for every applicable profile. A desktop/mobile layout is not promotable until both profiles independently satisfy the sample contract.
+- **Release Gate** — the GitHub-hosted deterministic build, proof, promotion, and Pages attestation pipeline.
 
-- **Reader Gate** is the browser-side state machine. It starts before page paint, validates one complete site/layout contract, projects only `title`, optional purchase information, `body`, and the complete comment/reply tree, and continuously revalidates the projection.
-- **Content Contract** is one atomic layout variant. A title selector from one variant can never be combined with a body or comment selector from another.
-- **Release Gate** is the GitHub-hosted proof pipeline. It may generate a candidate variant without AI, but it can publish that candidate only after every deterministic proof passes.
+Runtime, content configuration, candidate discovery, release publication, and Windows deployment are separate bounded contexts. Canonical JSON and exact DTOs cross those boundaries; browser or infrastructure objects do not.
 
-Seven Algumon sources are in scope: Clien, Ppomppu, Ruliweb, QuasarZone, Eomisae, ZOD, and Arca Live. Ppomppu desktop and mobile are separate layout families. Every configured layout must preserve the site's original DOM nodes; cloning, replacing, rewriting, or flattening article and comment nodes is forbidden.
+Seven Algumon sources are exact and exhaustive: Clien, Ppomppu, Ruliweb, QuasarZone, Eomisae, ZOD, and Arca Live. Desktop and mobile contracts remain distinct proof profiles even when they share selectors.
+
+## Single runtime authority
+
+The Userscript is installed from one stable URL:
+
+```text
+https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
+```
+
+`@downloadURL` and `@updateURL` equal that URL. The stable `@name` and `@namespace` identify the extension, while a strict numeric `x.y.z` `@version` provides monotonic updates. The compiled script contains its canonical Content Contracts; it does not fetch a second mutable configuration.
+
+No custom filter participates in locking, release, installation, update, or proof. The historical `gate-v2.0.2` asset remains remote only to avoid breaking old subscribers. It is not published to Pages and cannot block current releases.
 
 ## Browser state machine
 
@@ -16,92 +30,154 @@ Seven Algumon sources are in scope: Clien, Ppomppu, Ruliweb, QuasarZone, Eomisae
 document-start
     |
     v
-  LOCKED  -- one complete exact variant -->  VALIDATING  -- integrity proof -->  ACTIVE
-    ^                                             |                              |
-    |                                             +-- ambiguity / missing role --+
-    +---------------- URL, marker, style, or ownership mutation ----------------+
+  LOCKED -- exact seed + one projection --> VALIDATING -- atomic release --> ACTIVE
+    ^                                         |                            |
+    |                                         +-- missing / ambiguous -----+
+    +--------- URL / DOM / CSS / ownership / top-layer mutation -----------+
 ```
 
-`LOCKED` is the default and the error state. The AdGuard protocol filter prelocks every page on each target domain, including list, home, unknown, and unapproved routes. `ACTIVE` is reached only when one semantic projection class satisfies its exact route owner, page root, required-role cardinality, configured optional-role cardinality, containment, title and article identity, comment mount, full item/control/ignored classification, and ownership rules. Syntactically different variants that resolve to the exact same node identities and projection policy are aliases of one projection; two distinct projections are ambiguity and stay blank. An unknown route can be considered only on the initial navigation with a fresh validated Algumon seed and one exact additive path contract. Referrer and `window.name` are never authority.
+`LOCKED` is the default and terminal error state.
 
-Once active, the document is sealed. An exact new comment/reply subtree, an exact approved comment control, an exact ignored comment root, or an allowed lazy-media attribute on an already owned media element can be processed. Every other meaningful element or text insertion, character-data change, role identity/class/ID/data/ARIA/style/hidden/href mutation, role-root removal, SPA article change, marker removal, or style replacement synchronously enters a terminal lock. The same document never returns from terminal lock to discovery; only a fresh navigation document can attempt authorization again.
+1. An inline `!important` bootstrap lock is claimed at `document-start`, before page paint.
+2. `GM_addElement` installs a nonce-bound runtime stylesheet that remains effective under strict CSP.
+3. A two-frame standalone cascade proof checks stylesheet identity, CSSOM, computed visibility, and an unowned adversarial probe. There is no external ExtendedCSS callback.
+4. Exactly one Content Contract must resolve one complete Projection.
+5. Releasing the bootstrap lock and forcing a full computed-style, top-layer, backdrop, and ownership scan occur in the same task. Any leak synchronously restores the lock before paint.
+6. Mutation, stylesheet, URL-change, shadow-root, animation-frame, and top-layer sentinels continuously revalidate the active document.
 
-The filter is a small, stable protocol layer; it does not duplicate site selectors. The userscript owns selector meaning. This makes an old-filter/new-script or new-filter/old-script race either valid or blank, never an unfiltered page.
+`window.onurlchange` is the authoritative AdGuard SPA signal; native `hashchange` and wrapped History API events provide additional coverage. A different article identity or unknown route terminally locks the current document. The same document does not rediscover after a terminal failure.
 
-## DOM preservation and noise exclusion
+## Original DOM preservation
 
-The gate annotates original elements with private marker attributes. It does not insert wrappers into titles, replace text nodes, or reconstruct comments. Kept role roots remain in their original document position with their original event listeners, media, tables, links, computed layout, and nested replies.
+The gate marks existing nodes; it does not clone, flatten, replace, or rewrite article and comment content. Preserved nodes retain their event listeners, links, images, tables, nested replies, and layout semantics.
 
-Ancestor shells use `visibility: hidden`; only exact nonce-owned descendants are restored with `visibility: visible`. Unowned element children are `display: none`. This suppresses direct ancestor text, pseudo-elements, sidebars, advertisements, recommendations, and future sibling widgets without changing the source DOM. Title uses a seeded shallow projection; body and a separate purchase block use their exact atomic content boundaries; comments use exhaustive classified children. A purchase block may be required, absent because the purchase link is already inside the article body, or explicitly configured as zero-or-one. The null and one-node cases are different projection identities, so an unexpected second block is ambiguity rather than an accidental merge.
+Ancestor shells stay hidden. Only nonce-owned descendants become visible, and every unowned sibling remains suppressed. Direct ancestor text, pseudo-content, advertisements, sidebars, recommendations, headers, footers, and later injected widgets therefore stay unavailable.
 
-Comment mounts, items, controls, and explicitly ignored comment chrome are separate concepts. Ignored nodes participate in completeness and overlap checks but never receive ownership or keep markers. Any meaningful mount content outside those three classifications fails closed even when known items also exist, so a newly shaped reply cannot be silently hidden from an otherwise visible thread.
+A comment mount is complete only when every meaningful descendant belongs to exactly one of:
 
-## Algumon provenance carrier
+- a preserved comment/reply item,
+- an approved comment control,
+- explicitly ignored comment chrome that remains hidden.
 
-The current Algumon source picker is an exact global inventory contract: Clien, Ppomppu, Ruliweb, QuasarZone, Eomisae, ZOD, and Arca Live, each exactly once. The card root must expose one matching `/site-icon/<slug>.png` machine signal (and any explicit site-type signal must agree). A missing, duplicate, eighth, unknown, or contradictory source invalidates discovery and emits no draft.
+One known comment plus one newly shaped reply is a failure, not an incomplete visible thread. Optional purchase information has exact zero-or-one or required cardinality; two candidates are ambiguity.
 
-On an activation of one exact signed `/l/d/<id>?v=<32-hex>&t=<13-digits>` URL, the userscript synchronously reserves the requested browsing context and performs one credentialed same-origin fetch of that exact URL. It accepts only a 200 response whose inertly parsed document contains exactly one whole-string redirect script and exactly one anchor, both naming the same external destination. The destination must be HTTPS, carry no credentials, non-default port, or fragment, and match the exact host allowlist for the card's site type. Only then is a bounded, expiring seed appended as a fragment to the verified final destination. Parser, network, popup, signature-shape, or host failure closes the reserved child and leaves Algumon in place; there is no secondary carrier.
+## Algumon provenance
 
-The destination removes the seed fragment at `document-start`. Authorization requires the seed site type, exact URL route, initial non-null article identity, current article identity, source-title core, unique consistent article metadata, and full structural projection to agree. Same-identity query/hash normalization may revalidate. A different or null article identity clears pending authorization and terminally locks that document, including back navigation. The seed contains no body, comments, account state, cookies, or tokens and is insufficient by itself.
+The Algumon source picker must contain the configured seven identities exactly once. Missing, duplicate, unknown, eighth, or contradictory identities produce no relay target and no candidate.
+
+On explicit activation of one exact signed `/l/d/<id>?v=<32-hex>&t=<13-digits>` relay, the script performs one credentialed same-origin fetch. It accepts only a 200 response whose inertly parsed document contains one whole-string redirect script and one anchor naming the same allowlisted HTTPS destination. Credentials, fragments, non-default ports, parser ambiguity, popup failure, or host mismatch fail closed with no secondary carrier.
+
+The destination receives a bounded expiring fragment seed and removes it at `document-start`. Authorization requires agreement among seed site type, URL route, article identity, title core, article metadata, and the complete structural Projection. The seed contains no body, comments, account state, cookies, or tokens and is insufficient by itself.
 
 ## Deterministic adaptation without AI
 
-The scheduled GitHub workflow uses a side-effect-free semantic oracle only as a **candidate generator**, never as a runtime fallback. The oracle does not greedily choose roles one at a time. It builds a bounded `ProjectionTuple(title, product?, body, comments)` space, collapses only ancestor/descendant title wrappers carrying the same independently proven title evidence, and validates each complete tuple for order, separation, page-root ownership, product cardinality, body noise, and exhaustive comment coverage. More than one disconnected or equally scored complete projection, a candidate-budget overflow, an escaped comment item, or an unstable empty-comment mount is ambiguity and emits no candidate.
+Once each Monday at 03:17 KST (Sunday 18:17 UTC), the scheduled workflow performs one bounded source collection:
 
-Audit targets have explicit provenance expectations. Fixed sample URLs are **direct-negative** probes: they must terminate at `terminal-algumon-seed-required` with the global paint lock intact, zero visible nodes, and zero flash frames. Recent Algumon targets are **relay-positive** probes. Immediately before each target/profile audit, the runner reacquires the exact deal ID from Algumon, requires the signed timestamp to be at most five minutes old, fetches that one signed relay once, and binds the resulting destination and profile-specific final landing to the proof. A stale discovery URL is never refreshed by inventing a timestamp or by widening the TTL.
+```text
+exact Algumon inventory
+→ desktop/mobile relay acquisition
+→ semantic candidate generation
+→ isolated userscript-only build
+→ profile-complete live proof
+→ historical + tamper + zero-leak regression
+→ one-parent allowlisted commit
+→ deploy-key fast-forward promotion
+→ Pages monotonic preflight
+→ Pages deployment
+→ live HTTPS byte attestation
+```
 
-The browser lane uses the device descriptors shipped with the lockfile-pinned Playwright package and refuses to run when their Chrome version differs from the installed Chromium binary. Live cloud navigation is headed under Xvfb. An article-access lease may bootstrap a site challenge without the userscript, but it can pass only a bounded, validated, in-memory set of first-party cookies into one fresh `document-start` userscript context; local storage, IndexedDB, cache, permissions, service workers, and cookie values in evidence are forbidden. Challenge resources are allowed only as explicitly enumerated subresources and never as top-level navigation. HTTP blocks, CAPTCHA/WAF documents, an unresolved challenge, or a static/runtime route or article-identity mismatch are classified as source/infrastructure failure: the audit stays failed closed and candidate generation is forced to zero. An error page can never be learned as a new site DOM.
+The only live Algumon source pass has an exact request-start budget of 29: one
+global inventory, one source document for each of the seven identities, and
+three signed relays per identity. Candidate proof and promotion retest consume
+the immutable `base-audit-report.json` snapshot and therefore start zero
+additional Algumon requests. Freshness is checked against the recorded,
+canonical relay acquisition time, not by refetching a signed relay later.
+Manual dispatch is allowed for an operator, but no workflow self-dispatches
+`watch-dom.yml`; remaining drift waits for the next bounded scheduled pass.
 
-A candidate is eligible for promotion only when all of these hold:
+The semantic oracle generates candidates only. Runtime never falls back to it.
 
-1. A committed exact variant failed closed; no noisy page was exposed.
-2. The same role boundaries and structural selectors are reproduced across at least three recent article URLs in each affected route/profile family.
-3. Each affected layout/profile must provide its own three-URL proof. A failed desktop or mobile sibling is never treated as evidence for the candidate profile.
-4. New routes have at least three distinct full Algumon `/l/d/<id>?…` redirect-chain proofs and derive exactly one nonempty delimiter-bounded wildcard token; runtime, builder, and auditor use the same non-crossing wildcard semantics.
-5. Algumon title consistency, role containment, comment/reply structure, selector stability, and cardinality meet fixed thresholds. A source-qualified Algumon or JSON-LD comment count is a strict lower bound because new replies may arrive after acquisition: the DOM must contain at least that many classified items, while a visible same-shell total is exact. If Algumon has no count, the evidence records `countComparable:false` and requires stable exact comment selectors with at least two nonempty URLs per profile or three exact-empty proofs; it never substitutes a neutral score.
-6. The immutable June/July regression corpus and every profile that passed in the frozen full audit remain non-regressed. Every already-failed sibling on the candidate site is also retested after materialization and must remain zero-leak—either safely readable under an exact contract or fully fail-closed; it does not block this single-profile promotion and is handled by the next serialized run.
-7. Differential browser tests prove that the candidate exposes no node outside the approved role set and does not shrink or replace preserved DOM nodes.
-8. The candidate payload, base configuration, generated files, and manifest hashes recompute exactly.
+The oracle explores bounded complete tuples `Projection(title, product?, body, comments)`. It rejects disconnected roles, multiple equally valid tuples, escaped comment items, body noise, unstable empty mounts, candidate-budget overflow, or ambiguous route wildcards.
 
-Only then does the builder append an atomic variant. Existing variants are not deleted automatically. Discovery freezes a canonical queue manifest binding the audited base commit, full-audit report hash, ordered candidate index/fingerprint, every draft hash, and the GitHub run number. The full queue remains signed, but one run exposes only an eight-item circular matrix batch derived from that run number. Consecutive run numbers cover the entire queue in finite rounds without unbounded job growth. Each selected candidate is proved in an independent matrix job, so timeout or failure cannot starve another member of the batch. The always-running aggregator completes each absent or unselected result as a canonical queue-bound `infrastructure-missing` non-proof, while any present duplicate, extra, out-of-batch, malformed, or hash-mismatched artifact blocks the entire promotion. It then selects exactly the first proven candidate in canonical queue order and creates one atomic promotion package.
+A candidate can be promoted only when:
 
-The candidate is rebuilt in an isolated directory, checked against the frozen complete audit and all local regression fixtures, then live-retested on at least three Algumon URLs for exactly its affected layout/profile together with every sibling layout/profile on that site. Previously passing siblings must still pass; previously failed siblings may remain semantically failed only while the real post-candidate gate is zero-leak and either safely readable or fully blocked. After a successful candidate commit, the workflow serially dispatches one audit from the new head so the next site, layout, or profile can be promoted; this continuation depends on promotion state, not on Pages availability. Any missing, conflicting, ambiguous, noisy, rate-limited, or structurally unprovable evidence leaves the current release untouched and opens or updates a DOM-drift issue until a clean full audit closes it.
+1. The current release failed closed with zero visible nodes and zero flash frames.
+2. `proofProfiles` equals `applicableProfiles` exactly.
+3. Each applicable desktop/mobile profile has at least three fresh-at-acquisition, distinct Algumon relay article proofs with the same semantic shape.
+4. New routes have at least three exact redirect-chain proofs and one delimiter-bounded wildcard contract.
+5. Title identity, role containment/order, purchase cardinality, and exhaustive comment classification pass fixed thresholds.
+6. Historical June/July fixtures, all previously passing siblings, direct-negative samples, network fidelity, tamper, and zero-leak tests remain valid.
+7. The isolated draft and proven release bytes recompute exactly.
+8. The queue, result, evidence, and promotion objects satisfy their canonical digest-bound sealed schemas.
 
-This design automatically handles the common June-to-July class/id/path churn when stable repeated structure remains. No deterministic system can prove the meaning of an arbitrary semantic redesign from markup alone. The security guarantee is therefore strict: uncertainty can reduce availability, but it cannot re-expose navigation, recommendations, ads, or other noise.
+One candidate failing or timing out cannot starve another matrix member. The aggregator rejects duplicate, missing, extra, out-of-batch, malformed, or hash-mismatched evidence and selects at most the first proven candidate in canonical order. Uncertainty can reduce availability, but cannot expose noise.
 
-The global Algumon inventory is itself a fail-closed contract. Its dropdown must equal the seven configured source identities exactly; a missing or additional source produces zero relay targets and zero promotion candidates. The configuration validator independently rejects any missing or eighth site ID, so an inventory expansion cannot silently bypass the gate.
+## Release and update contract
 
-## Release, update, and rollback
+The schema-v2 public manifest has one executable artifact:
 
-- Builds are canonical, timestamp-free, and byte-reproducible.
-- Third-party GitHub Actions are pinned to full commit SHAs; jobs use explicit minimal permissions and fixed runner images.
-- The ninety-one-rule class-and-attribute gate is a byte-fixed asset of the repository's immutable protocol-2 `gate-v2.0.2` GitHub Release. AdGuard subscribes to that exact release URL. A normal semantic release cannot change the gate bytes or URL. Protocol 1 remains unchanged only as rollback evidence and is rejected as a v2 compatibility path or fallback.
-- GitHub Pages receives only artifacts whose manifest and SHA-256 values passed the same run's gates. The manifest separately fixes each public file's raw bytes, the Userscript's canonical-text digest, and the filter's ordered non-comment installed-rule digest. Pages contains exactly `filter.txt`, `hotdeal-focus.user.js`, and `release-manifest.json`; its `filter.txt` is a verified mirror, not the subscription authority.
-- The installed userscript updates through its HTTPS `@downloadURL` and `@updateURL`. Before Pages publication or Windows deployment, the machine CLI proves that the manifest's gate URL resolves to the exact published immutable release asset and verifies its release and asset attestations.
-- Rollback is a newly versioned, fully verified release with `rollback_of`; clients are never pointed to a lower version or mutable historical file.
-- A successful cloud audit writes a rate-limited heartbeat so GitHub does not disable the public scheduled workflow after repository inactivity.
-- Normal audit artifacts contain bounded JSON and hashes with short retention. Screenshots are generated only for failures and candidate proof, with deterministic file-count and byte caps. The promotion package is mandatory evidence and has a longer bounded retention.
+```json
+{
+  "schemaVersion": 2,
+  "status": "release-ready",
+  "installUrl": "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
+  "artifacts": {
+    "hotdeal-focus.user.js": {
+      "version": "x.y.z",
+      "bytes": 1,
+      "sha256": "…",
+      "canonicalTextSha256": "…"
+    }
+  }
+}
+```
 
-The public userscript uses the single exact `@grant GM_addElement` capability so AdGuard can create one engine-authorized stylesheet under strict CSP. It has no external dependency, dynamic code execution, or privileged storage. Its only network action is the user-activated, same-origin fetch of one exact signed Algumon relay described above; it performs no background prefetch or retry storm. The Windows installer authenticates the complete source contract and canonical-text SHA-256 before setting AdGuard's manual-install `IsCustom=true` classification; a locally parsed `IsCustom=false` entry is stored but is not selected for execution on AdGuard 7.22. The fixed diagnostic proves the exact origin CSP, AdGuard's effective five-category `script-src` mediation, preserved `base-uri`/`object-src`/`frame-ancestors` restrictions, the single local content-script request and exact probe selection, and the nonce/source-bearing `GM_addElement` style. Because the management API can converge before the filtering proxy reloads, the browser proof uses bounded fresh isolated contexts and accepts only one attempt that satisfies the complete exact proof; it never combines partial evidence across attempts. AdGuard's mediation includes `unsafe-eval` and `unsafe-inline`, but the hash-pinned diagnostic itself contains no eval, dynamic code, or network API. Published diagnostics contain only fixed tokens, counts, booleans, modes, versions, and hashes—never nonce values, article text, query strings, account data, or comment content.
+Pages publishes exactly the Userscript and manifest. Before deployment, the pipeline reads the live Pages bundle:
 
-## Local deployment boundary
+- identical script bytes require the same version;
+- different bytes require a strictly higher version;
+- a downgrade or same-version replacement is rejected.
 
-The Windows deployment CLI is transactional: inspect, write a schema-v2 atomic backup, authenticate and install or reclassify the userscript as a manual custom extension, disable the current-snapshot UI-blocking rules scoped exclusively to the seven target domains only after a separate explicit migration approval, install the URL filter, and verify the complete state. A classification replacement uses a durable intent record, bounded absence and convergence checks, and preserves code, GM settings, enabled state, and original true/false classification for exact rollback. Domain scope does not claim historical provenance; the dry-run exposes only ordered indices and hashes for review. Every mutation records an append-only journal. `restore-backup -BackupPath <directory> -Apply` validates the complete marker, every raw payload hash, the unchanged ordered User-filter digest, and the exact authorized before/after objects before restoring filter, migration delta, userscript, and classification in reverse order. Restore is idempotent and refuses unrelated or ambiguous changes. Schema-v1 backups remain preserved but are not automatically restorable because they predate payload hashes and the complete marker. Remote filter mutation requires both the raw release hash and the expected installed canonical rules hash. Secrets discovered for the local AdGuard IPC session are held only in memory and are never printed or written; any post-backup failure emits the backup path and a credential-free recovery command.
+After deployment, bounded cache-busting HTTPS polling must observe exact manifest and Userscript SHA-256 values before the job succeeds. The one schema-v1 `0.5.5` predecessor is accepted only through a byte-fixed one-time migration contract.
 
-The stdlib-only Python orchestrator is the repository's machine control surface. It invokes only fixed argument-vector commands, emits one JSON value on stdout, separates logs to stderr, binds release evidence to a clean exact Git SHA, validates exact GitHub Pages ownership and artifact hashes, and rejects ZIP traversal, symlinks, duplicate paths, and overwrite destinations. Cloud and local mutations are dry-run unless explicitly authorized. This makes build, verification, cloud execution/evidence retrieval, deployment, post-install proof, and rollback reproducible without remembered GUI state; the public command contract is documented in `CLI.md`.
+Rollback is forward-only. A last-known-good body must pass the current desktop/mobile live suite again and is then republished under a higher version with `rollback_of` evidence. Clients are never pointed to a lower version or mutable historical URL.
 
-Repository activation is typed and post-verified against GitHub API `2026-03-10`. An apply requires a clean full source SHA equal to the default head, byte equality for all three workflow files between local Git and GitHub Contents, and the exact successful `verify` job/check from GitHub Actions integration `15368`; the enclosing Verify workflow may be red only when `publish-pages` alone failed. The configurator leases that same head before every mutation stage. Its target additionally includes exact default-branch-only policies for `hdf-release-publisher`, `hdf-main-automation`, and `github-pages`; inherited or potentially applicable extra rulesets and classic branch protection fail closed. Variables and workflows use enable-only operations, permissions only narrow, and ambiguous outcomes succeed only after bounded exact post-read. Dispatches bind a fresh nonce to both input and run title and accept only one newly observed exact workflow path, head, event, and display title.
+The real updater trust boundary is the protected GitHub workflow plus the HTTPS Pages origin. Internal SHA-256 objects are described as digest-bound or sealed, not cryptographic signatures. An optional GitHub OIDC artifact attestation can strengthen audit evidence, but AdGuard itself does not validate that attestation during extension update.
 
-`AutomationPushIdentity` is one verified Ed25519 write deploy key scoped to this repository. Its private half crosses the process boundary only as stdin to the non-readable `hdf-main-automation` environment secret `HDF_AUTOMATION_PUSH_ED25519_PRIVATE_KEY`; a same-named repository secret is forbidden and removed only after the environment secret, fingerprint, and replacement key are re-observed. The public key is reduced to `HDF_AUTOMATION_PUSH_KEY_FINGERPRINT`; neither key material enters JSON, logs, or evidence. The live-browser promotion proof produces a bounded Git bundle without any secret. A fresh `push-promotion` runner independently rechecks the one-parent commit, exact changed-path allowlist, immutable gate, and manifest hashes, then leases the remote head before exposing the secret. Heartbeat uses the same protected environment and pre-secret lease.
+## GitHub control plane
 
-`BranchGovernance` has four reserved active rulesets. Two target `~DEFAULT_BRANCH`: `Hotdeal Focus / PR and verified CI` requires PR plus `verify` from integration `15368` and gives only DeployKey an always bypass; `Hotdeal Focus / immutable fast-forward history` has no bypass and forbids deletion, non-fast-forward updates, and non-linear history. Two independent rulesets target only `refs/tags/gate-v2.0.2`: `Hotdeal Focus / controlled gate-v2 tag creation` allows only DeployKey bypass for creation, while `Hotdeal Focus / immutable gate-v2 tag` has no bypass actor and forbids every update and deletion. Because activation proves exactly one write Deploy Key, tag creation has one credential path while post-creation freezing has none. Literal unrelated branch/tag rules are provably irrelevant; wildcard, inherited reserved, push/repository, classic, or otherwise uncertain governance is rejected before mutation.
+The Python JSON-only CLI is the agent control surface for build, verification, evidence, cloud configuration, deployment, and rollback. It invokes fixed argument-vector commands, separates logs from stdout, rejects ambiguous paths and archives, and binds releases to exact clean Git commits.
 
-Local immutable-gate publication never writes a tag or release directly: it validates source authority and dispatches the default-branch `publish-gate` workflow with an exact source input. Its proof job runs the browser suite without write permission. A fresh `hdf-release-publisher` job records a main-only environment checkpoint without secrets; because no reviewer, wait timer, or custom protection rule is configured, this is explicitly an auditable sequencing checkpoint rather than an independent approval boundary. A separate `hdf-main-automation` job read-only preflights repository identity, immutable-release policy, release/draft state, tag state, and the current head before exposing the sole write Deploy Key. The key can create the tag once; a second no-bypass ruleset freezes every update and deletion. The exact frozen tag is the transaction commit point. Finalization therefore records later head drift but continues against the independently revalidated tag source and locked filter bytes, allowing a stopped first attempt to resume without an impossible tag move or delete. The job then publishes or exactly verifies the immutable release and nonce-dispatches a fresh Verify run. Gate publication, both default-branch SSH writers, and both Pages deployers share `hotdeal-focus-release-state`. Pages takes initial, immediately-before, and immediately-after head leases; a drift-only failure dispatches an exactly attributed Verify recovery run.
+Protected automation retains only the authorities needed by the single-artifact design:
 
-## 요약 · 日本語 · 中文
+- default-branch PR/verified-CI and fast-forward history rules,
+- the `hdf-main-automation` deploy-key environment for one-parent promotions,
+- the `github-pages` environment for Pages publication,
+- exact workflow and enable-variable state.
 
-**한국어:** 정확히 검증된 제목·구매정보·본문·댓글/답글 원본 DOM만 공개합니다. DOM 변경을 반복 관측으로 증명할 수 있으면 GitHub가 AI 없이 새 원자적 변형을 자동 승격합니다. 증명이 부족하면 빈 화면을 유지하며 노이즈를 다시 노출하지 않습니다.
+The former `publish-gate` workflow, immutable-filter tag creation, tag-freeze rulesets, and filter-release publisher are not part of the active cloud contract. An existing old tag/release may remain untouched as archival compatibility for old subscribers.
 
-**日本語:** 検証済みのタイトル・購入情報・本文・コメント/返信の元 DOM だけを表示します。DOM 変更を反復観測で証明できる場合のみ、GitHub が AI なしで新しい原子的バリアントを自動昇格します。不確実な場合は空白のままとし、ノイズを再表示しません。
+Live-browser proof and secret-bearing push run on separate fresh runners. The push runner revalidates the Git bundle, parent, changed-path allowlist, committed hashes, manifest, and current remote-head lease before exposing the repository-scoped Ed25519 deploy key. Pages writers share the release mutex and recheck the head before and after deployment.
 
-**中文:** 仅显示经过验证的标题、购买信息、正文以及完整评论/回复的原始 DOM。只有当重复观测能够确定性证明 DOM 变更时，GitHub 才会在不使用 AI 的情况下自动提升新的原子布局变体；证据不足时保持空白，绝不重新暴露噪声。
+## Windows deployment boundary
+
+Normal Windows `deploy` and `verify` are Userscript-only. They:
+
+1. validate strict UTF-8 source, exact metadata, schema-v2 manifest, raw and canonical hashes;
+2. inspect global protection and capture a durable backup;
+3. install or update the one exact manual Userscript;
+4. verify enabled state, code hash, GM-properties hash, version, URL, and grants;
+5. prove the complete User filter and every non-target subscription inventory remained byte-for-byte and rule-hash identical.
+
+Normal deployment never calls legacy domain-scope migration, never disables User rules, and never installs a filter subscription. Any failure rolls the target Userscript back from the journaled backup. Secrets used for the local AdGuard IPC session remain in memory and never enter JSON, logs, or evidence.
+
+## Security and availability posture
+
+- **Auth and permissions:** least-privilege GitHub job permissions, protected environments, one repository-scoped deploy key, no committed secrets.
+- **Hosting and CDN:** GitHub Pages HTTPS, monotonic preflight, live post-deploy byte attestation.
+- **CI/CD:** pinned Actions, fixed runner images, reproducible builds, serialized writers, exact head leases.
+- **Rate limiting:** bounded relay fetches, candidates, retries, screenshots, artifact bytes, and retention.
+- **Caching:** cache-busting release attestation; stale safe versions remain fail-closed.
+- **Error tracking:** deterministic JSON evidence and drift issues without article/comment/account content.
+- **Availability and recovery:** uncertainty locks the page; rollback is a higher fully reverified release; local installation is transactional.

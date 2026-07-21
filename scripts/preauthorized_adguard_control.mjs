@@ -1,15 +1,14 @@
 /**
- * Test/audit-only control for the AdGuard userscript contract.
+ * Test/audit-only control for the userscript-manager style API contract.
  *
- * This is deliberately named a preauthorized control: it is not evidence that
- * AdGuard injected the style. The release CSP probe supplies that independent
- * product evidence. Browser fixtures use this source only to exercise the
- * userscript state machine without adding a production fallback.
+ * Browser fixtures use this source only to provide the GM_addElement API that
+ * an installed userscript receives. It does not inject filter CSS, mutate the
+ * release probe, or participate in the reader-gate release decision.
  */
 export const PREAUTHORIZED_ADGUARD_CONTROL_SOURCE = String.raw`
 (() => {
   "use strict";
-  const CONTROL_KIND = "preauthorized-nonce-control";
+  const CONTROL_KIND = "preauthorized-userscript-style-control";
   const existing = globalThis.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__;
   if (existing?.kind === CONTROL_KIND &&
       globalThis.GM_addElement === existing.gmAddElement) return;
@@ -20,7 +19,6 @@ export const PREAUTHORIZED_ADGUARD_CONTROL_SOURCE = String.raw`
     schemaVersion: 2,
     kind: CONTROL_KIND,
     gmAddElementCalls: 0,
-    extendedCssCallbacks: 0,
     gmAddElement: null,
   };
   const gmAddElement = (parent, tagName, attributes) => {
@@ -42,8 +40,6 @@ export const PREAUTHORIZED_ADGUARD_CONTROL_SOURCE = String.raw`
       "data-hotdeal-focus-runtime-style",
       attributes["data-hotdeal-focus-runtime-style"],
     );
-    style.setAttribute("nonce", CONTROL_KIND);
-    style.setAttribute("data-source", CONTROL_KIND);
     parent.appendChild(style);
     control.gmAddElementCalls += 1;
     return style;
@@ -60,36 +56,6 @@ export const PREAUTHORIZED_ADGUARD_CONTROL_SOURCE = String.raw`
     enumerable: false,
     writable: false,
     value: control,
-  });
-
-  const applyBoundedExtendedCssCallback = () => {
-    const root = document.documentElement;
-    if (
-      !root?.classList.contains("hdf-v2-ready") ||
-      root.getAttribute("data-hotdeal-focus-ready") !== "1" ||
-      root.getAttribute("data-hotdeal-focus-protocol") !== "2" ||
-      root.getAttribute("data-hotdeal-focus-state") !== "ready" ||
-      root.getAttribute("data-hotdeal-focus-status") !== "ready"
-    ) return;
-    const probes = document.querySelectorAll(
-      '[data-hdf-v2-release-probe="unowned-inline-important"]',
-    );
-    if (probes.length !== 1) return;
-    const probe = probes[0];
-    if (
-      probe.style.getPropertyValue("display") !== "none" ||
-      probe.style.getPropertyPriority("display") !== "important"
-    ) {
-      probe.style.setProperty("display", "none", "important");
-      control.extendedCssCallbacks += 1;
-    }
-  };
-  const observer = new MutationObserver(applyBoundedExtendedCssCallback);
-  observer.observe(document, {
-    subtree: true,
-    childList: true,
-    attributes: true,
-    attributeFilter: ["class", "data-hotdeal-focus-ready", "style"],
   });
 })();
 `;

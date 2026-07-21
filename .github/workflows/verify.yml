@@ -15,8 +15,8 @@ run-name: hotdeal-focus-verify-${{ inputs.dispatch_nonce || github.run_id }}
 permissions: {}
 
 concurrency:
-  group: verify-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: verify-${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('source-{0}', github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   verify:
@@ -30,6 +30,7 @@ jobs:
       - name: Check out source
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
+          fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Python
@@ -46,7 +47,7 @@ jobs:
       - name: Install locked audit dependency
         run: npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Rebuild and verify immutable release contract
+      - name: Rebuild and verify standalone userscript release contract
         id: contract
         shell: bash
         run: |
@@ -57,11 +58,11 @@ jobs:
           npm run build || status=1
           git diff --exit-code -- . || status=1
           git ls-files --error-unmatch \
-            filter.txt \
             filter-static.txt \
             hotdeal-focus.user.js \
             scripts/csp-probe.user.js \
             release-manifest.json \
+            state/release-high-water.json \
             tests/fixtures/dom-regressions.json \
             tests/fixtures/behavior-baseline.json >/dev/null || status=1
           npm run integrity || status=1
@@ -104,47 +105,56 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: filter-integrity-${{ github.run_id }}
+          name: userscript-integrity-${{ github.run_id }}
           path: .audit-json-evidence/
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 2
 
-      - name: Stage immutable release draft
+      - name: Stage standalone userscript release draft
         if: >-
           steps.contract.outputs.status == '0' &&
           steps.behavior.outputs.status == '0'
         shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_BEFORE: ${{ github.event.before }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
+          set -euo pipefail
           mkdir -p .release-draft
-          node <<'NODE'
-          const crypto = require('node:crypto');
-          const fs = require('node:fs');
-          const manifest = JSON.parse(fs.readFileSync('release-manifest.json', 'utf8'));
-          const expected = ['filter.txt', 'hotdeal-focus.user.js'];
-          const actual = Object.keys(manifest.artifacts ?? {}).sort();
-          if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-            throw new Error(`unexpected public artifacts: ${actual.join(', ')}`);
-          }
-          for (const name of expected) {
-            const bytes = fs.readFileSync(name);
-            const digest = crypto.createHash('sha256').update(bytes).digest('hex');
-            if (manifest.artifacts[name]?.sha256 !== digest) {
-              throw new Error(`${name} does not match release-manifest.json`);
-            }
-          }
-          NODE
-          install -m 0644 filter.txt .release-draft/filter.txt
           install -m 0644 hotdeal-focus.user.js .release-draft/hotdeal-focus.user.js
           install -m 0644 release-manifest.json .release-draft/release-manifest.json
-          actual_files="$(find .release-draft -maxdepth 1 -type f -printf '%f\n' | sort)"
-          expected_files="$(printf '%s\n' filter.txt hotdeal-focus.user.js release-manifest.json | sort)"
+          baseline_sha=""
+          if [[ "${EVENT_NAME}" == "push" && "${EVENT_BEFORE:-}" =~ ^[0-9a-f]{40}$ && \
+                "${EVENT_BEFORE}" != "0000000000000000000000000000000000000000" ]]; then
+            baseline_sha="${EVENT_BEFORE}"
+          elif [[ "${EVENT_NAME}" == "pull_request" && "${PR_BASE_SHA:-}" =~ ^[0-9a-f]{40}$ ]]; then
+            baseline_sha="${PR_BASE_SHA}"
+          else
+            baseline_sha="$(git rev-parse HEAD^ 2>/dev/null || true)"
+          fi
+          previous_high_water="${RUNNER_TEMP}/previous-release-high-water.json"
+          if [[ -n "${baseline_sha}" ]] && \
+             git cat-file -e "${baseline_sha}:state/release-high-water.json" 2>/dev/null; then
+            git show "${baseline_sha}:state/release-high-water.json" > "${previous_high_water}"
+          else
+            printf '%s\n' \
+              '{"bundleFormat":"hdf-public-bundle-v1","records":[],"schemaVersion":1}' \
+              > "${previous_high_water}"
+          fi
+          node scripts/pages_release_contract.mjs verify-bundle \
+            --root .release-draft \
+            --high-water-source state/release-high-water.json \
+            --previous-high-water-source "${previous_high_water}"
+          actual_files="$(find .release-draft -mindepth 1 -printf '%P:%y\n' | sort)"
+          expected_files="$(printf '%s\n' hotdeal-focus.user.js:f release-manifest.json:f | sort)"
           if [[ "${actual_files}" != "${expected_files}" ]]; then
-            echo "release draft contains a non-public fourth file" >&2
+            echo "release draft contains a non-public file" >&2
             exit 1
           fi
 
-      - name: Upload immutable release draft
+      - name: Upload standalone userscript release draft
         if: >-
           steps.contract.outputs.status == '0' &&
           steps.behavior.outputs.status == '0'
@@ -179,7 +189,6 @@ jobs:
     timeout-minutes: 20
     concurrency:
       group: hotdeal-focus-release-state
-      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -196,11 +205,12 @@ jobs:
           name: release-draft-${{ github.run_id }}
           path: .pages
 
-      - name: Check out the exact verified source for gate attestation
+      - name: Check out the exact verified source for release attestation
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.sha }}
           path: .verified-source
+          fetch-depth: 2
           persist-credentials: false
 
       - name: Refuse to publish a verified commit older than the default branch head
@@ -219,15 +229,30 @@ jobs:
             exit 1
           fi
 
-      - name: Require the exact immutable gate release before Pages publication
-        env:
-          GH_TOKEN: ${{ github.token }}
-        working-directory: .verified-source
+      - name: Set up Node.js for deterministic Pages attestation
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Reject Pages downgrade or same-version byte replacement
         shell: bash
         run: |
-          python scripts/hotdeal_focus_cli.py gate-release verify \
-            --repo "${GITHUB_REPOSITORY}" \
-            --json > ../.gate-release-verification.json
+          set -euo pipefail
+          previous_high_water="${RUNNER_TEMP}/publish-previous-release-high-water.json"
+          if git -C .verified-source cat-file -e \
+              "HEAD^:state/release-high-water.json" 2>/dev/null; then
+            git -C .verified-source show "HEAD^:state/release-high-water.json" \
+              > "${previous_high_water}"
+          else
+            printf '%s\n' \
+              '{"bundleFormat":"hdf-public-bundle-v1","records":[],"schemaVersion":1}' \
+              > "${previous_high_water}"
+          fi
+          node .verified-source/scripts/pages_release_contract.mjs preflight \
+            --root .pages \
+            --high-water-source .verified-source/state/release-high-water.json \
+            --previous-high-water-source "${previous_high_water}" \
+            --base-url https://heelee912.github.io/adguard-hotdeal-focus/
 
       - name: Configure Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
@@ -278,6 +303,15 @@ jobs:
             echo "The default branch changed during Pages deployment." >&2
             exit 1
           fi
+
+      - name: Require the live HTTPS userscript and manifest bytes
+        shell: bash
+        run: |
+          node .verified-source/scripts/pages_release_contract.mjs attest \
+            --root .pages \
+            --high-water-source .verified-source/state/release-high-water.json \
+            --base-url https://heelee912.github.io/adguard-hotdeal-focus/ \
+            --source-sha "${{ github.sha }}"
 
   recover-pages-head-drift:
     needs: [verify, publish-pages]

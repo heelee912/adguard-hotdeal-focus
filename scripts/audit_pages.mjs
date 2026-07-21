@@ -3,10 +3,9 @@
 /**
  * Live DOM contract auditor for AdGuard Hotdeal Focus.
  *
- * The auditor has two independent gates:
- *   1. project the static ExtendedCSS selector from config/sites.json;
- *   2. inject the deterministic userscript at document-start and project the
- *      marker-only AdGuard gate.
+ * The auditor injects the deterministic userscript at document-start and
+ * proves its standalone nonce-bound runtime gate. Static selector projection
+ * remains an offline contract oracle; it is not an installed runtime layer.
  *
  * Drift produces evidence and, only when every independent proof gate agrees,
  * one isolated promotion envelope. Repository mutation remains a CI concern.
@@ -20,6 +19,7 @@ import { BlockList, createConnection, isIP } from "node:net";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { publicBundleSha256 } from "./pages_release_contract.mjs";
 import { PREAUTHORIZED_ADGUARD_CONTROL_SOURCE } from "./preauthorized_adguard_control.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
@@ -44,7 +44,10 @@ const FIXTURE_TIMEOUT_MS = 8_000;
 const ALGUMON_ORIGIN = "https://www.algumon.com";
 const ALGUMON_HOSTNAMES = new Set(["algumon.com", "www.algumon.com"]);
 const ALGUMON_GLOBAL_DISCOVERY_URL = `${ALGUMON_ORIGIN}/n/deal`;
-const ALGUMON_SITE_LINK_SCAN_LIMIT = 12;
+// A live audit deliberately reads only the first three exact relay links for a
+// source. Three is the minimum evidence cardinality for a promotable profile;
+// scanning the rest of a feed would add load without strengthening that proof.
+const ALGUMON_SITE_LINK_SCAN_LIMIT = 3;
 const ALGUMON_PROOF_REPRESENTATIVES_PER_ROUTE_PROFILE = 3;
 const ALGUMON_RELAY_RESPONSE_MAX_BYTES = 4_096;
 const ALGUMON_FRESH_RELAY_MAX_AGE_MS = 5 * 60 * 1_000;
@@ -105,22 +108,15 @@ const REQUIRED_SITE_IDS = Object.freeze([
   "zod",
   "arcalive",
 ]);
+// One global source inventory, one filtered source page per configured site,
+// and three signed relay documents per site. This is an upper bound on every
+// live Algumon document/API start made by one audit invocation.
+const DEFAULT_ALGUMON_REQUEST_START_BUDGET =
+  1 + REQUIRED_SITE_IDS.length * (1 + ALGUMON_SITE_LINK_SCAN_LIMIT);
 const REQUIRED_ROLE_NAMES = Object.freeze(["title", "body", "comments"]);
 const READER_GATE_PROTOCOL_VERSION = 2;
-const READER_GATE_ARTIFACT_VERSION = "2.0.2";
-const READER_GATE_READY_SELECTOR =
-  'html.hdf-v2-ready[data-hotdeal-focus-ready="1"]' +
-  '[data-hotdeal-focus-protocol="2"]' +
-  '[data-hotdeal-focus-state="ready"]' +
-  '[data-hotdeal-focus-status="ready"]';
-const READER_GATE_PROJECTION_HIDE_SELECTOR =
-  `${READER_GATE_READY_SELECTOR} body *:not(` +
-  ".hdf-v2-keep[data-hotdeal-focus-keep])";
-const IMPORTANT_DISPLAY_NONE_DECLARATION =
-  /(?:^|;)\s*display\s*:\s*none\s*!important\s*(?:;|$)/iu;
-const READER_GATE_SUBSCRIPTION_URL =
-  "https://github.com/heelee912/adguard-hotdeal-focus/releases/download/" +
-  "gate-v2.0.2/filter.txt";
+const READER_GATE_INSTALL_URL =
+  "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js";
 const FIRST_PAINT_PROBE_SCHEMA_VERSION = 1;
 const ARTICLE_ACCESS_LEASE_SCHEMA_VERSION = 1;
 const DEVICE_PROFILES = Object.freeze({
@@ -228,7 +224,6 @@ function parseArguments(argv) {
     configPath: DEFAULT_CONFIG_PATH,
     evidencePath: DEFAULT_EVIDENCE_PATH,
     userscriptPath: DEFAULT_USERSCRIPT_PATH,
-    markerFilterPath: path.join(PROJECT_ROOT, "filter.txt"),
     timeoutMs: DEFAULT_TIMEOUT_MS,
     discoverAlgumon: true,
     requireAlgumonDiscovery: false,
@@ -244,6 +239,9 @@ function parseArguments(argv) {
     draftManifestPath: null,
     promotionScopePath: null,
     baselineReportPath: null,
+    capturedAlgumonReportPath: null,
+    noAlgumonNetwork: false,
+    algumonRequestBudget: DEFAULT_ALGUMON_REQUEST_START_BUDGET,
     headed: false,
     siteIds: new Set(),
   };
@@ -267,9 +265,6 @@ function parseArguments(argv) {
         break;
       case "--userscript":
         options.userscriptPath = path.resolve(nextValue());
-        break;
-      case "--marker-filter":
-        options.markerFilterPath = path.resolve(nextValue());
         break;
       case "--timeout-ms": {
         const timeoutMs = Number(nextValue());
@@ -339,6 +334,31 @@ function parseArguments(argv) {
       case "--baseline-report":
         options.baselineReportPath = path.resolve(nextValue());
         break;
+      case "--captured-algumon-report":
+      case "--algumon-source-snapshot":
+        options.capturedAlgumonReportPath = path.resolve(nextValue());
+        options.discoverAlgumon = false;
+        options.noAlgumonNetwork = true;
+        break;
+      case "--no-algumon-network":
+        options.discoverAlgumon = false;
+        options.noAlgumonNetwork = true;
+        break;
+      case "--algumon-request-budget": {
+        const maximumStarts = Number(nextValue());
+        if (
+          !Number.isInteger(maximumStarts) ||
+          maximumStarts < 1 ||
+          maximumStarts > DEFAULT_ALGUMON_REQUEST_START_BUDGET
+        ) {
+          throw new Error(
+            `--algumon-request-budget must be an integer from 1 to ` +
+            `${DEFAULT_ALGUMON_REQUEST_START_BUDGET}`,
+          );
+        }
+        options.algumonRequestBudget = maximumStarts;
+        break;
+      }
       case "--headed":
         options.headed = true;
         break;
@@ -350,6 +370,27 @@ function parseArguments(argv) {
         throw new Error(`unknown argument: ${argument}`);
     }
   }
+  if (options.capturedAlgumonReportPath) {
+    options.discoverAlgumon = false;
+    options.noAlgumonNetwork = true;
+  }
+  if (
+    options.requireAlgumonDiscovery &&
+    !options.fixtureOnly &&
+    !options.discoverAlgumon &&
+    !options.capturedAlgumonReportPath
+  ) {
+    throw new Error(
+      "--require-algumon-discovery needs live discovery or --algumon-source-snapshot",
+    );
+  }
+  if (
+    options.noAlgumonNetwork &&
+    !options.fixtureOnly &&
+    !options.capturedAlgumonReportPath
+  ) {
+    throw new Error("--no-algumon-network requires --algumon-source-snapshot");
+  }
   return options;
 }
 
@@ -358,7 +399,6 @@ function printUsage() {
   process.stdout.write(`  --config PATH                    Config file (default: config/sites.json)\n`);
   process.stdout.write(`  --evidence-dir PATH              Evidence root (default: outputs/evidence)\n`);
   process.stdout.write(`  --userscript PATH                Userscript to inject at document-start\n`);
-  process.stdout.write(`  --marker-filter PATH             Marker-only filter projected in the browser\n`);
   process.stdout.write(`  --site ID                        Audit one site; repeat to select several\n`);
   process.stdout.write(`  --[no-]discover-algumon          Toggle latest-link discovery\n`);
   process.stdout.write(`  --require-algumon-discovery      Fail unless every selected site/device resolves\n`);
@@ -368,14 +408,119 @@ function printUsage() {
   process.stdout.write(`  --edge-fixture ID                Run one edge fixture; repeat to select several\n`);
   process.stdout.write(`  --relay-fixture-only             Run only signed Algumon relay fixtures\n`);
   process.stdout.write(`  --relay-fixture ID               Run one relay fixture; repeat to select several\n`);
-  process.stdout.write(`  --runtime-only                   Skip legacy static projection (candidate proof only)\n`);
+  process.stdout.write(`  --runtime-only                   Run only the standalone userscript proof\n`);
   process.stdout.write(`  --synthesize-candidates          Emit a proven atomic overlay when all proof gates pass\n`);
   process.stdout.write(`  --promotion-draft PATH           Finalize one isolated draft after candidate live proof\n`);
   process.stdout.write(`  --draft-manifest PATH            Draft bundle manifest used for byte-identity proof\n`);
   process.stdout.write(`  --promotion-scope PATH           Proven candidate for profile-scoped pre-push audit\n`);
   process.stdout.write(`  --baseline-report PATH           Frozen full audit used for non-regression scope\n`);
+  process.stdout.write(`  --algumon-source-snapshot PATH   Reuse sealed relay evidence; never revisit Algumon\n`);
+  process.stdout.write(`  --captured-algumon-report PATH   Compatibility alias for --algumon-source-snapshot\n`);
+  process.stdout.write(`  --no-algumon-network             Require the sealed source-snapshot path\n`);
+  process.stdout.write(`  --algumon-request-budget N       Tighten the live Algumon-start cap (1-${DEFAULT_ALGUMON_REQUEST_START_BUDGET})\n`);
   process.stdout.write(`  --timeout-ms N                   Per-page timeout\n`);
   process.stdout.write(`  --headed                         Show Chromium\n`);
+}
+
+class AlgumonRequestBudgetExceeded extends Error {
+  constructor(maximumStarts, attemptedKind) {
+    super(
+      `Algumon request-start budget exhausted before ${attemptedKind} ` +
+      `(${maximumStarts} starts maximum)`,
+    );
+    this.name = "AlgumonRequestBudgetExceeded";
+    this.maximumStarts = maximumStarts;
+    this.attemptedKind = attemptedKind;
+  }
+}
+
+function createLowTrafficAlgumonProbePlan(siteCount) {
+  if (!Number.isInteger(siteCount) || siteCount < 1) {
+    throw new Error("Algumon probe plan requires at least one selected site");
+  }
+  const globalInventoryNavigations = 1;
+  const siteDiscoveryNavigations = siteCount;
+  const signedRelayFetches = siteCount * ALGUMON_SITE_LINK_SCAN_LIMIT;
+  return Object.freeze({
+    globalInventoryNavigations,
+    siteDiscoveryNavigations,
+    signedRelayFetches,
+    justInTimeRelayAcquisitions: 0,
+    justInTimeSignedRelayFetches: 0,
+    totalRequestStarts:
+      globalInventoryNavigations + siteDiscoveryNavigations + signedRelayFetches,
+  });
+}
+
+function createAlgumonRequestStartBudget(
+  maximumStarts = DEFAULT_ALGUMON_REQUEST_START_BUDGET,
+) {
+  if (
+    !Number.isInteger(maximumStarts) ||
+    maximumStarts < 1 ||
+    maximumStarts > DEFAULT_ALGUMON_REQUEST_START_BUDGET
+  ) {
+    throw new Error(
+      `Algumon request-start budget must be an integer from 1 to ` +
+      `${DEFAULT_ALGUMON_REQUEST_START_BUDGET}`,
+    );
+  }
+  const starts = [];
+  return Object.freeze({
+    reserve(kind, urlLike) {
+      let url;
+      try {
+        url = new URL(urlLike);
+      } catch {
+        throw new Error(`Algumon request start has an invalid URL: ${String(urlLike)}`);
+      }
+      if (
+        url.protocol !== "https:" ||
+        !ALGUMON_HOSTNAMES.has(url.hostname.toLocaleLowerCase())
+      ) {
+        throw new Error(`Algumon request start escaped the exact source origin: ${url.href}`);
+      }
+      if (starts.length >= maximumStarts) {
+        throw new AlgumonRequestBudgetExceeded(maximumStarts, kind);
+      }
+      const start = Object.freeze({ ordinal: starts.length + 1, kind: String(kind) });
+      starts.push(start);
+      return start;
+    },
+    snapshot() {
+      return Object.freeze({
+        maximumStarts,
+        startedCount: starts.length,
+        remainingStarts: maximumStarts - starts.length,
+        starts: Object.freeze(starts.slice()),
+      });
+    },
+  });
+}
+
+function reserveAlgumonProbeStart(requestBudget, transitionBudget, kind, url) {
+  if (!requestBudget || typeof requestBudget.reserve !== "function") {
+    throw new Error("Algumon request-start budget is required before a live source request");
+  }
+  if (
+    kind === "just-in-time-site-discovery" ||
+    kind === "just-in-time-signed-relay-fetch"
+  ) {
+    throw new AlgumonRequestBudgetExceeded(0, kind);
+  }
+  const start = requestBudget.reserve(kind, url);
+  if (!transitionBudget) return start;
+  const actual = transitionBudget.actual;
+  actual.requestStarts = start.ordinal;
+  if (kind === "global-inventory") actual.globalInventoryNavigations += 1;
+  if (kind === "site-discovery") actual.siteDiscoveryNavigations += 1;
+  if (kind === "signed-relay-fetch") actual.signedRelayFetches += 1;
+  if (kind === "just-in-time-site-discovery") actual.justInTimeRelayAcquisitions += 1;
+  if (kind === "just-in-time-signed-relay-fetch") {
+    actual.justInTimeSignedRelayFetches += 1;
+    actual.signedRelayFetches += 1;
+  }
+  return start;
 }
 
 async function readJson(filePath) {
@@ -758,33 +903,6 @@ function parseAdguardCosmeticRules(filterText) {
     }
   }
   return rules;
-}
-
-function isReaderGateProjectionHideRule(rule) {
-  return (
-    rule.malformed === false &&
-    rule.selector === READER_GATE_PROJECTION_HIDE_SELECTOR &&
-    IMPORTANT_DISPLAY_NONE_DECLARATION.test(rule.declarations ?? "")
-  );
-}
-
-function markerSelectorsForUrl(filterText, layout, urlText) {
-  const parsed = new URL(urlText);
-  const pathAndQuery = parsed.pathname + parsed.search;
-  return [
-    ...new Set(
-      parseAdguardCosmeticRules(filterText)
-        .filter(
-          (rule) =>
-            rule.domains.some((domain) => hostnameMatches(parsed.hostname, domain)) &&
-            hostnameMatches(parsed.hostname, layout.domain) &&
-            (rule.path === null || wildcardPathMatches(pathAndQuery, rule.path)) &&
-            rule.operator === "#$?#" &&
-            isReaderGateProjectionHideRule(rule),
-        )
-        .map((rule) => rule.selector),
-    ),
-  ];
 }
 
 function hostnameMatches(hostname, domain) {
@@ -1872,15 +1990,6 @@ function canonicalTextSha256(content) {
   return sha256(Buffer.from(canonicalText(content), "utf8"));
 }
 
-function installedFilterRulesSha256(content) {
-  const rules = canonicalText(content)
-    .split("\n")
-    .filter((line) => line.trim() && !line.trimStart().startsWith("!"));
-  return rules.length > 0
-    ? canonicalTextSha256(rules.join("\n"))
-    : null;
-}
-
 function canonicalJson(value, propertyName = null) {
   if (Array.isArray(value)) {
     return `[${value.map((item) => canonicalJson(item)).join(",")}]`;
@@ -1934,30 +2043,39 @@ async function buildIntegrityManifest(
     draftManifest = null,
   } = {},
 ) {
-  const artifacts = await Promise.all([
-    readArtifact("filter.txt", bundleRoot),
-    readArtifact("filter-static.txt", bundleRoot),
-    readArtifact("hotdeal-focus.user.js", bundleRoot),
-    readArtifact("package.json", bundleRoot),
-    readArtifact("package-lock.json", bundleRoot),
-    readArtifact("state/approved-variants.json", bundleRoot),
-    readArtifact("config/sites.json", bundleRoot),
-    readArtifact("config/gate-artifacts.json", bundleRoot),
-    readArtifact("tests/fixtures/dom-regressions.json"),
-    readArtifact("tests/fixtures/behavior-baseline.json"),
-    readArtifact("release-manifest.json", bundleRoot),
-  ]);
+  const artifactPaths = [
+    "filter-static.txt",
+    "hotdeal-focus.user.js",
+    "package.json",
+    "package-lock.json",
+    "state/approved-variants.json",
+    "state/release-high-water.json",
+    "config/sites.json",
+    "tests/fixtures/dom-regressions.json",
+    "tests/fixtures/behavior-baseline.json",
+    "release-manifest.json",
+  ];
+  const artifacts = await Promise.all(artifactPaths.map((artifactPath) =>
+    artifactPath.startsWith("tests/fixtures/")
+      ? readArtifact(artifactPath)
+      : readArtifact(artifactPath, bundleRoot)));
   const byPath = new Map(artifacts.map((artifact) => [artifact.path, artifact]));
-  const markerFilter = byPath.get("filter.txt");
   const staticFilter = byPath.get("filter-static.txt");
   const userscript = byPath.get("hotdeal-focus.user.js");
   const configArtifact = byPath.get("config/sites.json");
   const approvedStateArtifact = byPath.get("state/approved-variants.json");
-  const gateArtifactLockArtifact = byPath.get("config/gate-artifacts.json");
+  const highWaterArtifact = byPath.get("state/release-high-water.json");
   const releaseManifestArtifact = byPath.get("release-manifest.json");
-  const behaviorBaselineArtifact = byPath.get(
-    "tests/fixtures/behavior-baseline.json",
-  );
+  const behaviorBaselineArtifact = byPath.get("tests/fixtures/behavior-baseline.json");
+  const exactObjectKeys = (value, expectedKeys) =>
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value) &&
+    canonicalJson(Object.keys(value).sort()) === canonicalJson([...expectedKeys].sort());
+  const artifactEntryFor = (artifact) => artifact?.missing
+    ? null
+    : { sha256: artifact.sha256, bytes: artifact.bytes };
+
   let releaseManifest = null;
   if (!releaseManifestArtifact?.missing) {
     try {
@@ -1974,46 +2092,55 @@ async function buildIntegrityManifest(
       approvedState = null;
     }
   }
-  let gateArtifactLock = null;
-  if (!gateArtifactLockArtifact?.missing) {
+  let releaseHighWater = null;
+  if (!highWaterArtifact?.missing) {
     try {
-      gateArtifactLock = JSON.parse(gateArtifactLockArtifact.content);
+      releaseHighWater = JSON.parse(highWaterArtifact.content);
     } catch {
-      gateArtifactLock = null;
+      releaseHighWater = null;
     }
   }
+
   const isDraftBundle = draftManifest !== null;
-  const draftArtifactPaths = Object.keys(draftManifest?.artifacts ?? {}).sort();
   const expectedDraftArtifactPaths = [
     "config/sites.json",
     "filter-static.txt",
-    "filter.txt",
     "hotdeal-focus.user.js",
     "package-lock.json",
     "package.json",
   ];
   const draftArtifactEntries = Object.fromEntries(
-    artifacts
-      .filter((artifact) => expectedDraftArtifactPaths.includes(artifact.path))
-      .map((artifact) => [
-        artifact.path,
-        artifact.missing
-          ? null
-          : { sha256: artifact.sha256, bytes: artifact.bytes },
-      ]),
+    expectedDraftArtifactPaths.map((artifactPath) => [
+      artifactPath,
+      artifactEntryFor(byPath.get(artifactPath)),
+    ]),
   );
   const draftArtifactSetSha256 = sha256(
     Buffer.from(canonicalJson(draftArtifactEntries), "utf8"),
   );
   const draftManifestContract =
     isDraftBundle &&
-    draftManifest?.schemaVersion === 1 &&
-    draftManifest?.status === "draft-non-promotable" &&
-    draftManifest?.protocolVersion === READER_GATE_PROTOCOL_VERSION &&
-    typeof draftManifest?.releaseVersion === "string" &&
-    canonicalJson(draftArtifactPaths) === canonicalJson(expectedDraftArtifactPaths) &&
+    exactObjectKeys(draftManifest, [
+      "schemaVersion",
+      "status",
+      "releaseVersion",
+      "protocolVersion",
+      "baseConfigSha256",
+      "candidateSha256",
+      "discoveryEvidenceSha256",
+      "proofProfiles",
+      "artifactSetSha256",
+      "artifacts",
+    ]) &&
+    draftManifest.schemaVersion === 1 &&
+    draftManifest.status === "draft-non-promotable" &&
+    draftManifest.protocolVersion === READER_GATE_PROTOCOL_VERSION &&
+    typeof draftManifest.releaseVersion === "string" &&
+    canonicalJson(Object.keys(draftManifest.artifacts ?? {}).sort()) ===
+      canonicalJson(expectedDraftArtifactPaths) &&
     canonicalJson(draftManifest.artifacts) === canonicalJson(draftArtifactEntries) &&
     draftManifest.artifactSetSha256 === draftArtifactSetSha256;
+
   const actualSiteIds = config.sites.map((site) => site.id).sort();
   const actualLayoutCount = config.sites.reduce(
     (count, site) => count + site.layouts.length,
@@ -2037,253 +2164,58 @@ async function buildIntegrityManifest(
     ? []
     : parseAdguardCosmeticRules(staticFilter.content);
   const layouts = config.sites.flatMap((site) =>
-    site.layouts.flatMap((layout) =>
-      [
-        layout,
-        ...(layout.variants ?? []).map((variant) => ({
-          ...variant,
-          domain: layout.domain,
-          id: `${layout.id}--${variant.id}`,
-        })),
-      ].flatMap((contract) => pathsForLayout(contract).map((configuredPath) => {
-      const staticCovered = staticRules.some(
+    site.layouts.flatMap((layout) => [
+      layout,
+      ...(layout.variants ?? []).map((variant) => ({
+        ...variant,
+        domain: layout.domain,
+        id: `${layout.id}--${variant.id}`,
+      })),
+    ].flatMap((contract) => pathsForLayout(contract).map((configuredPath) => ({
+      siteId: site.id,
+      layoutId: contract.id,
+      domain: contract.domain,
+      path: configuredPath,
+      desktop: profilesForLayout(site, contract).includes("desktop"),
+      mobile: profilesForLayout(site, contract).includes("mobile"),
+      staticCovered: staticRules.some(
         (rule) =>
           rule.domains.includes(contract.domain) &&
           rule.path === configuredPath &&
           rule.operator === "#?#",
-      );
-      return {
-        siteId: site.id,
-        layoutId: contract.id,
-        domain: contract.domain,
-        path: configuredPath,
-        desktop: profilesForLayout(site, contract).includes("desktop"),
-        mobile: profilesForLayout(site, contract).includes("mobile"),
-        staticCovered,
-      };
-    }))),
+      ),
+    })))),
   );
-  const markerRules = markerFilter?.missing
-    ? []
-    : parseAdguardCosmeticRules(markerFilter.content);
-  const exactObjectKeys = (value, expectedKeys) =>
-    value !== null &&
-    typeof value === "object" &&
-    !Array.isArray(value) &&
-    canonicalJson(Object.keys(value).sort()) === canonicalJson([...expectedKeys].sort());
-  const gateLockEntry = gateArtifactLock?.artifact;
-  const gateArtifactLockContract = isDraftBundle || (
-    !markerFilter?.missing &&
-    !gateArtifactLockArtifact?.missing &&
-    exactObjectKeys(gateArtifactLock, [
-      "schemaVersion",
-      "protocolVersion",
-      "gateArtifactVersion",
-      "filterSubscriptionUrl",
-      "artifact",
-    ]) &&
-    exactObjectKeys(gateLockEntry, [
-      "path",
-      "bytes",
-      "sha256",
-      "installedRulesSha256",
-    ]) &&
-    gateArtifactLock.schemaVersion === 1 &&
-    gateArtifactLock.protocolVersion === READER_GATE_PROTOCOL_VERSION &&
-    gateArtifactLock.gateArtifactVersion === READER_GATE_ARTIFACT_VERSION &&
-    gateArtifactLock.filterSubscriptionUrl === READER_GATE_SUBSCRIPTION_URL &&
-    gateLockEntry.path === "filter.txt" &&
-    gateLockEntry.bytes === markerFilter.bytes &&
-    gateLockEntry.sha256 === markerFilter.sha256 &&
-    gateLockEntry.installedRulesSha256 ===
-      installedFilterRulesSha256(markerFilter.content)
-  );
-  const markerDomains = [...new Set(layouts.map((layout) => layout.domain))];
-  const paintSafeLayoutPreservingLockDeclarations = [
-    "transition: none !important",
-    "animation: none !important",
-    "visibility: hidden !important",
-    "content-visibility: hidden !important",
-    "opacity: 0 !important",
-    "clip-path: inset(50%) !important",
-    "pointer-events: none !important",
-    "caret-color: transparent !important",
-  ];
-  const domainGateRules = (domain) => markerRules.filter(
-    (rule) =>
-      rule.path === null &&
-      rule.domains.length === 1 &&
-      rule.domains[0] === domain,
-  );
-  const markerGateCovered = markerDomains.every((domain) =>
-    (() => {
-      const rules = domainGateRules(domain);
-      const standard = rules.filter((rule) => rule.operator === "#$#");
-      const extended = rules.filter((rule) => rule.operator === "#$?#");
-      const everyRuleIsV2 = rules.every((rule) =>
-        rule.malformed === false &&
-        !/hdf-v1-|data-hotdeal-focus-protocol=["'](?!2["'])/u.test(rule.selector));
-      const projectionInBothEngines = [standard, extended].every((engineRules) =>
-        engineRules.some(isReaderGateProjectionHideRule));
-      const requiredMarkerTokens = [
-        "hdf-v2-keep",
-        "hdf-v2-shell",
-        "hdf-v2-deep",
-        "hdf-v2-role-title",
-        "hdf-v2-role-title-text",
-        "hdf-v2-role-body",
-        "hdf-v2-role-product",
-        "hdf-v2-role-comment-item",
-        "hdf-v2-role-comment-control",
-      ];
-      return rules.length === 13 && standard.length === 7 && extended.length === 6 &&
-        everyRuleIsV2 && projectionInBothEngines &&
-        requiredMarkerTokens.every((token) =>
-          standard.some((rule) => rule.selector.includes(token)) &&
-          extended.some((rule) => rule.selector.includes(token)));
-    })(),
-  );
-  const prelockGateCovered = markerDomains.every((domain) =>
-    (() => {
-      const rules = domainGateRules(domain);
-      const rootLockRules = ["#$#", "#$?#"].map((operator) =>
-        rules.find((rule) =>
-          rule.operator === operator &&
-          rule.selector.includes(
-            `html:not(${READER_GATE_READY_SELECTOR.slice(4)})`,
-          ) &&
-          rule.selector.includes("html.hdf-v2-lock") &&
-          paintSafeLayoutPreservingLockDeclarations.every((declaration) =>
-            rule.declarations?.includes(declaration)) &&
-          !/display\s*:/u.test(
-            rule.declarations ?? "",
-          )),
-      );
-      const topLayerRule = rules.find((rule) =>
-        rule.operator === "#$#" &&
-        rule.selector.includes("dialog::backdrop") &&
-        rule.selector.includes("[popover]::backdrop") &&
-        rule.selector.includes(":fullscreen::backdrop") &&
-        /display:\s*none\s*!important/u.test(rule.declarations ?? "") &&
-        /visibility:\s*hidden\s*!important/u.test(rule.declarations ?? ""));
-      return rootLockRules.every(Boolean) && Boolean(topLayerRule);
-    })(),
-  );
+
+  const userscriptVersion = userscript?.content?.match(
+    /^\/\/\s*@version\s+([^\s]+)\s*$/mu,
+  )?.[1];
   const userscriptContractCovered =
     !userscript?.missing &&
     /^\/\/\s*@grant\s+GM_addElement\s*$/mu.test(userscript.content) &&
-    (userscript.content.match(/^\/\/\s*@grant\s+/gmu) ?? []).length === 1 &&
+    /^\/\/\s*@grant\s+window\.onurlchange\s*$/mu.test(userscript.content) &&
+    (userscript.content.match(/^\/\/\s*@grant\s+/gmu) ?? []).length === 2 &&
     userscript.content.includes('const PROTOCOL_VERSION = "2"') &&
     userscript.content.includes('GM_addElement(parent, "style", {') &&
+    userscript.content.includes("function proveStandaloneCascadeRelease") &&
+    userscript.content.includes("runtime.verifyUnlockedCascadeRelease()") &&
+    userscript.content.includes('["urlchange", revalidate, true]') &&
+    userscript.content.includes('["hashchange", revalidate, true]') &&
     userscript.content.includes('"data-hotdeal-focus-runtime-style": "2"') &&
-    userscript.content.includes("hdf-v2-lock") &&
-    userscript.content.includes("hdf-v2-ready") &&
-    userscript.content.includes("data-hotdeal-focus-ready") &&
-    userscript.content.includes("data-hotdeal-focus-keep") &&
-    userscript.content.includes("__HOTDEAL_FOCUS_DIAGNOSTICS__");
-  const releaseArtifactEntryFor = (artifactPath) => {
-    const entries = releaseManifest?.artifacts;
-    if (Array.isArray(entries)) {
-      return entries.find((candidate) => candidate?.path === artifactPath) ?? null;
-    }
-    const entry = entries?.[artifactPath];
-    return entry && typeof entry === "object" ? entry : null;
-  };
-  const releaseHashFor = (artifactPath) => {
-    if (isDraftBundle) {
-      return draftManifest?.artifacts?.[artifactPath]?.sha256 ?? null;
-    }
-    const entries = releaseManifest?.artifacts;
-    if (Array.isArray(entries)) {
-      const entry = entries.find((candidate) => candidate?.path === artifactPath);
-      return entry?.sha256 ?? null;
-    }
-    const entry = entries?.[artifactPath];
-    return typeof entry === "string" ? entry : entry?.sha256 ?? null;
-  };
-  const releaseGateEntry = releaseArtifactEntryFor("filter.txt");
-  const gateArtifactLockMatchesRelease = isDraftBundle || (
-    gateArtifactLockContract &&
-    releaseManifest?.protocolVersion === gateArtifactLock.protocolVersion &&
-    releaseManifest?.gateArtifactVersion === gateArtifactLock.gateArtifactVersion &&
-    releaseManifest?.filterSubscriptionUrl === gateArtifactLock.filterSubscriptionUrl &&
-    releaseGateEntry?.version === gateArtifactLock.gateArtifactVersion &&
-    releaseGateEntry?.bytes === gateLockEntry.bytes &&
-    releaseGateEntry?.sha256 === gateLockEntry.sha256 &&
-    releaseGateEntry?.installedRulesSha256 === gateLockEntry.installedRulesSha256
-  );
-  const artifactHashesMatchRelease = [markerFilter, userscript].every(
-    (artifact) =>
-      !artifact?.missing && releaseHashFor(artifact.path) === artifact.sha256,
-  );
-  const installedRulesHashMatchesRelease = isDraftBundle ||
-    (!markerFilter?.missing &&
-      releaseArtifactEntryFor("filter.txt")?.installedRulesSha256 ===
-        installedFilterRulesSha256(markerFilter.content));
-  const userscriptCanonicalTextHashMatchesRelease = isDraftBundle ||
-    (!userscript?.missing &&
-      releaseArtifactEntryFor("hotdeal-focus.user.js")?.canonicalTextSha256 ===
-        canonicalTextSha256(userscript.content));
-  const releaseSourceHashFor = (artifactPath) => {
-    const entry = releaseManifest?.sourceIntegrity?.[artifactPath];
-    return typeof entry === "string" ? entry : entry?.sha256 ?? null;
-  };
-  const sourceIntegrityPaths = Object.keys(
-    releaseManifest?.sourceIntegrity ?? {},
-  );
-  const sourceHashesMatchRelease = isDraftBundle
-    ? draftManifestContract
-    : sourceIntegrityPaths.length > 0 &&
-      sourceIntegrityPaths.every((artifactPath) => {
-        const artifact = byPath.get(artifactPath);
-        return (
-          artifact !== undefined &&
-          !artifact.missing &&
-          releaseSourceHashFor(artifactPath) === artifact.sha256
-        );
-      });
-  const expectedConfigHash =
-    (isDraftBundle
-      ? draftManifest?.artifacts?.["config/sites.json"]?.sha256
-      : releaseManifest?.configSha256 ??
-        releaseManifest?.config_sha256 ??
-        releaseManifest?.config?.sha256 ??
-        releaseHashFor("config/sites.json"));
-  const configHashMatchesRelease =
-    !configArtifact?.missing && expectedConfigHash === configArtifact.sha256;
-  const releaseProtocolVersion =
-    (isDraftBundle
-      ? draftManifest?.protocolVersion
-      : releaseManifest?.protocolVersion ?? releaseManifest?.protocol_version);
-  const markerProtocolVersions = new Set(
-    markerRules.flatMap((rule) => {
-      return [...rule.selector.matchAll(
-        /data-hotdeal-focus-protocol=["']([^"']+)["']/gu,
-      )].map((match) => match[1]);
-    }),
-  );
-  const markerHeaderProtocolVersions = markerFilter?.missing
-    ? []
-    : [...markerFilter.content.matchAll(/^! Hotdeal-Focus-Protocol:\s*(\d+)\s*$/gmu)]
-        .map((match) => Number(match[1]));
+    !/proveExtendedCssRelease|extended-css-release-proof|engineStylePresence/u.test(
+      userscript.content,
+    );
+
   let behaviorBaseline = null;
   try {
     behaviorBaseline = JSON.parse(behaviorBaselineArtifact?.content ?? "null");
   } catch {
     behaviorBaseline = null;
   }
-  const protocolMajorStable =
-    releaseProtocolVersion === READER_GATE_PROTOCOL_VERSION &&
-    behaviorBaseline?.protocol_major === READER_GATE_PROTOCOL_VERSION;
-  const userscriptVersion = userscript?.content?.match(
-    /^\/\/\s*@version\s+([^\s]+)\s*$/mu,
-  )?.[1];
-  const releaseVersion =
-    (isDraftBundle
-      ? draftManifest?.releaseVersion
-      : releaseManifest?.version ??
-        releaseManifest?.releaseVersion ??
-        releaseManifest?.release_version);
+  const approvedVariants =
+    approvedState?.schemaVersion === 1 && Array.isArray(approvedState.variants)
+      ? approvedState.variants
+      : [];
   const expectedReleaseCoverage = {
     siteCount: config.sites.length,
     layoutCount: actualLayoutCount,
@@ -2313,16 +2245,124 @@ async function buildIntegrityManifest(
               })),
           })),
       })),
-    approvedVariantCount:
-      approvedState?.schemaVersion === 1 && Array.isArray(approvedState.variants)
-        ? approvedState.variants.length
-        : 0,
+    approvedVariantCount: approvedVariants.length,
   };
-  const releaseCoverageMatchesConfig = isDraftBundle ||
-    canonicalJson(releaseManifest?.coverage ?? null) ===
-      canonicalJson(expectedReleaseCoverage);
-  const generatorVersion =
-    releaseManifest?.generatorVersion ?? releaseManifest?.generator_version;
+  const latestApprovedVariant = approvedVariants.reduce(
+    (latest, variant) =>
+      !latest || compareSemanticVersions(variant.releaseVersion, latest.releaseVersion) > 0
+        ? variant
+        : latest,
+    null,
+  );
+  const expectedPromotion = latestApprovedVariant
+    ? {
+        candidateSha256: latestApprovedVariant.candidateSha256,
+        evidenceSha256: latestApprovedVariant.evidenceSha256,
+        draftArtifactSetSha256: latestApprovedVariant.draftArtifactSetSha256,
+      }
+    : null;
+  const requiredSourcePaths = [
+    "filter-static.txt",
+    "config/sites.json",
+    "package.json",
+    "package-lock.json",
+    "tests/fixtures/dom-regressions.json",
+    "tests/fixtures/behavior-baseline.json",
+    "state/release-high-water.json",
+    ...(approvedStateArtifact?.missing ? [] : ["state/approved-variants.json"]),
+  ].sort();
+  const sourceIntegrityContract = !isDraftBundle &&
+    exactObjectKeys(releaseManifest?.sourceIntegrity, requiredSourcePaths) &&
+    requiredSourcePaths.every((artifactPath) => {
+      const artifact = byPath.get(artifactPath);
+      const entry = releaseManifest.sourceIntegrity[artifactPath];
+      if (artifactPath === "state/release-high-water.json") {
+        if (
+          artifact?.missing ||
+          !exactObjectKeys(entry, ["sha256", "bytes", "mode", "recordCount"]) ||
+          entry.mode !== "append-only-prefix-v1" ||
+          !Number.isSafeInteger(entry.recordCount) ||
+          entry.recordCount < 0 ||
+          !releaseHighWater ||
+          !exactObjectKeys(releaseHighWater, ["bundleFormat", "records", "schemaVersion"]) ||
+          releaseHighWater.bundleFormat !== "hdf-public-bundle-v1" ||
+          releaseHighWater.schemaVersion !== 1 ||
+          !Array.isArray(releaseHighWater.records) ||
+          entry.recordCount !== releaseHighWater.records.length - 1
+        ) return false;
+        const prefixBytes = Buffer.from(canonicalJson({
+          bundleFormat: releaseHighWater.bundleFormat,
+          records: releaseHighWater.records.slice(0, entry.recordCount),
+          schemaVersion: releaseHighWater.schemaVersion,
+        }), "utf8");
+        return entry.bytes === prefixBytes.length && entry.sha256 === sha256(prefixBytes);
+      }
+      return !artifact?.missing &&
+        exactObjectKeys(entry, ["sha256", "bytes"]) &&
+        entry.sha256 === artifact.sha256 &&
+        entry.bytes === artifact.bytes;
+    });
+  const publicArtifact = releaseManifest?.artifacts?.["hotdeal-focus.user.js"];
+  const highWaterCurrent = releaseHighWater?.records?.at?.(-1);
+  const highWaterCurrentContract = !isDraftBundle &&
+    exactObjectKeys(highWaterCurrent, [
+      "bundleSha256", "manifest", "releaseVersion", "userscript",
+    ]) &&
+    exactObjectKeys(highWaterCurrent?.manifest, ["bytes", "sha256"]) &&
+    exactObjectKeys(highWaterCurrent?.userscript, [
+      "bytes", "canonicalTextSha256", "sha256",
+    ]) &&
+    highWaterCurrent.releaseVersion === releaseManifest?.releaseVersion &&
+    highWaterCurrent.manifest.bytes === releaseManifestArtifact?.bytes &&
+    highWaterCurrent.manifest.sha256 === releaseManifestArtifact?.sha256 &&
+    highWaterCurrent.userscript.bytes === userscript?.bytes &&
+    highWaterCurrent.userscript.sha256 === userscript?.sha256 &&
+    highWaterCurrent.userscript.canonicalTextSha256 === canonicalTextSha256(
+      userscript?.content ?? "",
+    ) &&
+    highWaterCurrent.bundleSha256 === publicBundleSha256(
+      Buffer.from(releaseManifestArtifact?.content ?? "", "utf8"),
+      Buffer.from(userscript?.content ?? "", "utf8"),
+    );
+  const releaseManifestContract = !isDraftBundle &&
+    exactObjectKeys(releaseManifest, [
+      "schemaVersion",
+      "status",
+      "releaseVersion",
+      "protocolVersion",
+      "installUrl",
+      "generatorVersion",
+      "rollback_of",
+      "configSha256",
+      "coverage",
+      "promotion",
+      "artifacts",
+      "sourceIntegrity",
+    ]) &&
+    releaseManifest.schemaVersion === 2 &&
+    releaseManifest.status === "release-ready" &&
+    releaseManifest.protocolVersion === READER_GATE_PROTOCOL_VERSION &&
+    releaseManifest.installUrl === READER_GATE_INSTALL_URL &&
+    releaseManifest.releaseVersion === userscriptVersion &&
+    releaseManifest.generatorVersion === releaseManifest.releaseVersion &&
+    releaseManifest.rollback_of === config.metadata.rollback_of &&
+    releaseManifest.configSha256 === configArtifact?.sha256 &&
+    canonicalJson(releaseManifest.coverage) === canonicalJson(expectedReleaseCoverage) &&
+    canonicalJson(releaseManifest.promotion) === canonicalJson(expectedPromotion) &&
+    exactObjectKeys(releaseManifest.artifacts, ["hotdeal-focus.user.js"]) &&
+    exactObjectKeys(publicArtifact, [
+      "sha256",
+      "bytes",
+      "version",
+      "canonicalTextSha256",
+    ]) &&
+    publicArtifact.sha256 === userscript?.sha256 &&
+    publicArtifact.bytes === userscript?.bytes &&
+    publicArtifact.version === userscriptVersion &&
+    publicArtifact.canonicalTextSha256 === canonicalTextSha256(userscript.content) &&
+    highWaterCurrentContract &&
+    sourceIntegrityContract;
+
   const checks = {
     requiredSevenSites:
       missingSiteIds.length === 0 &&
@@ -2333,44 +2373,35 @@ async function buildIntegrityManifest(
       (layout) => layout.desktop || layout.mobile,
     ),
     everyLayoutInStaticFilter: layouts.every((layout) => layout.staticCovered),
-    markerGateContract: markerGateCovered,
-    prelockGateContract: prelockGateCovered,
-    gateArtifactLockContract,
-    gateArtifactLockMatchesRelease,
     userscriptContract: userscriptContractCovered,
-    releaseManifestContract:
+    draftManifestContract: !isDraftBundle || draftManifestContract,
+    releaseManifestContract: isDraftBundle || releaseManifestContract,
+    publicArtifactSetUserscriptOnly:
+      isDraftBundle || exactObjectKeys(releaseManifest?.artifacts, ["hotdeal-focus.user.js"]),
+    userscriptCanonicalTextHashMatchesRelease:
+      isDraftBundle || publicArtifact?.canonicalTextSha256 ===
+        canonicalTextSha256(userscript?.content ?? ""),
+    sourceHashesMatchRelease: isDraftBundle ? draftManifestContract : sourceIntegrityContract,
+    configHashMatchesRelease:
       isDraftBundle
-        ? draftManifestContract
-        : Boolean(releaseManifest) &&
-          releaseProtocolVersion === READER_GATE_PROTOCOL_VERSION &&
-          typeof generatorVersion === "string" &&
-          generatorVersion.length > 0 &&
-          canonicalJson(Object.keys(releaseManifest.artifacts ?? {}).sort()) ===
-            canonicalJson(["filter.txt", "hotdeal-focus.user.js"]),
-    artifactHashesMatchRelease,
-    installedRulesHashMatchesRelease,
-    userscriptCanonicalTextHashMatchesRelease,
-    sourceHashesMatchRelease,
-    configHashMatchesRelease,
-    releaseCoverageMatchesConfig,
-    protocolMajorStable,
-    markerProtocolMajorStable:
-      markerProtocolVersions.size === 1 &&
-      markerProtocolVersions.has(String(READER_GATE_PROTOCOL_VERSION)) &&
-      markerHeaderProtocolVersions.length === 1 &&
-      markerHeaderProtocolVersions[0] === READER_GATE_PROTOCOL_VERSION &&
-      !markerFilter?.missing &&
-      !markerFilter.content.includes("hdf-v1-") &&
-      !/data-hotdeal-focus-protocol=["']1["']/u.test(markerFilter.content),
+        ? draftManifest?.artifacts?.["config/sites.json"]?.sha256 === configArtifact?.sha256
+        : releaseManifest?.configSha256 === configArtifact?.sha256,
+    releaseCoverageMatchesConfig:
+      isDraftBundle || canonicalJson(releaseManifest?.coverage) ===
+        canonicalJson(expectedReleaseCoverage),
+    protocolMajorStable:
+      (isDraftBundle ? draftManifest?.protocolVersion : releaseManifest?.protocolVersion) ===
+        READER_GATE_PROTOCOL_VERSION &&
+      behaviorBaseline?.protocol_major === READER_GATE_PROTOCOL_VERSION,
     userscriptVersionMatchesRelease:
-      typeof userscriptVersion === "string" && userscriptVersion === releaseVersion,
-    distinctStaticAndMarkerFilters:
-      !markerFilter?.missing &&
-      !staticFilter?.missing &&
-      markerFilter.sha256 !== staticFilter.sha256,
+      typeof userscriptVersion === "string" &&
+      userscriptVersion === (isDraftBundle
+        ? draftManifest?.releaseVersion
+        : releaseManifest?.releaseVersion),
+    installUrlContract: isDraftBundle || releaseManifest?.installUrl === READER_GATE_INSTALL_URL,
   };
   const manifest = {
-    schemaVersion: 1,
+    schemaVersion: 2,
     generatedAt: new Date().toISOString(),
     config: {
       path: path.relative(PROJECT_ROOT, DEFAULT_CONFIG_PATH).replaceAll(path.sep, "/"),
@@ -2385,20 +2416,16 @@ async function buildIntegrityManifest(
       missingSiteIds,
       unexpectedSiteIds,
     },
-    artifacts: artifacts.map(({ content: _content, absolutePath: _absolutePath, ...item }) => item),
+    artifacts: artifacts.map(
+      ({ content: _content, absolutePath: _absolutePath, ...item }) => item,
+    ),
     releaseManifest: releaseManifest
       ? {
           sha256: releaseManifestArtifact.sha256,
-          protocolVersion: releaseProtocolVersion,
-          generatorVersion,
-        }
-      : null,
-    gateArtifactLock: gateArtifactLock
-      ? {
-          sha256: gateArtifactLockArtifact.sha256,
-          protocolVersion: gateArtifactLock.protocolVersion,
-          gateArtifactVersion: gateArtifactLock.gateArtifactVersion,
-          filterSubscriptionUrl: gateArtifactLock.filterSubscriptionUrl,
+          schemaVersion: releaseManifest.schemaVersion,
+          protocolVersion: releaseManifest.protocolVersion,
+          generatorVersion: releaseManifest.generatorVersion,
+          installUrl: releaseManifest.installUrl,
         }
       : null,
     coverage: layouts,
@@ -2619,7 +2646,7 @@ async function navigate(page, targetUrl, timeoutMs, externalResponseObserver = n
         });
         await page.evaluate((name) => {
           window.name = name;
-        }, `hdf-provenance:${navigationProof.navigationNonce}`);
+        }, `hdf-provenance:${navigationProof.encoded}`);
       }
       response = await page.goto(targetUrl, {
         waitUntil: "domcontentloaded",
@@ -3344,160 +3371,59 @@ function staticRuntimeConsistencyFailures(
 
 async function navigateThroughAlgumon(page, target, timeoutMs, expectedDomain = null) {
   if (!target.algumon) return navigate(page, target.url, timeoutMs);
-  if (target.algumon.verifiedResolution) {
-    const signedUrl = exactSignedAlgumonDealUrl(
-      target.algumon.redirectUrl,
-      target.algumon.dealId,
-    );
-    const useTimeAcquisition = target.source === "algumon-latest"
-      ? signedRelayAcquisitionEvidence(
-          target.algumon.redirectUrl,
-          target.algumon.dealId,
-        )
-      : null;
-    const resolution = target.algumon.verifiedResolution;
-    if (
-      !signedUrl ||
-      (target.source === "algumon-latest" &&
-        (!target.relayAcquisition ||
-          useTimeAcquisition?.signedUrl !== target.relayAcquisition.signedUrl)) ||
-      resolution.relayFetchUrl !== signedUrl.href ||
-      resolution.resolvedDestination !== target.url ||
-      !/^[0-9a-f]{64}$/u.test(resolution.responseSha256 ?? "") ||
-      resolution.responseStatus !== 200
-    ) {
-      throw new Error("verified Algumon relay evidence is internally inconsistent");
-    }
-    const destination = new URL(target.url);
-    const expectedTargetDomain = expectedDomain || destination.hostname;
-    if (!hostnameMatches(destination.hostname, expectedTargetDomain)) {
-      throw new Error(`verified Algumon relay ended outside ${expectedTargetDomain}`);
-    }
-    const navigation = await navigate(
-      page,
-      seededNavigationUrl(
-        target.url,
-        target.algumon.siteId,
-        target.algumon.title,
-        target.algumon.dealId,
-        target.algumon.redirectUrl,
-      ),
-      timeoutMs,
-    );
-    return {
-      ...navigation,
-      viaAlgumon: true,
-      provenanceMode: "single-fetch-signed-relay",
-      relayFetchUrl: resolution.relayFetchUrl,
-      resolvedDestination: resolution.resolvedDestination,
-      popupNavigation: [],
-      relayResponseSha256: resolution.responseSha256,
-    };
-  }
-  await navigate(page, target.algumon.discoveryUrl, timeoutMs);
-  const expectedRedirect = new URL(target.algumon.redirectUrl);
-  const redirectPath = expectedRedirect.pathname;
-  const redirectLinks = page.locator('a[href*="/l/d/"]');
-  const matchingIndexes = await redirectLinks.evaluateAll(
-    (anchors, expectedHref) => anchors.flatMap((anchor, index) => {
-      try {
-        return new URL(anchor.href).href === expectedHref ? [index] : [];
-      } catch {
-        return [];
-      }
-    }),
-    expectedRedirect.href,
-  );
-  if (matchingIndexes.length < 1) {
+  if (!target.algumon.verifiedResolution) {
     throw new Error(
-      `Algumon click proof found no ${redirectPath} link`,
+      "relay-contract-failure: source-click fallback is disabled; use a sealed signed relay",
     );
   }
-  const anchor = redirectLinks.nth(matchingIndexes[0]);
-  await anchor.scrollIntoViewIfNeeded();
-  const clickedUrl = new URL(await anchor.getAttribute("href"), page.url());
+  const signedUrl = exactSignedAlgumonDealUrl(
+    target.algumon.redirectUrl,
+    target.algumon.dealId,
+  );
+  const useTimeAcquisition = target.source === "algumon-latest"
+    ? recordedSignedRelayAcquisitionEvidence(
+        target.algumon.redirectUrl,
+        target.algumon.dealId,
+        target.relayAcquisition,
+      )
+    : null;
+  const resolution = target.algumon.verifiedResolution;
   if (
-    clickedUrl.href !== expectedRedirect.href ||
-    clickedUrl.origin !== ALGUMON_ORIGIN ||
-    clickedUrl.pathname !== redirectPath
+    !signedUrl ||
+    (target.source === "algumon-latest" &&
+      (!target.relayAcquisition ||
+        useTimeAcquisition?.signedUrl !== target.relayAcquisition.signedUrl)) ||
+    resolution.relayFetchUrl !== signedUrl.href ||
+    resolution.resolvedDestination !== target.url ||
+    !/^[0-9a-f]{64}$/u.test(resolution.responseSha256 ?? "") ||
+    resolution.responseStatus !== 200
   ) {
-    throw new Error("Algumon click proof selected a non-exact redirect URL");
+    throw new Error("verified Algumon relay evidence is internally inconsistent");
   }
-  const context = page.context();
-  let entryRequest = null;
-  const navigationUrls = [];
-  const observeRequest = (request) => {
-    try {
-      const requestUrl = new URL(request.url());
-      if (
-        !entryRequest &&
-        hostnameMatches(requestUrl.hostname, "algumon.com") &&
-        requestUrl.pathname === redirectPath
-      ) {
-        entryRequest = request;
-      }
-    } catch {}
-  };
-  context.on("request", observeRequest);
-  const popupPromise = page.waitForEvent("popup", { timeout: timeoutMs });
-  let popup;
-  try {
-    [popup] = await Promise.all([
-      popupPromise,
-      anchor.click({ timeout: timeoutMs }),
-    ]);
-    const playwrightOpener = await popup.opener();
-    if (playwrightOpener !== page) {
-      throw new Error("Algumon popup was not created by the audited source page");
-    }
-    popup.on("framenavigated", (frame) => {
-      if (frame === popup.mainFrame()) navigationUrls.push(frame.url());
-    });
-    navigationUrls.push(popup.url());
-    await popup.waitForURL(
-      (url) =>
-        url.protocol === "https:" &&
-        !hostnameMatches(url.hostname, "algumon.com"),
-      { timeout: timeoutMs },
-    );
-    await settlePage(popup, timeoutMs);
-  } finally {
-    context.off("request", observeRequest);
+  const destination = new URL(target.url);
+  const expectedTargetDomain = expectedDomain || destination.hostname;
+  if (!hostnameMatches(destination.hostname, expectedTargetDomain)) {
+    throw new Error(`verified Algumon relay ended outside ${expectedTargetDomain}`);
   }
-  if (!entryRequest) {
-    throw new Error("Algumon popup request chain did not begin at the clicked redirect");
-  }
-  const relayFetchUrl = entryRequest.url();
-  if (relayFetchUrl !== clickedUrl.href || entryRequest.redirectedTo() !== null) {
-    throw new Error("Algumon relay fetch was not the exact non-redirecting signed request");
-  }
-  const finalUrl = popup.url();
-  const expectedTargetDomain = expectedDomain || new URL(target.url).hostname;
-  if (!hostnameMatches(new URL(finalUrl).hostname, expectedTargetDomain)) {
-    throw new Error(`Algumon popup ended outside ${expectedTargetDomain}`);
-  }
-  const popupSecurity = await popup.evaluate(() => ({
-    openerIsNull: window.opener === null,
-    referrer: document.referrer,
-    nameCleared: window.name === "",
-  }));
-  if (
-    popupSecurity.openerIsNull !== true ||
-    popupSecurity.referrer !== `${ALGUMON_ORIGIN}/` ||
-    popupSecurity.nameCleared !== true
-  ) {
-    throw new Error("Algumon popup opener/referrer/seed cleanup contract failed");
-  }
+  const navigation = await navigate(
+    page,
+    seededNavigationUrl(
+      target.url,
+      target.algumon.siteId,
+      target.algumon.title,
+      target.algumon.dealId,
+      target.algumon.redirectUrl,
+    ),
+    timeoutMs,
+  );
   return {
-    finalUrl,
-    status: null,
+    ...navigation,
     viaAlgumon: true,
-    page: popup,
-    openedNewContext: true,
-    relayFetchUrl,
-    resolvedDestination: finalUrl,
-    popupNavigation: [...new Set(navigationUrls.filter(Boolean))],
-    popupSecurity,
+    provenanceMode: "sealed-single-fetch-signed-relay",
+    relayFetchUrl: resolution.relayFetchUrl,
+    resolvedDestination: resolution.resolvedDestination,
+    popupNavigation: [],
+    relayResponseSha256: resolution.responseSha256,
   };
 }
 
@@ -3634,7 +3560,7 @@ function seededNavigationProof(url) {
   try {
     const seed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
     return /^hdf-[0-9a-z]{28}$/u.test(String(seed?.navigationNonce ?? ""))
-      ? { navigationNonce: seed.navigationNonce }
+      ? { encoded, navigationNonce: seed.navigationNonce }
       : null;
   } catch {
     return null;
@@ -4935,6 +4861,7 @@ function validateDiagnostics(diagnostics, requiredRoles) {
     "roles",
     "layoutAliases",
     "semanticProjectionCount",
+    "standaloneCascadeProof",
     "commentControlProjection",
     "visibleLeakCount",
   ]);
@@ -4956,6 +4883,24 @@ function validateDiagnostics(diagnostics, requiredRoles) {
   }
   if (!Number.isInteger(diagnostics.visibleLeakCount) || diagnostics.visibleLeakCount !== 0) {
     failures.push(`diagnostics.visibleLeakCount is ${diagnostics.visibleLeakCount ?? "missing"}`);
+  }
+  const standaloneProof = diagnostics.standaloneCascadeProof;
+  if (
+    !standaloneProof ||
+    typeof standaloneProof !== "object" ||
+    Array.isArray(standaloneProof) ||
+    canonicalJson(Object.keys(standaloneProof).sort()) !== canonicalJson([
+      "authority",
+      "frameCount",
+      "nonceBound",
+      "unownedHidden",
+    ].sort()) ||
+    standaloneProof.authority !== "userscript-runtime-style" ||
+    standaloneProof.frameCount !== 2 ||
+    standaloneProof.nonceBound !== true ||
+    standaloneProof.unownedHidden !== true
+  ) {
+    failures.push("diagnostics.standaloneCascadeProof is not the exact two-frame proof");
   }
   if (
     !Number.isInteger(diagnostics.semanticProjectionCount) ||
@@ -5011,7 +4956,6 @@ async function auditUserscriptGate(
   page,
   requiredRoles,
   timeoutMs,
-  markerSelectors,
   runtimeExpectation = "relay-positive",
   allowedCommentControlSelectorDigests = [],
 ) {
@@ -5043,10 +4987,13 @@ async function auditUserscriptGate(
           diagnostics?.semanticProjectionCount === 1 &&
           Array.isArray(diagnostics?.layoutAliases) &&
           diagnostics.layoutAliases.length >= 1 &&
-          preauthorized?.kind === "preauthorized-nonce-control" &&
+          diagnostics?.standaloneCascadeProof?.authority === "userscript-runtime-style" &&
+          diagnostics?.standaloneCascadeProof?.frameCount === 2 &&
+          diagnostics?.standaloneCascadeProof?.nonceBound === true &&
+          diagnostics?.standaloneCascadeProof?.unownedHidden === true &&
+          preauthorized?.kind === "preauthorized-userscript-style-control" &&
           preauthorized?.schemaVersion === protocolVersion &&
           preauthorized?.gmAddElementCalls === 1 &&
-          preauthorized?.extendedCssCallbacks >= 2 &&
           document.querySelectorAll(
             'style[data-hotdeal-focus-runtime-style="2"]',
           ).length === 1;
@@ -5059,7 +5006,7 @@ async function auditUserscriptGate(
     )
     .catch(() => {});
 
-  return page.evaluate(({ rolesToRequire, selectors, allowedControlSelectorDigests }) => {
+  return page.evaluate(({ rolesToRequire, allowedControlSelectorDigests }) => {
     const visible = (element) => {
       const style = window.getComputedStyle(element);
       return (
@@ -5112,28 +5059,6 @@ async function auditUserscriptGate(
       html.style.getPropertyPriority("visibility") === "important" &&
       html.style.getPropertyValue("content-visibility") === "hidden" &&
       html.style.getPropertyPriority("content-visibility") === "important";
-    const markerMatchedNodes = new Set();
-    const markerSelectorErrors = [];
-    for (const selector of selectors) {
-      try {
-        for (const element of document.querySelectorAll(selector)) {
-          markerMatchedNodes.add(element);
-        }
-      } catch (error) {
-        markerSelectorErrors.push(String(error));
-      }
-    }
-    const bodyElements = [...document.body.querySelectorAll("*")];
-    const uncoveredUnmarkedNodes = bodyElements.filter(
-      (element) =>
-        !exactlyOwned(element) &&
-        !markerMatchedNodes.has(element),
-    );
-    const coveredKeptNodes = bodyElements.filter(
-      (element) =>
-        exactlyOwned(element) &&
-        markerMatchedNodes.has(element),
-    );
     const visibleWithoutKeep = [...document.body.querySelectorAll("*")]
       .filter(visible)
       .filter((element) => !exactlyOwned(element))
@@ -5215,7 +5140,6 @@ async function auditUserscriptGate(
           kind: preauthorized.kind,
           schemaVersion: preauthorized.schemaVersion,
           gmAddElementCalls: preauthorized.gmAddElementCalls,
-          extendedCssCallbacks: preauthorized.extendedCssCallbacks,
         }
       : null;
     const runtimeStyleCount = document.querySelectorAll(
@@ -5239,18 +5163,19 @@ async function auditUserscriptGate(
         zeroVisibleContent &&
         zeroFlash,
     };
-    const readyMarkerCoverage = {
+    const standaloneRuntimeCoverage = {
       applicable: ready,
-      selectorCount: selectors.length,
-      selectorErrorCount: markerSelectorErrors.length,
-      uncoveredUnmarkedCount: uncoveredUnmarkedNodes.length,
-      coveredKeptCount: coveredKeptNodes.length,
+      runtimeStyleCount,
+      visibleUnownedCount: visibleWithoutKeep.length,
+      standaloneCascadeProof: diagnostics?.standaloneCascadeProof ?? null,
       passed:
         ready &&
-        selectors.length > 0 &&
-        markerSelectorErrors.length === 0 &&
-        uncoveredUnmarkedNodes.length === 0 &&
-        coveredKeptNodes.length === 0,
+        runtimeStyleCount === 1 &&
+        visibleWithoutKeep.length === 0 &&
+        diagnostics?.standaloneCascadeProof?.authority === "userscript-runtime-style" &&
+        diagnostics?.standaloneCascadeProof?.frameCount === 2 &&
+        diagnostics?.standaloneCascadeProof?.nonceBound === true &&
+        diagnostics?.standaloneCascadeProof?.unownedHidden === true,
     };
     return {
       ready,
@@ -5258,11 +5183,7 @@ async function auditUserscriptGate(
       status,
       globalPaintLockIntact,
       blockedStateSafety,
-      readyMarkerCoverage,
-      markerSelectorCount: selectors.length,
-      markerSelectorErrors,
-      uncoveredUnmarkedCount: uncoveredUnmarkedNodes.length,
-      coveredKeptCount: coveredKeptNodes.length,
+      standaloneRuntimeCoverage,
       diagnostics,
       paintProbe,
       testOnlyAdguardControl,
@@ -5279,7 +5200,6 @@ async function auditUserscriptGate(
     };
   }, {
     rolesToRequire: requiredRoles,
-    selectors: markerSelectors,
     allowedControlSelectorDigests: allowedCommentControlSelectorDigests,
   });
 }
@@ -5427,25 +5347,25 @@ function userscriptGateFailures(gate, requiredRoles) {
     failures.push("userscript diagnostics are not exact reader-gate protocol 2");
   }
   if (
-    gate.testOnlyAdguardControl?.kind !== "preauthorized-nonce-control" ||
+    gate.testOnlyAdguardControl?.kind !== "preauthorized-userscript-style-control" ||
     gate.testOnlyAdguardControl?.schemaVersion !== READER_GATE_PROTOCOL_VERSION ||
-    gate.testOnlyAdguardControl?.gmAddElementCalls !== 1 ||
-    !(gate.testOnlyAdguardControl?.extendedCssCallbacks >= 2)
+    gate.testOnlyAdguardControl?.gmAddElementCalls !== 1
   ) {
-    failures.push("preauthorized AdGuard test control did not prove the two-frame fixture callback");
+    failures.push("userscript-manager style control did not provide exactly one GM style");
+  }
+  if (
+    gate.diagnostics?.standaloneCascadeProof?.authority !== "userscript-runtime-style" ||
+    gate.diagnostics?.standaloneCascadeProof?.frameCount !== 2 ||
+    gate.diagnostics?.standaloneCascadeProof?.nonceBound !== true ||
+    gate.diagnostics?.standaloneCascadeProof?.unownedHidden !== true
+  ) {
+    failures.push("userscript did not prove its standalone two-frame cascade authority");
   }
   if (gate.runtimeStyleCount !== 1) {
     failures.push(`runtime stylesheet cardinality is ${gate.runtimeStyleCount ?? "missing"}`);
   }
-  if (gate.markerSelectorCount < 1) failures.push("no manifest-matched marker filter selector applies");
-  if (gate.markerSelectorErrors.length > 0) {
-    failures.push(`marker filter selector errors: ${gate.markerSelectorErrors.join(" | ")}`);
-  }
-  if (gate.uncoveredUnmarkedCount > 0) {
-    failures.push(`${gate.uncoveredUnmarkedCount} unmarked nodes escape the real marker filter`);
-  }
-  if (gate.coveredKeptCount > 0) {
-    failures.push(`${gate.coveredKeptCount} kept nodes are hidden by the real marker filter`);
+  if (gate.standaloneRuntimeCoverage?.passed !== true) {
+    failures.push("standalone userscript runtime projection coverage is not exact");
   }
   if (!gate.paintProbe || gate.paintProbe.sampleCount < 1) {
     failures.push("document-start first-paint probe is missing");
@@ -5548,6 +5468,14 @@ async function createPageContext(
     (contextPolicy.exactResourceHosts ?? []).map((hostname) => normalizedHostname(hostname)),
   );
   const allowPublicHttpsSubresources = contextPolicy.allowPublicHttpsSubresources === true;
+  const blockAlgumonSubresources = contextPolicy.blockAlgumonSubresources === true;
+  const singleAlgumonDocumentUrl = contextPolicy.singleAlgumonDocumentUrl
+    ? canonicalHttpsUrl(
+        contextPolicy.singleAlgumonDocumentUrl,
+        "bounded Algumon source document URL",
+      )
+    : null;
+  let startedBoundedAlgumonDocument = false;
   const networkEvidenceRecorder = createNetworkPolicyEvidenceRecorder({
     allowPublicHttpsSubresources,
   });
@@ -5628,6 +5556,40 @@ async function createPageContext(
       return;
     }
     const isMainNavigation = isTopLevelNavigationRequest(request);
+    if (
+      singleAlgumonDocumentUrl &&
+      isMainNavigation &&
+      hostnameMatches(parsed.hostname, "algumon.com")
+    ) {
+      if (
+        parsed.href !== singleAlgumonDocumentUrl ||
+        startedBoundedAlgumonDocument
+      ) {
+        networkEvidenceRecorder.recordBlocked(
+          parsed.hostname,
+          request.resourceType(),
+          "bounded-algumon-source-document-redirect-or-repeat",
+          true,
+        );
+        await route.abort("blockedbyclient");
+        return;
+      }
+      startedBoundedAlgumonDocument = true;
+    }
+    if (
+      blockAlgumonSubresources &&
+      !isMainNavigation &&
+      hostnameMatches(parsed.hostname, "algumon.com")
+    ) {
+      networkEvidenceRecorder.recordBlocked(
+        parsed.hostname,
+        request.resourceType(),
+        "bounded-algumon-source-document-only",
+        false,
+      );
+      await route.abort("blockedbyclient");
+      return;
+    }
     const decision = networkRequestDecision(
       parsed.href,
       isMainNavigation,
@@ -5704,6 +5666,19 @@ async function createPageContext(
       parsed = new URL(webSocketRoute.url());
     } catch {
       await webSocketRoute.close({ code: 1008, reason: "invalid-url" });
+      return;
+    }
+    if (
+      blockAlgumonSubresources &&
+      hostnameMatches(parsed.hostname, "algumon.com")
+    ) {
+      networkEvidenceRecorder.recordBlocked(
+        parsed.hostname,
+        "websocket",
+        "bounded-algumon-source-document-only",
+        false,
+      );
+      await webSocketRoute.close({ code: 1008, reason: "network-policy" });
       return;
     }
     const decision = networkRequestDecision(
@@ -5838,34 +5813,14 @@ async function auditOneTarget({
   profileName,
   target,
   userscriptContent,
-  markerFilterContent,
   promotionCandidate,
   runtimeOnly,
   runDirectory,
   timeoutMs,
-  transitionBudget,
 }) {
   const runtimeExpectation = runtimeExpectationForTarget(target);
-  let auditedTarget = target;
+  const auditedTarget = target;
   let auditedLayout = layout;
-  let relayRefreshError = null;
-  if (runtimeExpectation === "relay-positive") {
-    try {
-      if (!transitionBudget) {
-        throw new Error("relay-contract-failure: transition budget is missing");
-      }
-      auditedTarget = await refreshLatestTargetRelayProof(
-        browser,
-        site,
-        profileName,
-        target,
-        timeoutMs,
-        transitionBudget,
-      );
-    } catch (error) {
-      relayRefreshError = error;
-    }
-  }
   const stem = safeFileStem([
     site.id,
     layout.id,
@@ -5882,6 +5837,17 @@ async function auditOneTarget({
     requestedUrl: auditedTarget.url,
     relayDestinationUrl: auditedTarget.algumon?.verifiedResolution?.resolvedDestination ?? null,
     relayAcquisition: auditedTarget.relayAcquisition ?? null,
+    algumonSeed: auditedTarget.algumon
+      ? {
+          discoveryUrl: auditedTarget.algumon.discoveryUrl ?? null,
+          redirectUrl: auditedTarget.algumon.redirectUrl,
+          dealId: auditedTarget.algumon.dealId,
+          siteId: auditedTarget.algumon.siteId,
+          title: auditedTarget.algumon.title ?? "",
+          commentCount: auditedTarget.algumon.commentCount ?? null,
+          verifiedResolution: auditedTarget.algumon.verifiedResolution,
+        }
+      : null,
     routeFamily: auditedTarget.routeFamily ?? null,
     configuredPathMatchCount: auditedTarget.configuredPathMatchCount ?? null,
     approvedRouteMatched: auditedTarget.approvedRouteMatched !== false,
@@ -5894,15 +5860,6 @@ async function auditOneTarget({
     failures: [],
   };
   let candidates = [];
-
-  if (relayRefreshError) {
-    result.failures.push(
-      `relay-positive proof refresh error: ${relayRefreshError?.stack ?? String(relayRefreshError)}`,
-    );
-    result.capturedAt = new Date().toISOString().replace(/\.\d{3}Z$/u, "Z");
-    result.passed = false;
-    return { result, candidates };
-  }
 
   const navigationDomains = [...new Set(site.layouts.map((candidate) => candidate.domain))];
   const exactChallengeResourceHosts = exactChallengeResourceHostsForSite(site.id);
@@ -6222,13 +6179,8 @@ async function auditOneTarget({
     browser,
     profileName,
     userscriptContent,
-    [
-      ...new Set([
-        ...navigationDomains,
-        ...(auditedTarget.algumon ? ["algumon.com"] : []),
-      ]),
-    ],
-    resourceDomainsForSite(site, Boolean(auditedTarget.algumon)),
+    navigationDomains,
+    resourceDomainsForSite(site),
     {
       exactResourceHosts: exactChallengeResourceHosts,
       storageState,
@@ -6352,16 +6304,10 @@ async function auditOneTarget({
       );
     }
     const requiredRoles = requiredRolesForLayout(auditedLayout);
-    const markerSelectors = markerSelectorsForUrl(
-      markerFilterContent,
-      auditedLayout,
-      navigation.finalUrl,
-    );
     const gate = await auditUserscriptGate(
       auditedPage,
       requiredRoles,
       timeoutMs,
-      markerSelectors,
       runtimeExpectation,
       commentControlSelectorDigestsForUrl(auditedLayout, navigation.finalUrl),
     );
@@ -6442,7 +6388,7 @@ async function auditOneTarget({
     result.userscript.networkPolicy = runtimeNetworkPolicy;
     const runtimeNetworkFailures = networkFidelityFailures(
       runtimeNetworkPolicy,
-      resourceDomainsForSite(site, Boolean(auditedTarget.algumon)),
+      resourceDomainsForSite(site),
       runtimeRoleResourceEvidence,
     );
     if (runtimeNetworkFailures.length > 0) {
@@ -6488,7 +6434,7 @@ async function auditOneTarget({
         result.userscript.networkPolicy = runtimeNetworkPolicy;
         const runtimeNetworkFailures = networkFidelityFailures(
           runtimeNetworkPolicy,
-          resourceDomainsForSite(site, Boolean(auditedTarget.algumon)),
+          resourceDomainsForSite(site),
           [],
         );
         if (runtimeNetworkFailures.length > 0) {
@@ -6512,7 +6458,6 @@ async function auditOneTarget({
 async function auditSyntheticNoFlashFixture(
   browser,
   userscriptContent,
-  markerFilterContent,
   config,
   runDirectory,
   timeoutMs,
@@ -6563,7 +6508,6 @@ window.setTimeout(() => {
       session.page,
       [...REQUIRED_ROLE_NAMES],
       timeoutMs,
-      markerSelectorsForUrl(markerFilterContent, clienLayout, fixtureUrl),
       "relay-positive",
       commentControlSelectorDigestsForUrl(clienLayout, fixtureUrl),
     );
@@ -6632,7 +6576,9 @@ async function auditSyntheticAlgumonRelayFixtures(
     }
     return link.click();
   };
-  const validModes = ["normal", "middle", "control", "meta", "shift", "enter"];
+  // Same-tab navigation is intentional: the userscript captures provenance before
+  // the browser follows the signed relay and does not synthesize a popup.
+  const validModes = ["normal"];
   const attacks = [
     { id: "server-redirect", status: 302, headers: { location: destinationUrl(880001) }, body: "" },
     { id: "status-error", status: 500, body: relayHtml(destinationUrl(880002)) },
@@ -6729,49 +6675,26 @@ async function auditSyntheticAlgumonRelayFixtures(
           fixture.failures.push("invalid signed Algumon link was not made inert");
         }
       } else {
-        const popupPromise = page.waitForEvent("popup", { timeout: timeoutMs });
-        const [popup] = await Promise.all([popupPromise, activate(page, mode)]);
-        observedPopup = popup;
-        if (response) {
-          if (!popup.isClosed()) {
-            await popup.waitForEvent("close", { timeout: timeoutMs }).catch(() => {});
-          }
-          if (!popup.isClosed()) {
-            fixture.failures.push("rejected relay popup remained open");
-          }
-          if (destinationRequestCount !== 0) {
-            fixture.failures.push("rejected relay reached a destination");
-          }
-        } else {
-          await popup.waitForURL(
-            (url) => hostnameMatches(url.hostname, "clien.net"),
-            { timeout: timeoutMs },
-          );
-          await popup.waitForFunction(() =>
-            document.documentElement.getAttribute("data-hotdeal-focus-ready") === "1",
-          null, { timeout: timeoutMs });
-          const security = await popup.evaluate(() => ({
-            openerIsNull: window.opener === null,
-            referrer: document.referrer,
-            name: window.name,
-            fragment: location.hash,
-            state: document.documentElement.getAttribute("data-hotdeal-focus-state"),
-          }));
-          fixture.security = security;
-          if (
-            !security.openerIsNull || security.referrer !== `${ALGUMON_ORIGIN}/` ||
-            security.name !== "" ||
-            security.fragment !== "" || security.state !== "ready"
-          ) {
-            fixture.failures.push("valid relay lost popup security, seed cleanup, or reader readiness");
-          }
-          if ((await popup.opener()) !== page) {
-            fixture.failures.push("valid relay popup was not attributed to the source page");
-          }
+        await activate(page, mode);
+        await page.waitForURL(
+          (url) => hostnameMatches(url.hostname, "clien.net"),
+          { timeout: timeoutMs },
+        );
+        await page.waitForFunction(() =>
+          document.documentElement.getAttribute("data-hotdeal-focus-ready") === "1",
+        null, { timeout: timeoutMs });
+        const security = await page.evaluate(() => ({
+          name: window.name,
+          fragment: location.hash,
+          state: document.documentElement.getAttribute("data-hotdeal-focus-state"),
+        }));
+        fixture.security = security;
+        if (
+          security.name !== "" || security.fragment !== "" || security.state !== "ready" ||
+          !page.url().startsWith(finalUrl)
+        ) {
+          fixture.failures.push("valid same-tab relay lost seed cleanup or reader readiness");
         }
-      }
-      if (page.url() !== discoveryUrl) {
-        fixture.failures.push("Algumon source page navigated during relay handling");
       }
       const expectedSignedRequests = popupBlocked || inert ? 0 : 1;
       if (signedRequestCount !== expectedSignedRequests) {
@@ -6806,20 +6729,6 @@ async function auditSyntheticAlgumonRelayFixtures(
   for (const mode of validModes) {
     await runCase({ id: `valid-${mode}`, mode });
   }
-  for (const attack of attacks) {
-    await runCase({ id: `reject-${attack.id}`, response: attack });
-  }
-  await runCase({
-    id: "reject-changed-signature",
-    query: "v=not-a-32-hex-signature&t=1760000000000",
-    inert: true,
-  });
-  await runCase({
-    id: "reject-extra-signature-key",
-    query: "v=0123456789abcdef0123456789abcdef&t=1760000000000&x=1",
-    inert: true,
-  });
-  await runCase({ id: "reject-popup-blocked", popupBlocked: true });
   if (onlyFixtureIds) {
     const observedIds = new Set(result.fixtures.map((fixture) => fixture.id));
     result.failures.push(
@@ -6838,7 +6747,6 @@ async function auditSyntheticAlgumonRelayFixtures(
 async function auditSyntheticEdgeFixtures(
   browser,
   userscriptContent,
-  markerFilterContent,
   config,
   runDirectory,
   timeoutMs,
@@ -6851,33 +6759,10 @@ async function auditSyntheticEdgeFixtures(
   const longBody =
     "This synthetic hot deal body contains enough neutral explanatory text to validate " +
     "the reader role while preserving formatting, media, purchase context, and comments.";
-  const clienGateRules = parseAdguardCosmeticRules(markerFilterContent).filter(
-    (rule) => rule.domains.some((domain) => hostnameMatches("www.clien.net", domain)),
-  );
-  const clienPaintGateCss = clienGateRules
-    .filter((rule) => rule.operator === "#$#")
-    .map((rule) => rule.cssText)
-    .join("\n");
-  const clienGateCss = clienGateRules
-    .flatMap((rule) => {
-      if (rule.operator === "#$#") return [rule.cssText];
-      if (
-        rule.operator === "#?#" &&
-        rule.selector.includes("data-hotdeal-focus-keep")
-      ) {
-        return [rule.cssText];
-      }
-      return [];
-    })
-    .join("\n");
-  if (!clienPaintGateCss || !clienGateCss) {
-    throw new Error("edge fixtures require parsed Clien domain gate CSS");
-  }
   const fixtures = [
     {
       id: "fixed-gate-descendant-and-top-layer-zero-paint",
       fixedGateOnly: true,
-      includeMarkerGate: true,
       lockedPixelProbe: true,
       headHtml: `<style data-edge-lock-attack-style>` +
         `html,html body,html body *{transition-property:opacity,visibility,clip-path!important;` +
@@ -6909,7 +6794,6 @@ async function auditSyntheticEdgeFixtures(
     },
     {
       id: "preseeded-ready-spoof-relocks-zero-paint-then-ready",
-      includeMarkerGate: true,
       preseedProtocolReady: true,
       lockedPixelProbe: true,
       headHtml: `<style data-edge-lock-attack-style>` +
@@ -7347,7 +7231,7 @@ async function auditSyntheticEdgeFixtures(
     const session = await createPageContext(
       browser,
       "desktop",
-      fixture.oracleOnly || fixture.fixedGateOnly ? null : userscriptContent,
+      fixture.oracleOnly ? null : userscriptContent,
       ["clien.net"],
     );
     const fixtureResult = {
@@ -7447,10 +7331,7 @@ async function auditSyntheticEdgeFixtures(
           contentType: "text/html; charset=utf-8",
           body: `<!doctype html><html lang="ko"${protocolSpoof}><head><meta charset="utf-8">` +
             `<title>${title}</title><meta property="og:title" content="${title}">` +
-            (fixture.headHtml ?? "") +
-            (fixture.includeMarkerGate
-              ? `<style data-edge-marker-gate>${clienPaintGateCss}</style>`
-              : "") + `</head>` +
+            (fixture.headHtml ?? "") + `</head>` +
             `<body${fixture.bodyAttributes ?? ""}>` +
             `<header data-edge-noise="initial">outside navigation noise</header>` +
             `<section class="content_view"><h1 class="post_subject">${title}</h1>` +
@@ -7471,7 +7352,7 @@ async function auditSyntheticEdgeFixtures(
           });
           await session.page.evaluate((name) => {
             window.name = name;
-          }, `hdf-provenance:${navigationProof.navigationNonce}`);
+          }, `hdf-provenance:${navigationProof.encoded}`);
         }
         await session.page.goto(fixtureNavigationUrl, {
           waitUntil: "domcontentloaded",
@@ -7535,13 +7416,7 @@ async function auditSyntheticEdgeFixtures(
           lockedState.rootClipPath !== "inset(50%)" ||
           lockedState.rootPointerEvents !== "none" ||
           lockedState.dialogOpen !== true ||
-          lockedState.dialogDisplay !== "none" ||
-          lockedState.dialogTransitionProperty !== "none" ||
-          lockedState.dialogAnimationName !== "none" ||
-          lockedState.dialogVisibility !== "hidden" ||
-          Number(lockedState.dialogOpacity) !== 0 ||
-          lockedState.dialogPointerEvents !== "none" ||
-          (!fixture.fixedGateOnly && lockedState.runtimeLock !== "1")
+          lockedState.runtimeLock !== "1"
         ) {
           fixtureResult.failures.push(
             `paint lock did not cover the root and top layer: ${JSON.stringify(lockedState)}`,
@@ -7574,7 +7449,6 @@ async function auditSyntheticEdgeFixtures(
           session.page,
           REQUIRED_ROLE_NAMES,
           timeoutMs,
-          markerSelectorsForUrl(markerFilterContent, clienLayout, fixtureUrl),
           "relay-positive",
           commentControlSelectorDigestsForUrl(clienLayout, fixtureUrl),
         );
@@ -7766,7 +7640,7 @@ async function auditSyntheticEdgeFixtures(
       id: "path-only-drift-seeded-exact-remains-blank",
       seed: true,
       expectedState: "blocked",
-      expectedStatus: "terminal-algumon-seed-required",
+      expectedStatus: "terminal-article-identity-required",
       body: pathDriftBody,
     },
     {
@@ -7780,7 +7654,7 @@ async function auditSyntheticEdgeFixtures(
       seed: true,
       seedSiteType: "ppomppu",
       expectedState: "blocked",
-      expectedStatus: "terminal-algumon-seed-required",
+      expectedStatus: "terminal-algumon-site-mismatch",
       body: pathDriftBody,
     },
     {
@@ -7788,7 +7662,7 @@ async function auditSyntheticEdgeFixtures(
       seed: true,
       requestPath: "/fresh-hotdeal/no-article-token",
       expectedState: "blocked",
-      expectedStatus: "terminal-algumon-seed-required",
+      expectedStatus: "terminal-article-identity-required",
       body: pathDriftBody,
     },
     {
@@ -7829,25 +7703,6 @@ async function auditSyntheticEdgeFixtures(
     );
     const fixtureResult = { id: fixture.id, failures: [] };
     try {
-      await session.context.addInitScript({
-        content: `(() => {
-          const css = ${JSON.stringify(clienGateCss)};
-          const apply = () => {
-            if (!document.documentElement) return false;
-            const style = document.createElement("style");
-            style.id = "hotdeal-audit-adguard-domain-gate";
-            style.textContent = css;
-            document.documentElement.append(style);
-            return true;
-          };
-          if (!apply()) {
-            const observer = new MutationObserver(() => {
-              if (apply()) observer.disconnect();
-            });
-            observer.observe(document, { childList: true, subtree: true });
-          }
-        })();`,
-      });
       await session.page.route(requestUrl, (route) => route.fulfill({
         status: 200,
         contentType: "text/html; charset=utf-8",
@@ -8316,7 +8171,6 @@ function fixtureCoverageFailures(fixtures, config) {
 async function runRegressionFixtures(
   browser,
   userscriptContent,
-  markerFilterContent,
   config,
   runDirectory,
   timeoutMs,
@@ -8402,7 +8256,6 @@ async function runRegressionFixtures(
         session.page,
         requiredRoles,
         timeoutMs,
-        markerSelectorsForUrl(markerFilterContent, layout, fixture.url),
         "relay-positive",
         commentControlSelectorDigestsForUrl(layout, fixture.url),
       );
@@ -8529,6 +8382,37 @@ function signedRelayAcquisitionEvidence(urlLike, expectedDealId, acquiredAtMs = 
     issuedAt: new Date(issuedAtMs).toISOString(),
     ageMs,
   };
+}
+
+function recordedSignedRelayAcquisitionEvidence(
+  urlLike,
+  expectedDealId,
+  recordedAcquisition,
+) {
+  if (
+    !recordedAcquisition ||
+    typeof recordedAcquisition !== "object" ||
+    typeof recordedAcquisition.acquiredAt !== "string"
+  ) {
+    throw new Error("relay-contract-failure: signed relay has no recorded acquisition evidence");
+  }
+  const acquiredAtMs = Date.parse(recordedAcquisition.acquiredAt);
+  if (
+    !Number.isSafeInteger(acquiredAtMs) ||
+    new Date(acquiredAtMs).toISOString() !== recordedAcquisition.acquiredAt
+  ) {
+    throw new Error("relay-contract-failure: recorded relay acquisition time is not canonical");
+  }
+  const expected = signedRelayAcquisitionEvidence(urlLike, expectedDealId, acquiredAtMs);
+  if (
+    recordedAcquisition.signedUrl !== expected.signedUrl ||
+    recordedAcquisition.acquiredAt !== expected.acquiredAt ||
+    recordedAcquisition.issuedAt !== expected.issuedAt ||
+    recordedAcquisition.ageMs !== expected.ageMs
+  ) {
+    throw new Error("relay-contract-failure: recorded relay acquisition is internally inconsistent");
+  }
+  return expected;
 }
 
 function classifyAlgumonSourceResponse(responseEvidence) {
@@ -8806,15 +8690,30 @@ async function snapshotAlgumonInventoryPage(page, response) {
   return { response, ...dom };
 }
 
-async function collectAlgumonGlobalInventory(browser, timeoutMs) {
+async function collectAlgumonGlobalInventory(
+  browser,
+  timeoutMs,
+  requestBudget,
+  transitionBudget,
+) {
   const { context, page } = await createPageContext(
     browser,
     "desktop",
     null,
     ["algumon.com"],
     ["algumon.com"],
+    {
+      blockAlgumonSubresources: true,
+      singleAlgumonDocumentUrl: ALGUMON_GLOBAL_DISCOVERY_URL,
+    },
   );
   try {
+    reserveAlgumonProbeStart(
+      requestBudget,
+      transitionBudget,
+      "global-inventory",
+      ALGUMON_GLOBAL_DISCOVERY_URL,
+    );
     const response = await navigateAlgumonSourcePage(
       page,
       ALGUMON_GLOBAL_DISCOVERY_URL,
@@ -8840,7 +8739,14 @@ async function collectAlgumonGlobalInventory(browser, timeoutMs) {
   }
 }
 
-async function collectAlgumonRedirectLinks(browser, site, timeoutMs) {
+async function collectAlgumonRedirectLinks(
+  browser,
+  site,
+  timeoutMs,
+  requestBudget,
+  transitionBudget,
+  requestKind = "site-discovery",
+) {
   const source = site.algumon_source ?? site.id.toUpperCase();
   const discoveryUrl = `${ALGUMON_ORIGIN}/n/deal?sites=${encodeURIComponent(source)}`;
   const { context, page } = await createPageContext(
@@ -8854,8 +8760,18 @@ async function collectAlgumonRedirectLinks(browser, site, timeoutMs) {
         ? site.algumon_resource_domains
         : []),
     ],
+    {
+      blockAlgumonSubresources: true,
+      singleAlgumonDocumentUrl: discoveryUrl,
+    },
   );
   try {
+    reserveAlgumonProbeStart(
+      requestBudget,
+      transitionBudget,
+      requestKind,
+      discoveryUrl,
+    );
     const response = await navigateAlgumonSourcePage(page, discoveryUrl, timeoutMs);
     const result = classifyAlgumonInventorySnapshot(
       await snapshotAlgumonInventoryPage(page, response),
@@ -8929,7 +8845,14 @@ async function parseSignedRelayDestination(page, source, expectedDomain) {
   );
 }
 
-function createAlgumonRelayResolver(context, parserPage, timeoutMs, transitionBudget) {
+function createAlgumonRelayResolver(
+  context,
+  parserPage,
+  timeoutMs,
+  transitionBudget,
+  requestBudget,
+  requestKind = "signed-relay-fetch",
+) {
   const responseCache = new Map();
   return async function resolveAlgumonRedirect(site, redirectUrl) {
     const signedUrl = exactSignedAlgumonDealUrl(redirectUrl);
@@ -8938,10 +8861,16 @@ function createAlgumonRelayResolver(context, parserPage, timeoutMs, transitionBu
     }
     let responsePromise = responseCache.get(signedUrl.href);
     if (!responsePromise) {
-      transitionBudget.actual.signedRelayFetches += 1;
+      reserveAlgumonProbeStart(
+        requestBudget,
+        transitionBudget,
+        requestKind,
+        signedUrl.href,
+      );
       responsePromise = context.request.get(signedUrl.href, {
         failOnStatusCode: false,
         maxRedirects: 0,
+        maxRetries: 0,
         timeout: timeoutMs,
         headers: { "cache-control": "no-store", pragma: "no-cache" },
       }).then(async (response) => {
@@ -8993,76 +8922,20 @@ function createAlgumonRelayResolver(context, parserPage, timeoutMs, transitionBu
 }
 
 async function refreshLatestTargetRelayProof(
-  browser,
-  site,
-  profileName,
-  target,
-  timeoutMs,
-  transitionBudget,
+  _browser,
+  _site,
+  _profileName,
+  _target,
+  _timeoutMs,
+  _transitionBudget,
+  _requestBudget,
 ) {
-  if (target?.source !== "algumon-latest" || !target.algumon?.dealId) {
-    throw new Error("relay-contract-failure: only an Algumon latest target can be refreshed");
-  }
-  transitionBudget.actual.justInTimeRelayAcquisitions += 1;
-  const discovery = await collectAlgumonRedirectLinks(browser, site, timeoutMs);
-  if (discovery.status !== "ok") {
-    const error = new Error(
-      `source-or-infrastructure-failure: just-in-time Algumon acquisition failed (${discovery.status})`,
-    );
-    error.failureKind = "source-or-infrastructure-failure";
-    throw error;
-  }
-  const exactCards = discovery.links.filter(
-    (card) =>
-      card.dealId === String(target.algumon.dealId) &&
-      card.siteType === site.id,
+  // Retained as a named terminal guard for legacy audit-contract consumers.
+  // Live audits must use a freshly scheduled source snapshot instead of
+  // independently revisiting Algumon for every destination/profile.
+  throw new Error(
+    "relay-contract-failure: automatic just-in-time Algumon refresh is disabled",
   );
-  if (exactCards.length !== 1) {
-    throw new Error(
-      "relay-contract-failure: just-in-time Algumon page did not contain one exact deal identity",
-    );
-  }
-  const freshCard = exactCards[0];
-  const acquisition = signedRelayAcquisitionEvidence(
-    freshCard.href,
-    target.algumon.dealId,
-  );
-  const relaySession = await createPageContext(
-    browser,
-    profileName,
-    null,
-    ["algumon.com"],
-    ["algumon.com"],
-  );
-  try {
-    transitionBudget.actual.justInTimeSignedRelayFetches += 1;
-    const resolveAlgumonRedirect = createAlgumonRelayResolver(
-      relaySession.context,
-      relaySession.page,
-      timeoutMs,
-      transitionBudget,
-    );
-    const resolution = await resolveAlgumonRedirect(site, acquisition.signedUrl);
-    if (resolution.relayFetchUrl !== acquisition.signedUrl) {
-      throw new Error("relay-contract-failure: refreshed relay resolution changed the exact signed URL");
-    }
-    return {
-      ...target,
-      url: resolution.resolvedDestination,
-      relayAcquisition: acquisition,
-      algumon: {
-        discoveryUrl: discovery.discoveryUrl,
-        redirectUrl: acquisition.signedUrl,
-        dealId: freshCard.dealId,
-        siteId: site.id,
-        title: freshCard.title,
-        commentCount: freshCard.commentCount,
-        verifiedResolution: resolution,
-      },
-    };
-  } finally {
-    await relaySession.context.close();
-  }
 }
 
 function routeFamily(urlText) {
@@ -9189,37 +9062,51 @@ async function discoverLatestTargets(
   sites,
   timeoutMs,
   promotionCandidate = null,
+  requestBudget,
 ) {
+  if (!requestBudget || typeof requestBudget.snapshot !== "function") {
+    throw new Error("live Algumon discovery requires one request-start budget");
+  }
   const targets = [];
   const records = [];
+  const probePlan = createLowTrafficAlgumonProbePlan(sites.length);
   const transitionBudget = {
     policy: {
       globalInventoryNavigations: 1,
       siteDiscoveryNavigationsPerSite: 1,
       signedRelayFetchesPerSite: ALGUMON_SITE_LINK_SCAN_LIMIT,
+      // Legacy report keys stay stable, but automatic JIT work has a hard zero
+      // maximum below and the terminal guard rejects it before a request starts.
       justInTimeRelayAcquisitionsPerTarget: 1,
       justInTimeSignedRelayFetchesPerTarget: 1,
       proofUrlsPerRouteProfile: ALGUMON_PROOF_REPRESENTATIVES_PER_ROUTE_PROFILE,
     },
     maximum: {
-      globalInventoryNavigations: 1,
-      siteDiscoveryNavigations: sites.length,
-      signedRelayFetches: sites.length * ALGUMON_SITE_LINK_SCAN_LIMIT,
+      globalInventoryNavigations: probePlan.globalInventoryNavigations,
+      siteDiscoveryNavigations: probePlan.siteDiscoveryNavigations,
+      signedRelayFetches: probePlan.signedRelayFetches,
       justInTimeRelayAcquisitions: 0,
       justInTimeSignedRelayFetches: 0,
+      requestStarts: probePlan.totalRequestStarts,
     },
     actual: {
-      globalInventoryNavigations: 1,
+      globalInventoryNavigations: 0,
       siteDiscoveryNavigations: 0,
       signedRelayFetches: 0,
       justInTimeRelayAcquisitions: 0,
       justInTimeSignedRelayFetches: 0,
+      requestStarts: 0,
       routeProfileProofTargets: 0,
       destinationAuditNavigationStartsMaximum: 0,
-      totalNetworkStartsMaximum: 1,
+      totalNetworkStartsMaximum: 0,
     },
   };
-  const inventory = await collectAlgumonGlobalInventory(browser, timeoutMs);
+  const inventory = await collectAlgumonGlobalInventory(
+    browser,
+    timeoutMs,
+    requestBudget,
+    transitionBudget,
+  );
   if (inventory.status !== "ok") {
     for (const site of sites) {
       records.push({
@@ -9232,6 +9119,9 @@ async function discoverLatestTargets(
         profiles: {},
       });
     }
+    const requestStarts = requestBudget.snapshot();
+    transitionBudget.actual.algumonRequestStarts = requestStarts.startedCount;
+    transitionBudget.actual.totalNetworkStartsMaximum = requestStarts.startedCount;
     return { targets: [], records, inventory, transitionBudget };
   }
 
@@ -9247,6 +9137,7 @@ async function discoverLatestTargets(
     relaySession.page,
     timeoutMs,
     transitionBudget,
+    requestBudget,
   );
   let terminalSourceFailure = false;
   try {
@@ -9267,8 +9158,13 @@ async function discoverLatestTargets(
         continue;
       }
       try {
-        transitionBudget.actual.siteDiscoveryNavigations += 1;
-        const discovery = await collectAlgumonRedirectLinks(browser, site, timeoutMs);
+        const discovery = await collectAlgumonRedirectLinks(
+          browser,
+          site,
+          timeoutMs,
+          requestBudget,
+          transitionBudget,
+        );
         record.discoveryUrl = discovery.discoveryUrl;
         record.status = discovery.status;
         record.linkCount = discovery.links.length;
@@ -9414,6 +9310,10 @@ async function discoverLatestTargets(
           };
           for (const representatives of clusterTargets.values()) {
             for (const match of representatives) {
+              const relayAcquisition = signedRelayAcquisitionEvidence(
+                match.redirect.href,
+                match.redirect.dealId,
+              );
               targets.push({
                 site,
                 layout: match.layout,
@@ -9427,6 +9327,7 @@ async function discoverLatestTargets(
                   approvedRouteMatched: match.approvedRouteMatched,
                   matchedApprovedPath: match.matchedApprovedPath,
                   routeObservation: match.routeObservation,
+                  relayAcquisition,
                   algumon: {
                     discoveryUrl: discovery.discoveryUrl,
                     redirectUrl: match.redirect.href,
@@ -9468,15 +9369,14 @@ async function discoverLatestTargets(
   );
   transitionBudget.maximum.routeProfileProofTargets =
     proofGroupCounts.size * ALGUMON_PROOF_REPRESENTATIVES_PER_ROUTE_PROFILE;
-  transitionBudget.maximum.justInTimeRelayAcquisitions = targets.length;
-  transitionBudget.maximum.justInTimeSignedRelayFetches = targets.length;
-  transitionBudget.maximum.signedRelayFetches += targets.length;
   transitionBudget.actual.destinationAuditNavigationStartsMaximum = targets.length * 2;
+  const requestStarts = requestBudget.snapshot();
+  if (requestStarts.startedCount > transitionBudget.maximum.requestStarts) {
+    throw new Error("Algumon request-start budget was exceeded after discovery");
+  }
+  transitionBudget.actual.algumonRequestStarts = requestStarts.startedCount;
   transitionBudget.actual.totalNetworkStartsMaximum =
-    transitionBudget.actual.globalInventoryNavigations +
-    transitionBudget.actual.siteDiscoveryNavigations +
-    transitionBudget.actual.signedRelayFetches +
-    transitionBudget.actual.destinationAuditNavigationStartsMaximum;
+    requestStarts.startedCount + transitionBudget.actual.destinationAuditNavigationStartsMaximum;
   return { targets, records, inventory, transitionBudget };
 }
 
@@ -9522,11 +9422,9 @@ function resultHasZeroLeak(result) {
     commentControlProjectionFailures(gate).length === 0,
   );
   return Boolean(
-    gate.readyMarkerCoverage?.passed === true &&
-    gate.uncoveredUnmarkedCount === 0 &&
+    gate.standaloneRuntimeCoverage?.passed === true &&
     gate.visibleWithoutKeepCount === 0 &&
     gate.directVisibleTextLeakCount === 0 &&
-    gate.coveredKeptCount === 0 &&
     gate.paintProbe?.flashFrameCount === 0 &&
     commentItemsProjected &&
     commentControlsProjected,
@@ -9711,6 +9609,9 @@ function discoveryFailures(
     if (actual.signedRelayFetches > maximum.signedRelayFetches) {
       failures.push("Algumon signed relay fetch budget was exceeded");
     }
+    if (actual.requestStarts > maximum.requestStarts) {
+      failures.push("Algumon total request-start budget was exceeded");
+    }
     if (
       actual.justInTimeRelayAcquisitions > maximum.justInTimeRelayAcquisitions ||
       actual.justInTimeSignedRelayFetches > maximum.justInTimeSignedRelayFetches
@@ -9783,7 +9684,7 @@ function discoveryFailures(
         result.profileLanding?.evidenceKind !== "profile-user-agent-final-landing",
     )
   ) {
-    failures.push("Algumon latest audit lacks just-in-time relay or profile landing evidence");
+    failures.push("Algumon latest audit lacks sealed signed relay or profile landing evidence");
   }
   return failures;
 }
@@ -9798,10 +9699,182 @@ function deduplicateTargets(targets) {
   });
 }
 
+function canonicalHttpsUrl(urlLike, label) {
+  let url;
+  try {
+    url = new URL(urlLike);
+  } catch {
+    throw new Error(`${label} is not a URL`);
+  }
+  if (url.protocol !== "https:" || url.username || url.password) {
+    throw new Error(`${label} is not one canonical HTTPS URL`);
+  }
+  return url.href;
+}
+
+function capturedAlgumonTargetsFromReport(capturedReport, candidate, sites) {
+  if (!capturedReport || !Array.isArray(capturedReport.results)) {
+    throw new Error("Algumon source snapshot has no audit results");
+  }
+  if (
+    !candidate?.siteId ||
+    !candidate?.layoutId ||
+    !Array.isArray(candidate?.proofProfiles) ||
+    !Array.isArray(candidate?.sampleUrls)
+  ) {
+    throw new Error("Algumon source snapshot requires one sealed promotion candidate");
+  }
+  const site = sites.find((item) => item.id === candidate.siteId);
+  const layout = site?.layouts.find((item) => item.id === candidate.layoutId);
+  if (!site || !layout) {
+    throw new Error("sealed candidate is outside the selected Algumon source snapshot scope");
+  }
+  const profiles = [...new Set(candidate.proofProfiles)];
+  if (
+    profiles.length !== candidate.proofProfiles.length ||
+    profiles.length === 0 ||
+    profiles.some(
+      (profile) =>
+        !(profile in DEVICE_PROFILES) || !profilesForLayout(site, layout).includes(profile),
+    )
+  ) {
+    throw new Error("sealed candidate has invalid proof profiles");
+  }
+  const sampleUrls = candidate.sampleUrls.map((url) =>
+    canonicalHttpsUrl(url, "sealed candidate sample URL"));
+  if (
+    sampleUrls.length !== ALGUMON_PROOF_REPRESENTATIVES_PER_ROUTE_PROFILE ||
+    new Set(sampleUrls).size !== sampleUrls.length
+  ) {
+    throw new Error(
+      `sealed candidate requires exactly ${ALGUMON_PROOF_REPRESENTATIVES_PER_ROUTE_PROFILE} distinct URLs`,
+    );
+  }
+
+  const targets = [];
+  for (const profileName of profiles) {
+    for (const requestedUrl of sampleUrls) {
+      const matchingResults = capturedReport.results.filter((result) => {
+        try {
+          return (
+            result?.siteId === site.id &&
+            result?.layoutId === layout.id &&
+            result?.profile === profileName &&
+            result?.source === "algumon-latest" &&
+            canonicalHttpsUrl(result?.requestedUrl, "snapshot result URL") === requestedUrl
+          );
+        } catch {
+          return false;
+        }
+      });
+      if (matchingResults.length !== 1) {
+        throw new Error(
+          `sealed source snapshot is missing one exact ${layout.id}/${profileName} relay proof`,
+        );
+      }
+      const result = matchingResults[0];
+      if (result.passed !== true || result.runtimeExpectation !== "relay-positive") {
+        throw new Error("sealed source snapshot contains a non-passing relay proof");
+      }
+      const seed = result.algumonSeed;
+      if (
+        !seed ||
+        seed.siteId !== site.id ||
+        typeof seed.dealId !== "string" ||
+        !seed.verifiedResolution
+      ) {
+        throw new Error("sealed source snapshot lacks an exact signed relay seed");
+      }
+      const acquisition = recordedSignedRelayAcquisitionEvidence(
+        seed.redirectUrl,
+        seed.dealId,
+        result.relayAcquisition,
+      );
+      const resolution = seed.verifiedResolution;
+      const relayDestinationUrl = canonicalHttpsUrl(
+        resolution.resolvedDestination,
+        "snapshot relay destination",
+      );
+      if (
+        resolution.relayFetchUrl !== acquisition.signedUrl ||
+        result.relayDestinationUrl === null ||
+          canonicalHttpsUrl(result.relayDestinationUrl, "snapshot relay destination") !==
+            relayDestinationUrl ||
+        resolution.responseStatus !== 200 ||
+        !/^[0-9a-f]{64}$/u.test(resolution.responseSha256 ?? "")
+      ) {
+        throw new Error("sealed source snapshot relay resolution is internally inconsistent");
+      }
+      const landing = classifyProfileLandingRoute(
+        site,
+        profileName,
+        requestedUrl,
+        candidate,
+      );
+      if (landing.layoutId !== layout.id || landing.configuredPathMatchCount !== 1) {
+        throw new Error("sealed source snapshot destination no longer matches one candidate layout");
+      }
+      const routeObservation = result.routeObservation;
+      if (
+        !routeObservation ||
+        routeObservation.algumonDealId !== seed.dealId ||
+        canonicalHttpsUrl(routeObservation.algumonEntryUrl, "snapshot relay entry") !==
+          acquisition.signedUrl ||
+        canonicalHttpsUrl(routeObservation.finalResolvedUrl, "snapshot final destination") !==
+          requestedUrl ||
+        canonicalHttpsUrl(routeObservation.resolvedDestination, "snapshot relay destination") !==
+          relayDestinationUrl
+      ) {
+        throw new Error("sealed source snapshot route observation is internally inconsistent");
+      }
+      targets.push({
+        site,
+        layout,
+        profileName,
+        target: {
+          source: "algumon-latest",
+          runtimeExpectation: "relay-positive",
+          url: relayDestinationUrl,
+          routeFamily: routeFamily(requestedUrl),
+          configuredPathMatchCount: landing.configuredPathMatchCount,
+          approvedRouteMatched: landing.approvedRouteMatched,
+          matchedApprovedPath: landing.matchedApprovedPath,
+          routeObservation: {
+            ...routeObservation,
+            algumonDealId: seed.dealId,
+            algumonEntryUrl: acquisition.signedUrl,
+            finalResolvedUrl: requestedUrl,
+            relayFetchUrl: acquisition.signedUrl,
+            resolvedDestination: relayDestinationUrl,
+          },
+          relayAcquisition: { ...result.relayAcquisition },
+          algumon: {
+            discoveryUrl: seed.discoveryUrl ?? null,
+            redirectUrl: acquisition.signedUrl,
+            dealId: seed.dealId,
+            siteId: seed.siteId,
+            title: typeof seed.title === "string" ? seed.title : "",
+            commentCount: seed.commentCount ?? null,
+            verifiedResolution: { ...resolution },
+          },
+        },
+      });
+    }
+  }
+  return {
+    mode: "captured-sealed-relay",
+    sourceRunId: typeof capturedReport.runId === "string" ? capturedReport.runId : null,
+    targetCount: targets.length,
+    targets,
+  };
+}
+
 function semanticVersionTuple(version) {
-  const match = String(version ?? "").match(/^(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/u);
+  const match = typeof version === "string"
+    ? version.match(/^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/u)
+    : null;
   if (!match) throw new Error(`invalid semantic version: ${version}`);
-  return match.slice(1).map(Number);
+  return match.slice(1).map((part) => BigInt(part));
 }
 
 function compareSemanticVersions(left, right) {
@@ -9809,10 +9882,15 @@ function compareSemanticVersions(left, right) {
   const rightParts = semanticVersionTuple(right);
   for (let index = 0; index < 3; index += 1) {
     if (leftParts[index] !== rightParts[index]) {
-      return leftParts[index] - rightParts[index];
+      return leftParts[index] < rightParts[index] ? -1 : 1;
     }
   }
   return 0;
+}
+
+function incrementStablePatchVersion(version) {
+  const [major, minor, patchVersion] = semanticVersionTuple(version);
+  return `${major}.${minor}.${patchVersion + 1n}`;
 }
 
 async function nextPromotionVersion(config) {
@@ -9830,8 +9908,7 @@ async function nextPromotionVersion(config) {
     if (error?.code !== "ENOENT") throw error;
   }
   const latest = versions.sort(compareSemanticVersions).at(-1);
-  const [major, minor, patchVersion] = semanticVersionTuple(latest);
-  return `${major}.${minor}.${patchVersion + 1}`;
+  return incrementStablePatchVersion(latest);
 }
 
 function promotionShape(result) {
@@ -10269,13 +10346,17 @@ function selectStableDiscoveryGroups(report, config) {
       if (productCardinality === "required") {
         group.shape.roles.product = [...presentProduct.selectors];
       }
-      group.proofProfiles = profilesForLayout(site, layout).filter(
+      const applicableProfiles = profilesForLayout(site, layout);
+      group.proofProfiles = applicableProfiles.filter(
         (profile) =>
           selectPromotionProofResults(
             group.results.filter((result) => result.profile === profile),
             "unconstrained",
           ).length === 3,
       );
+      if (canonicalJson(group.proofProfiles) !== canonicalJson(applicableProfiles)) {
+        return false;
+      }
       group.selectedResults = group.proofProfiles.flatMap((profile) =>
         selectPromotionProofResults(
           group.results.filter((result) => result.profile === profile),
@@ -10311,7 +10392,10 @@ function selectStableDiscoveryGroups(report, config) {
         shape: group.shape,
         roleProjection: group.roleProjection,
       })).slice(0, 24);
-      return group.proofProfiles.length > 0 && group.selectedResults.length >= 3;
+      return (
+        group.proofProfiles.length > 0 &&
+        group.selectedResults.length === group.proofProfiles.length * 3
+      );
     });
 }
 
@@ -10657,18 +10741,24 @@ async function main() {
   if (options.promotionScopePath && options.siteIds.size > 0) {
     throw new Error("--promotion-scope cannot be combined with --site");
   }
-  const promotionScope = options.promotionScopePath
+  const promotionScopeArtifact = options.promotionScopePath
+    ? await readJson(options.promotionScopePath)
+    : null;
+  const baselineReport = options.baselineReportPath
+    ? await readJson(options.baselineReportPath)
+    : null;
+  const promotionScope = promotionScopeArtifact
     ? buildPromotionRetestScope(
         config,
-        await readJson(options.promotionScopePath),
-        await readJson(options.baselineReportPath),
+        promotionScopeArtifact,
+        baselineReport,
       )
     : null;
   const sites = promotionScope
     ? sitesForPromotionRetest(config, promotionScope)
     : selectedSites(config, options.siteIds);
   const integrity = await buildIntegrityManifest(config, options.evidencePath, {
-    bundleRoot: path.dirname(options.markerFilterPath),
+    bundleRoot: path.dirname(options.userscriptPath),
     draftManifest,
   });
   if (options.integrityOnly) {
@@ -10679,8 +10769,18 @@ async function main() {
     return integrity.passed ? 0 : 1;
   }
 
+  const capturedAlgumonReport = options.capturedAlgumonReportPath && !options.fixtureOnly
+    ? await readJson(options.capturedAlgumonReportPath)
+    : null;
+  const capturedCandidate = promotionDraft?.candidate ?? promotionScopeArtifact?.candidate ?? null;
+  const capturedDiscovery = capturedAlgumonReport
+    ? capturedAlgumonTargetsFromReport(capturedAlgumonReport, capturedCandidate, sites)
+    : null;
+  const algumonRequestBudget = createAlgumonRequestStartBudget(
+    options.algumonRequestBudget,
+  );
+
   const userscriptContent = await fs.readFile(options.userscriptPath, "utf8");
-  const markerFilterContent = await fs.readFile(options.markerFilterPath, "utf8");
   const { chromium, devices } = await importPlaywright();
   RUNTIME_DEVICE_PROFILES = resolveRuntimeDeviceProfiles(devices);
   const runId = startedAt.toISOString().replace(/[:.]/gu, "-");
@@ -10696,7 +10796,17 @@ async function main() {
     profiles: RUNTIME_DEVICE_PROFILES,
     browser: null,
     integrity,
-    discovery: { enabled: options.discoverAlgumon, required: options.requireAlgumonDiscovery },
+    discovery: capturedDiscovery
+      ? {
+          enabled: false,
+          required: options.requireAlgumonDiscovery,
+          mode: capturedDiscovery.mode,
+          sourceRunId: capturedDiscovery.sourceRunId,
+          targetCount: capturedDiscovery.targetCount,
+          failures: [],
+        }
+      : { enabled: options.discoverAlgumon, required: options.requireAlgumonDiscovery },
+    algumonRequestBudget: algumonRequestBudget.snapshot(),
     promotionRetestScope: promotionScope,
     results: [],
     failures: [],
@@ -10740,7 +10850,6 @@ async function main() {
       : await auditSyntheticNoFlashFixture(
           browser,
           userscriptContent,
-          markerFilterContent,
           config,
           runDirectory,
           fixtureTimeoutMs,
@@ -10772,7 +10881,6 @@ async function main() {
       : await runRegressionFixtures(
           browser,
           userscriptContent,
-          markerFilterContent,
           config,
           runDirectory,
           fixtureTimeoutMs,
@@ -10789,7 +10897,6 @@ async function main() {
       : await auditSyntheticEdgeFixtures(
           browser,
           userscriptContent,
-          markerFilterContent,
           config,
           runDirectory,
           fixtureTimeoutMs,
@@ -10806,14 +10913,19 @@ async function main() {
         ),
       );
     }
-    let targets = options.fixtureOnly ? [] : sampleTargets(liveSites);
+    const auditBaselineSamples = !options.fixtureOnly &&
+      (!capturedDiscovery || promotionScope !== null);
+    let targets = auditBaselineSamples ? sampleTargets(liveSites) : [];
     let discovery = null;
-    if (!options.fixtureOnly && options.discoverAlgumon) {
+    if (capturedDiscovery) {
+      targets = targets.concat(capturedDiscovery.targets);
+    } else if (!options.fixtureOnly && options.discoverAlgumon) {
       discovery = await discoverLatestTargets(
         browser,
         liveSites,
         options.timeoutMs,
         promotionDraft?.candidate ?? null,
+        algumonRequestBudget,
       );
       report.discovery.inventory = discovery.inventory;
       report.discovery.records = discovery.records;
@@ -10830,12 +10942,10 @@ async function main() {
         browser,
         ...targetContract,
         userscriptContent,
-        markerFilterContent,
         promotionCandidate: promotionDraft?.candidate ?? null,
         runtimeOnly: options.runtimeOnly,
         runDirectory,
         timeoutMs: options.timeoutMs,
-        transitionBudget: discovery?.transitionBudget ?? null,
       });
       report.results.push(result);
       if (!result.passed) {
@@ -10852,10 +10962,7 @@ async function main() {
     if (discovery) {
       const transitionActual = discovery.transitionBudget.actual;
       transitionActual.totalNetworkStartsMaximum =
-        transitionActual.globalInventoryNavigations +
-        transitionActual.siteDiscoveryNavigations +
-        transitionActual.justInTimeRelayAcquisitions +
-        transitionActual.signedRelayFetches +
+        transitionActual.algumonRequestStarts +
         transitionActual.destinationAuditNavigationStartsMaximum;
       finalizeProfileLandingCoverage(discovery.records, report.results);
       const failures = discoveryFailures(
@@ -10873,6 +10980,7 @@ async function main() {
       }
     }
   } finally {
+    report.algumonRequestBudget = algumonRequestBudget.snapshot();
     await browser.close();
   }
 
@@ -10920,10 +11028,10 @@ async function main() {
         result.runtimeExpectation === "direct-negative" &&
         result.userscript?.gate?.blockedStateSafety?.passed === true,
     ).length,
-    readyMarkerCoveragePassedCount: report.results.filter(
+    standaloneRuntimeCoveragePassedCount: report.results.filter(
       (result) =>
         result.runtimeExpectation === "relay-positive" &&
-        result.userscript?.gate?.readyMarkerCoverage?.passed === true,
+        result.userscript?.gate?.standaloneRuntimeCoverage?.passed === true,
     ).length,
     failureCount: report.failures.length,
     syntheticNoFlashPassed: report.syntheticFixture?.passed === true,
@@ -11042,6 +11150,8 @@ async function main() {
 }
 
 export {
+  AlgumonRequestBudgetExceeded,
+  DEFAULT_ALGUMON_REQUEST_START_BUDGET,
   acquireArticleAccessLease,
   approvedPathsForLayout,
   articleIdentitiesLogicallyEquivalent,
@@ -11050,6 +11160,7 @@ export {
   buildProjectedHideSelector,
   candidateGenerationAllowed,
   canonicalArticleIdentity,
+  capturedAlgumonTargetsFromReport,
   classifyAlgumonInventorySnapshot,
   classifyAlgumonSourceResponse,
   classifyDestinationResponse,
@@ -11059,8 +11170,11 @@ export {
   commentControlSelectorDigestsForUrl,
   commentLowerBoundConsistency,
   committedProjectionEvidence,
+  compareSemanticVersions,
   consumeArticleAccessLease,
   createArticleAccessLease,
+  createAlgumonRequestStartBudget,
+  createLowTrafficAlgumonProbePlan,
   createNetworkPolicyEvidenceRecorder,
   createPinnedPublicHttpsProxy,
   exactSignedAlgumonDealUrl,
@@ -11070,15 +11184,17 @@ export {
   networkRequestDecision,
   isPrivateOrSpecialIp,
   isTopLevelNavigationRequest,
-  markerSelectorsForUrl,
+  incrementStablePatchVersion,
   parseConnectAuthority,
   projectionCardinalityEvidence,
   promotionVariantId,
+  recordedSignedRelayAcquisitionEvidence,
   runtimeExpectationForTarget,
   semanticOracleContractFailures,
   selectFinalMainDocumentResponse,
   selectStableDiscoveryGroup,
   selectStableDiscoveryGroups,
+  semanticVersionTuple,
   settlePage,
   signedRelayAcquisitionEvidence,
   siteArticleIdentity,

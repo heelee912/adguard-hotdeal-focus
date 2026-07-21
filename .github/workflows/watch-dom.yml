@@ -2,7 +2,9 @@ name: Watch live DOM
 
 on:
   schedule:
-    - cron: "17 */6 * * *"
+    # Monday 03:17 Asia/Seoul. One bounded source audit per week; GitHub
+    # dispatches are manual only and no workflow may self-dispatch this audit.
+    - cron: "17 18 * * 0"
   workflow_dispatch:
     inputs:
       dispatch_nonce:
@@ -71,14 +73,32 @@ jobs:
           npm run build || status=1
           git diff --exit-code -- . || status=1
           git ls-files --error-unmatch \
-            filter.txt \
             filter-static.txt \
             hotdeal-focus.user.js \
             scripts/csp-probe.user.js \
             release-manifest.json \
+            state/release-high-water.json \
             tests/fixtures/dom-regressions.json \
             tests/fixtures/behavior-baseline.json >/dev/null || status=1
           npm run integrity || status=1
+          public_root="${RUNNER_TEMP}/watch-release-public"
+          previous_high_water="${RUNNER_TEMP}/watch-previous-release-high-water.json"
+          mkdir -p "${public_root}"
+          install -m 0644 hotdeal-focus.user.js "${public_root}/hotdeal-focus.user.js"
+          install -m 0644 release-manifest.json "${public_root}/release-manifest.json"
+          baseline_sha="$(git rev-parse HEAD^ 2>/dev/null || true)"
+          if [[ -n "${baseline_sha}" ]] && \
+             git cat-file -e "${baseline_sha}:state/release-high-water.json" 2>/dev/null; then
+            git show "${baseline_sha}:state/release-high-water.json" > "${previous_high_water}"
+          else
+            printf '%s\n' \
+              '{"bundleFormat":"hdf-public-bundle-v1","records":[],"schemaVersion":1}' \
+              > "${previous_high_water}"
+          fi
+          node scripts/pages_release_contract.mjs verify-bundle \
+            --root "${public_root}" \
+            --high-water-source state/release-high-water.json \
+            --previous-high-water-source "${previous_high_water}" || status=1
           echo "status=${status}" >> "${GITHUB_OUTPUT}"
           exit 0
 
@@ -103,6 +123,7 @@ jobs:
             timeout --kill-after=15s 210m xvfb-run -a npm run audit:dom -- \
               --headed \
               --require-algumon-discovery \
+              --algumon-request-budget 29 \
               --synthesize-candidates || status=1
           fi
           echo "status=${status}" >> "${GITHUB_OUTPUT}"
@@ -120,7 +141,7 @@ jobs:
             echo "failed=true" >> "${GITHUB_OUTPUT}"
           fi
 
-      - name: Freeze and sign the complete ordered candidate queue
+      - name: Freeze the complete digest-bound sealed candidate queue
         if: always()
         id: queue
         env:
@@ -159,7 +180,7 @@ jobs:
             --max-bytes 4194304 \
             --github-output "${GITHUB_OUTPUT}"
 
-      - name: Upload the signed candidate queue
+      - name: Upload the digest-bound sealed candidate queue
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: candidate-queue-${{ github.run_id }}
@@ -201,7 +222,7 @@ jobs:
       contents: read
     strategy:
       fail-fast: false
-      max-parallel: 4
+      max-parallel: 1
       matrix: ${{ fromJSON(needs.audit.outputs.candidate_matrix) }}
     steps:
       - name: Check out exactly the audited base
@@ -229,7 +250,7 @@ jobs:
           timeout --kill-after=10s 4m npm ci --ignore-scripts --no-audit --no-fund
           timeout --kill-after=10s 8m npx playwright install --with-deps chromium
 
-      - name: Download the signed candidate queue
+      - name: Download the digest-bound sealed candidate queue
         if: always()
         id: queue_download
         continue-on-error: true
@@ -301,10 +322,10 @@ jobs:
             timeout --kill-after=10s 20m xvfb-run -a node scripts/audit_pages.mjs \
               --config "${draft_root}/config/sites.json" \
               --userscript "${draft_root}/hotdeal-focus.user.js" \
-              --marker-filter "${draft_root}/filter.txt" \
               --headed \
               --runtime-only \
-              --require-algumon-discovery \
+              --algumon-source-snapshot .candidate-queue/base-audit-report.json \
+              --no-algumon-network \
               --promotion-draft "${draft}" \
               --draft-manifest "${draft_root}/draft-manifest.json" \
               --site "${CANDIDATE_SITE_ID}" \
@@ -365,8 +386,7 @@ jobs:
           fi
 
           if [[ -z "${status}" ]]; then
-            cmp --silent "${draft_root}/filter.txt" "${release_root}/filter.txt" && \
-              cmp --silent "${draft_root}/filter-static.txt" \
+            cmp --silent "${draft_root}/filter-static.txt" \
                 "${release_root}/filter-static.txt" && \
               cmp --silent "${draft_root}/hotdeal-focus.user.js" \
                 "${release_root}/hotdeal-focus.user.js" && \
@@ -521,7 +541,7 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Download the signed candidate queue
+      - name: Download the digest-bound sealed candidate queue
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: candidate-queue-${{ github.run_id }}
@@ -694,21 +714,16 @@ jobs:
         run: |
           release=.promotion-package/release
           for required in \
-            filter.txt \
             filter-static.txt \
             hotdeal-focus.user.js \
             config/sites.json \
             state/approved-variants.json \
+            state/release-high-water.json \
             release-manifest.json \
             package.json \
             package-lock.json; do
             test -f "${release}/${required}"
           done
-          cmp --silent filter.txt "${release}/filter.txt" || {
-            echo "A DOM promotion attempted to change immutable gate-v2 bytes." >&2
-            exit 1
-          }
-          install -m 0644 "${release}/filter.txt" filter.txt
           install -m 0644 "${release}/filter-static.txt" filter-static.txt
           install -m 0644 "${release}/hotdeal-focus.user.js" hotdeal-focus.user.js
           install -m 0644 "${release}/config/sites.json" config/sites.json
@@ -719,17 +734,20 @@ jobs:
           install -m 0644 \
             "${release}/state/approved-variants.json" \
             state/approved-variants.json
+          install -m 0644 \
+            "${release}/state/release-high-water.json" \
+            state/release-high-water.json
           git config user.name "hotdeal-focus-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -- \
-            filter.txt \
             filter-static.txt \
             hotdeal-focus.user.js \
             config/sites.json \
             release-manifest.json \
             package.json \
             package-lock.json \
-            state/approved-variants.json
+            state/approved-variants.json \
+            state/release-high-water.json
           git commit -m "feat(release): promote verified DOM variant / 검증된 DOM 변형 승격 / 検証済みDOM更新 / 提升已验证DOM变体"
           echo "commit_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
 
@@ -746,13 +764,24 @@ jobs:
           npm test
           npm run build:check
           npm run integrity
+          mkdir -p .promotion-public
+          install -m 0644 hotdeal-focus.user.js .promotion-public/hotdeal-focus.user.js
+          install -m 0644 release-manifest.json .promotion-public/release-manifest.json
+          git show HEAD^:state/release-high-water.json \
+            > "${RUNNER_TEMP}/promotion-previous-release-high-water.json"
+          node scripts/pages_release_contract.mjs verify-bundle \
+            --root .promotion-public \
+            --high-water-source state/release-high-water.json \
+            --previous-high-water-source \
+              "${RUNNER_TEMP}/promotion-previous-release-high-water.json"
           timeout --kill-after=5s 60s npm run test:network
           timeout --kill-after=5s 90s npm run test:oracle
           timeout --kill-after=5s 60s npm run test:tamper
           timeout --kill-after=10s 15m npm run test:behavior
           timeout --kill-after=15s 180m xvfb-run -a npm run audit:dom -- \
             --headed \
-            --require-algumon-discovery \
+            --algumon-source-snapshot .promotion-package/proof/base-audit-report.json \
+            --no-algumon-network \
             --promotion-scope .promotion-package/proof/promotion-ready.json \
             --baseline-report .promotion-package/proof/base-audit-report.json
           git diff --exit-code -- .
@@ -772,12 +801,12 @@ jobs:
           const allowed = [
             'config/sites.json',
             'filter-static.txt',
-            'filter.txt',
             'hotdeal-focus.user.js',
             'package-lock.json',
             'package.json',
             'release-manifest.json',
             'state/approved-variants.json',
+            'state/release-high-water.json',
           ];
           const git = (...args) => execFileSync('git', args, { encoding: 'utf8' }).trim();
           const bytes = (revision, path) => execFileSync(
@@ -836,7 +865,6 @@ jobs:
     timeout-minutes: 20
     concurrency:
       group: hotdeal-focus-release-state
-      cancel-in-progress: false
     environment:
       name: hdf-main-automation
       deployment: false
@@ -901,12 +929,12 @@ jobs:
           allowed = [
               'config/sites.json',
               'filter-static.txt',
-              'filter.txt',
               'hotdeal-focus.user.js',
               'package-lock.json',
               'package.json',
               'release-manifest.json',
               'state/approved-variants.json',
+              'state/release-high-water.json',
           ]
           def git_bytes(*args: str) -> bytes:
               return subprocess.check_output(['git', *args])
@@ -930,14 +958,12 @@ jobs:
           }
           if manifest['committedFiles'] != expected_hashes:
               raise SystemExit('promotion committed-file hashes disagree')
-          if git_bytes('show', f'{base}:filter.txt') != committed('filter.txt'):
-              raise SystemExit('immutable filter.txt changed during DOM promotion')
           release_manifest = json.loads(committed('release-manifest.json'))
           if sorted(release_manifest.get('artifacts', {})) != [
-              'filter.txt', 'hotdeal-focus.user.js',
+              'hotdeal-focus.user.js',
           ]:
               raise SystemExit('release manifest public artifact set changed')
-          for path in ('filter.txt', 'hotdeal-focus.user.js'):
+          for path in ('hotdeal-focus.user.js',):
               if release_manifest['artifacts'][path].get('sha256') != expected_hashes[path]:
                   raise SystemExit(f'release manifest hash disagrees for {path}')
           PY
@@ -1072,9 +1098,9 @@ jobs:
             --jq '.[] | select(.title == "[DOM drift] AdGuard Hotdeal Focus gate failed") | .number' \
             | head -n 1)"
           printf '%s\n\n%s\n\n%s\n' \
-            "The six-hour GitHub-hosted DOM gate failed." \
+            "The bounded weekly GitHub-hosted DOM gate failed." \
             "Evidence (screenshots, proof JSON, and hashes): ${RUN_URL}" \
-            "The issue stays open until a later full cloud audit is clean. A proven single-site promotion may be followed immediately by another serialized audit for remaining drift." \
+            "The issue stays open until a later full cloud audit is clean. Candidate proofs reuse frozen source evidence, and no workflow self-dispatches another Algumon audit." \
             > issue-body.md
           if [[ -n "${existing}" ]]; then
             gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body-file issue-body.md
@@ -1131,7 +1157,6 @@ jobs:
     timeout-minutes: 15
     concurrency:
       group: hotdeal-focus-release-state
-      cancel-in-progress: false
     environment:
       name: hdf-main-automation
       deployment: false
@@ -1304,7 +1329,6 @@ jobs:
     timeout-minutes: 20
     concurrency:
       group: hotdeal-focus-release-state
-      cancel-in-progress: false
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -1320,6 +1344,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.audit.outputs.base_sha }}
+          fetch-depth: 2
           persist-credentials: false
 
       - name: Check out the exact promoted source
@@ -1327,6 +1352,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.push-promotion.outputs.commit_sha }}
+          fetch-depth: 2
           persist-credentials: false
 
       - name: Download the exact promoted release
@@ -1357,15 +1383,6 @@ jobs:
             exit 1
           fi
 
-      - name: Require the exact immutable gate release before Pages publication
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          python scripts/hotdeal_focus_cli.py gate-release verify \
-            --repo "${GITHUB_REPOSITORY}" \
-            --json > .gate-release-verification.json
-
       - name: Stage only public manifest-matched files
         shell: bash
         run: |
@@ -1374,41 +1391,46 @@ jobs:
           else
             release=.
           fi
-          RELEASE_ROOT="${release}" node <<'NODE'
-          const crypto = require('node:crypto');
-          const fs = require('node:fs');
-          const path = require('node:path');
-          const root = process.env.RELEASE_ROOT;
-          const manifest = JSON.parse(
-            fs.readFileSync(path.join(root, 'release-manifest.json'), 'utf8'),
-          );
-          const expected = ['filter.txt', 'hotdeal-focus.user.js'];
-          const actual = Object.keys(manifest.artifacts ?? {}).sort();
-          if (JSON.stringify(actual) !== JSON.stringify(expected)) {
-            throw new Error(`unexpected public artifacts: ${actual.join(', ')}`);
-          }
-          for (const name of expected) {
-            const bytes = fs.readFileSync(path.join(root, name));
-            const digest = crypto.createHash('sha256').update(bytes).digest('hex');
-            if (manifest.artifacts[name]?.sha256 !== digest) {
-              throw new Error(`${name} does not match release-manifest.json`);
-            }
-          }
-          NODE
           mkdir -p .pages
-          install -m 0644 "${release}/filter.txt" .pages/filter.txt
           install -m 0644 \
             "${release}/hotdeal-focus.user.js" \
             .pages/hotdeal-focus.user.js
           install -m 0644 \
             "${release}/release-manifest.json" \
             .pages/release-manifest.json
-          actual_files="$(find .pages -maxdepth 1 -type f -printf '%f\n' | sort)"
-          expected_files="$(printf '%s\n' filter.txt hotdeal-focus.user.js release-manifest.json | sort)"
+          actual_files="$(find .pages -mindepth 1 -printf '%P:%y\n' | sort)"
+          expected_files="$(printf '%s\n' hotdeal-focus.user.js:f release-manifest.json:f | sort)"
           if [[ "${actual_files}" != "${expected_files}" ]]; then
-            echo "Pages stage contains a non-public fourth file" >&2
+            echo "Pages stage contains a non-public file" >&2
             exit 1
           fi
+
+      - name: Set up Node.js for deterministic Pages attestation
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Verify the standalone bundle and reject a Pages downgrade
+        shell: bash
+        run: |
+          set -euo pipefail
+          previous_high_water="${RUNNER_TEMP}/deploy-previous-release-high-water.json"
+          if git cat-file -e "HEAD^:state/release-high-water.json" 2>/dev/null; then
+            git show "HEAD^:state/release-high-water.json" > "${previous_high_water}"
+          else
+            printf '%s\n' \
+              '{"bundleFormat":"hdf-public-bundle-v1","records":[],"schemaVersion":1}' \
+              > "${previous_high_water}"
+          fi
+          node scripts/pages_release_contract.mjs verify-bundle \
+            --root .pages \
+            --high-water-source state/release-high-water.json \
+            --previous-high-water-source "${previous_high_water}"
+          node scripts/pages_release_contract.mjs preflight \
+            --root .pages \
+            --high-water-source state/release-high-water.json \
+            --previous-high-water-source "${previous_high_water}" \
+            --base-url https://heelee912.github.io/adguard-hotdeal-focus/
 
       - name: Configure Pages
         uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
@@ -1470,6 +1492,22 @@ jobs:
             exit 1
           fi
 
+      - name: Require the live HTTPS userscript and manifest bytes
+        env:
+          AUDITED_SHA: ${{ needs.audit.outputs.base_sha }}
+          PROMOTED_SHA: ${{ needs.push-promotion.outputs.commit_sha }}
+        shell: bash
+        run: |
+          expected_sha="${AUDITED_SHA}"
+          if [[ "${{ needs.push-promotion.result }}" == "success" ]]; then
+            expected_sha="${PROMOTED_SHA}"
+          fi
+          node scripts/pages_release_contract.mjs attest \
+            --root .pages \
+            --high-water-source state/release-high-water.json \
+            --base-url https://heelee912.github.io/adguard-hotdeal-focus/ \
+            --source-sha "${expected_sha}"
+
   recover-pages-head-drift:
     needs: [audit, push-promotion, deploy-pages]
     if: >-
@@ -1507,43 +1545,6 @@ jobs:
           jq -c '{ok,status,sourceSha,workflow,ref,dispatchNonce,run}' \
             "${RUNNER_TEMP}/pages-head-recovery.json"
 
-  continue-drift-chain:
-    needs: [audit, push-promotion]
-    if: >-
-      always() &&
-      needs.audit.outputs.failed == 'true' &&
-      needs.push-promotion.result == 'success'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    permissions:
-      actions: write
-      contents: read
-    steps:
-      - name: Check out the audited CLI without stored credentials
-        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          ref: ${{ needs.audit.outputs.base_sha }}
-          persist-credentials: false
-
-      - name: Set up Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.12"
-
-      - name: Dispatch and observe one nonce-bound follow-up audit
-        env:
-          GH_TOKEN: ${{ github.token }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python scripts/hotdeal_focus_cli.py cloud dispatch \
-            --repo "${GITHUB_REPOSITORY}" \
-            --workflow watch-dom.yml \
-            --apply \
-            --json > "${RUNNER_TEMP}/watch-follow-up.json"
-          jq -c '{ok,status,sourceSha,workflow,ref,dispatchNonce,run}' \
-            "${RUNNER_TEMP}/watch-follow-up.json"
-
   report-pages-failure:
     needs: [audit, push-promotion, deploy-pages]
     if: >-
@@ -1578,7 +1579,7 @@ jobs:
             | head -n 1)"
           printf '%s\n\n%s\n' \
             "A manifest-matched release passed its audit but GitHub Pages deployment failed." \
-            "The next healthy six-hour audit will retry the exact current release: ${RUN_URL}" \
+            "The next healthy weekly audit will retry the exact current release: ${RUN_URL}" \
             > pages-issue-body.md
           if [[ -n "${existing}" ]]; then
             gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body-file pages-issue-body.md

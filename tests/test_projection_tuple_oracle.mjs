@@ -1,28 +1,12 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { PREAUTHORIZED_ADGUARD_CONTROL_SOURCE } from
   "../scripts/preauthorized_adguard_control.mjs";
 
-const testDirectory = path.dirname(fileURLToPath(import.meta.url));
-const projectRoot = path.resolve(testDirectory, "..");
-
 const userscriptSource = fs.readFileSync(
   new URL("../hotdeal-focus.user.js", import.meta.url),
   "utf8",
-);
-const gateFilterSource = execFileSync(
-  process.env.PYTHON || "python",
-  [
-    path.join(projectRoot, "scripts", "build_gate_filter.py"),
-    "--config",
-    path.join(projectRoot, "config", "sites.json"),
-    "--stdout",
-  ],
-  { cwd: projectRoot, encoding: "utf8" },
 );
 const preauthorizedOracleStyleControlSource = String.raw`
 (() => {
@@ -165,16 +149,6 @@ function exactPage({
   </main>`;
 }
 
-function adguardGateCss(domain) {
-  const lines = gateFilterSource.split(/\r?\n/);
-  const standardPrefix = `[$domain=${domain}]#$#`;
-  const standardRules = lines
-    .filter((line) => line.startsWith(standardPrefix))
-    .map((line) => line.slice(standardPrefix.length));
-  assert.equal(standardRules.length, 7, `missing exact ${domain} AdGuard v2 rules`);
-  return standardRules.join("\n");
-}
-
 function encodedClienSeed(destinationUrl, commentCount) {
   const now = Date.now();
   const navigationNonce = `hdf-${"a".repeat(28)}`;
@@ -202,15 +176,15 @@ function clienPage({
   commentsHtml = `<div class="comment"><div class="comment_row" itemprop="comment">Visible comment</div></div>
     <div class="comment_nav">Visible comment control</div>`,
   publisherCss = "",
+  unownedHtml = "",
 } = {}) {
   return `<!doctype html><html><head>${metadata()}<style>
-    ${adguardGateCss("clien.net")}
     ${publisherCss}
   </style></head><body><div class="content_view">
     ${titleHtml}
     <article class="post_article">${longBody}${bodyExtra}</article>
     <section class="post_comment" aria-label="Comments">${commentsHtml}</section>
-  </div></body></html>`;
+  </div>${unownedHtml}</body></html>`;
 }
 
 async function openClienGate(browser, options = {}) {
@@ -221,13 +195,41 @@ async function openClienGate(browser, options = {}) {
   const destinationUrl = "https://www.clien.net/service/board/jirum/123";
   const seed = encodedClienSeed(destinationUrl, options.commentCount ?? 1);
   await page.addInitScript(
-    ({ source, navigationName }) => {
-      window.name = `hdf-provenance:${navigationName}`;
+    ({ source, seedCarrier }) => {
+      window.name = "hdf-provenance:" + seedCarrier;
+      const paintProbe = { sampleCount: 0, visibleLeakFrames: 0 };
+      Object.defineProperty(globalThis, "__HDF_STANDALONE_LEAK_PROBE__", {
+        configurable: false,
+        enumerable: false,
+        writable: false,
+        value: paintProbe,
+      });
+      const sampleLeaks = () => {
+        const root = document.documentElement;
+        const rootStyle = root ? getComputedStyle(root) : null;
+        const rootPaintable = Boolean(rootStyle) &&
+          rootStyle.display !== "none" &&
+          rootStyle.visibility !== "hidden" &&
+          Number(rootStyle.opacity) !== 0 &&
+          rootStyle.contentVisibility !== "hidden";
+        const visibleLeak = rootPaintable &&
+          [...document.querySelectorAll("#unlock-leak, #unlock-dialog")].some((element) => {
+            const style = getComputedStyle(element);
+            return style.display !== "none" &&
+              style.visibility !== "hidden" &&
+              Number(style.opacity) !== 0 &&
+              element.getClientRects().length > 0;
+          });
+        paintProbe.sampleCount += 1;
+        if (visibleLeak) paintProbe.visibleLeakFrames += 1;
+        requestAnimationFrame(sampleLeaks);
+      };
+      requestAnimationFrame(sampleLeaks);
       (0, eval)(source);
     },
     {
       source: `${PREAUTHORIZED_ADGUARD_CONTROL_SOURCE}\n${userscriptSource}`,
-      navigationName: seed.navigationNonce,
+      seedCarrier: seed.encoded,
     },
   );
   await page.route(`${destinationUrl}*`, async (route) => {
@@ -256,14 +258,18 @@ async function gateState(page) {
     inlineStyle: document.documentElement.getAttribute("style"),
     preauthorizedControl: globalThis.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__
       ? {
+          kind: globalThis.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__.kind,
+          schemaVersion:
+            globalThis.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__.schemaVersion,
           gmAddElementCalls:
             globalThis.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__.gmAddElementCalls,
-          extendedCssCallbacks:
-            globalThis.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__.extendedCssCallbacks,
         }
       : null,
     releaseProbe: document.querySelector('[data-hdf-v2-release-probe]')
       ?.getAttribute("style") ?? null,
+    leakPaintProbe: globalThis.__HDF_STANDALONE_LEAK_PROBE__
+      ? { ...globalThis.__HDF_STANDALONE_LEAK_PROBE__ }
+      : null,
     visibility: getComputedStyle(document.documentElement).visibility,
     opacity: getComputedStyle(document.documentElement).opacity,
   }));
@@ -592,6 +598,9 @@ async function exerciseDynamicControl(page, hidden) {
       const runtime = {
         terminallyBlocked: false,
         terminalReason: null,
+        authorizedReady: true,
+        releasePhase: "released",
+        relockForReprojection() { return false; },
         publishReadyProjectionDiagnostics() { return true; },
         enterTerminal(reason) {
           this.terminallyBlocked = true;
@@ -696,6 +705,9 @@ async function exerciseDynamicComment(page, {
       const runtime = {
         terminallyBlocked: false,
         terminalReason: null,
+        authorizedReady: true,
+        releasePhase: "released",
+        relockForReprojection() { return false; },
         publishReadyProjectionDiagnostics() { return true; },
         enterTerminal(reason) {
           this.terminallyBlocked = true;
@@ -1451,6 +1463,30 @@ try {
   const exactBaseline = await evaluateExact(page, exactPage(), exactLayout(), 1);
   assert.equal(exactBaseline.ok, true);
 
+  const replySetRevealFailsClosed = await evaluateExact(
+    page,
+    exactPage({
+      commentsHtml: `<div class="comment-item">Visible comment</div>
+        <button class="comment-control" aria-expanded="false">View 2 replies</button>`,
+    }),
+    exactLayout(),
+    1,
+  );
+  assert.equal(replySetRevealFailsClosed.ok, false);
+  assert.equal(replySetRevealFailsClosed.reason, "incomplete-comment-control");
+
+  const moreCommentsFailsClosed = await evaluateExact(
+    page,
+    exactPage({
+      commentsHtml: `<div class="comment-item">Visible comment</div>
+        <button class="comment-control">Load more comments</button>`,
+    }),
+    exactLayout(),
+    1,
+  );
+  assert.equal(moreCommentsFailsClosed.ok, false);
+  assert.equal(moreCommentsFailsClosed.reason, "incomplete-comment-control");
+
   const shallowTitleIgnoresUnprojectedChrome = await evaluateExact(
     page,
     exactPage({
@@ -1529,7 +1565,7 @@ try {
     100,
   );
   assert.equal(fakeContinuationCannotApprovePartial.ok, false);
-  assert.equal(fakeContinuationCannotApprovePartial.reason, "partial-comment-set");
+  assert.equal(fakeContinuationCannotApprovePartial.reason, "incomplete-comment-control");
 
   const escapedExactEvidence = await evaluateExact(
     page,
@@ -2409,6 +2445,18 @@ try {
     await prelockedGate.page.waitForTimeout(50);
     const state = await gateState(prelockedGate.page);
     assert.equal(state.diagnostics.state, "ready");
+    assert.deepEqual(state.diagnostics.standaloneCascadeProof, {
+      authority: "userscript-runtime-style",
+      frameCount: 2,
+      nonceBound: true,
+      unownedHidden: true,
+    });
+    assert.deepEqual(state.preauthorizedControl, {
+      kind: "preauthorized-userscript-style-control",
+      schemaVersion: 2,
+      gmAddElementCalls: 1,
+    });
+    assert.equal(state.releaseProbe, null);
     assert.equal(state.lock, null);
     assert.equal(state.ready, "1");
     assert.equal(state.state, "ready");
@@ -2443,6 +2491,54 @@ try {
     );
   } finally {
     await prelockedGate.context.close();
+  }
+
+  const inlineImportantLeak = await openClienGate(browser, {
+    unownedHtml: `<aside id="unlock-leak" style="display:block!important;
+      visibility:visible!important;opacity:1!important;position:fixed!important;
+      inset:0!important;z-index:2147483647!important">Unowned inline leak</aside>`,
+  });
+  try {
+    await inlineImportantLeak.page.waitForFunction(
+      () => document.documentElement.getAttribute("data-hotdeal-focus-status") ===
+        "terminal-cascade-visible-leak",
+      null,
+      { timeout: 5000 },
+    );
+    await inlineImportantLeak.page.waitForTimeout(50);
+    const state = await gateState(inlineImportantLeak.page);
+    assert.equal(state.lock, "1");
+    assert.equal(state.ready, null);
+    assert.equal(state.state, "blocked");
+    assert.equal(state.status, "terminal-cascade-visible-leak");
+    assert.ok(state.leakPaintProbe.sampleCount >= 1);
+    assert.equal(state.leakPaintProbe.visibleLeakFrames, 0);
+  } finally {
+    await inlineImportantLeak.context.close();
+  }
+
+  const topLayerLeak = await openClienGate(browser, {
+    unownedHtml: `<dialog id="unlock-dialog" open style="display:block!important;
+      visibility:visible!important;opacity:1!important;position:fixed!important;
+      inset:0!important;z-index:2147483647!important">Unowned top-layer leak</dialog>`,
+  });
+  try {
+    await topLayerLeak.page.waitForFunction(
+      () => document.documentElement.getAttribute("data-hotdeal-focus-status") ===
+        "terminal-cascade-visible-leak",
+      null,
+      { timeout: 5000 },
+    );
+    await topLayerLeak.page.waitForTimeout(50);
+    const state = await gateState(topLayerLeak.page);
+    assert.equal(state.lock, "1");
+    assert.equal(state.ready, null);
+    assert.equal(state.state, "blocked");
+    assert.equal(state.status, "terminal-cascade-visible-leak");
+    assert.ok(state.leakPaintProbe.sampleCount >= 1);
+    assert.equal(state.leakPaintProbe.visibleLeakFrames, 0);
+  } finally {
+    await topLayerLeak.context.close();
   }
 
   const dormantPublisherControl = await openClienGate(browser, {

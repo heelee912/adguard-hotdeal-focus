@@ -37,6 +37,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_PAGES_MANIFEST = (
     "https://heelee912.github.io/adguard-hotdeal-focus/release-manifest.json"
 )
+RELEASE_USERSCRIPT_URL = (
+    "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js"
+)
 GATE_LOCK_PROTOCOL_VERSION = 2
 GATE_LOCK_ARTIFACT_VERSION = "2.0.2"
 GATE_LOCK_SUBSCRIPTION_URL = (
@@ -52,7 +55,7 @@ GATE_LOCK_RULE_COUNT = 91
 READER_GATE_NAME = "AdGuard Hotdeal Focus Reader Gate"
 MARKER_GATE_NAME = "AdGuard Hotdeal Focus Marker Gate"
 READER_GATE_PROTOCOL_VERSION = 2
-READER_GATE_GRANT = "GM_addElement"
+READER_GATE_GRANTS = ("GM_addElement", "window.onurlchange")
 READER_GATE_REQUIRED_HOSTS = (
     "algumon.com", "clien.net", "ppomppu.co.kr", "ruliweb.com",
     "quasarzone.com", "eomisae.co.kr", "zod.kr", "arca.live",
@@ -127,8 +130,17 @@ GATE_RELEASE_EXISTENCE_QUERY = (
     "query GateReleaseByTag($owner:String!,$name:String!,$tag:String!){"
     "repository(owner:$owner,name:$name){release(tagName:$tag){databaseId}}}"
 )
-PUBLIC_ARTIFACT_NAMES = ("filter.txt", "hotdeal-focus.user.js")
-WORKFLOW_FILES = ("verify.yml", "watch-dom.yml", "publish-gate.yml")
+PUBLIC_ARTIFACT_NAMES = ("hotdeal-focus.user.js",)
+RELEASE_MANIFEST_V2_KEYS = frozenset({
+    "schemaVersion", "status", "releaseVersion", "protocolVersion", "installUrl",
+    "generatorVersion", "rollback_of", "configSha256", "coverage", "promotion",
+    "artifacts", "sourceIntegrity",
+})
+RELEASE_HIGH_WATER_SOURCE_PATH = "state/release-high-water.json"
+RELEASE_HIGH_WATER_PREFIX_KEYS = frozenset({
+    "bytes", "mode", "recordCount", "sha256",
+})
+WORKFLOW_FILES = ("verify.yml", "watch-dom.yml")
 GITHUB_API_VERSION_HEADER = "X-GitHub-Api-Version: 2026-03-10"
 GITHUB_JSON_ACCEPT_HEADER = "Accept: application/vnd.github+json"
 GITHUB_ACTIONS_ALLOWED_POLICIES = frozenset({"all", "local_only", "selected"})
@@ -138,7 +150,6 @@ GITHUB_WORKFLOW_STATES = frozenset({
 WORKFLOW_RUN_TITLE_PREFIX = {
     "verify.yml": "hotdeal-focus-verify-",
     "watch-dom.yml": "hotdeal-focus-watch-dom-",
-    "publish-gate.yml": "hotdeal-focus-publish-gate-",
 }
 AUTOMATION_PUSH_SECRET_NAME = "HDF_AUTOMATION_PUSH_ED25519_PRIVATE_KEY"
 AUTOMATION_PUSH_FINGERPRINT_VARIABLE = "HDF_AUTOMATION_PUSH_KEY_FINGERPRINT"
@@ -152,11 +163,17 @@ BRANCH_GOVERNANCE_HISTORY_RULESET_NAME = (
 )
 GATE_TAG_CREATION_RULESET_NAME = "Hotdeal Focus / controlled gate-v2 tag creation"
 GATE_TAG_FREEZE_RULESET_NAME = "Hotdeal Focus / immutable gate-v2 tag"
+IMMUTABLE_GATE_TAG = "gate-v2.0.2"
+GITHUB_SSH_ED25519_HOST_KEY = (
+    "ssh-ed25519 "
+    "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+)
+GITHUB_SSH_ED25519_HOST_FINGERPRINT = (
+    "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"
+)
 GOVERNANCE_RULESET_MUTATION_ORDER = (
     "immutableFastForwardHistory",
     "prAndVerifiedCi",
-    "gateTagCreation",
-    "immutableGateTag",
 )
 GITHUB_ACTIONS_INTEGRATION_ID = 15368
 GITHUB_VERIFY_STATUS_CONTEXT = "verify"
@@ -758,12 +775,21 @@ def _reader_gate_v2_contract(script_bytes: bytes) -> int:
     metadata, code = text.split(end_marker, 1)
     metadata += end_marker
     grants = re.findall(r"(?m)^//\s+@grant\s+(\S+)\s*$", metadata)
+    download_urls = re.findall(r"(?m)^//\s+@downloadURL\s+(\S+)\s*$", metadata)
+    update_urls = re.findall(r"(?m)^//\s+@updateURL\s+(\S+)\s*$", metadata)
     run_at = re.findall(r"(?m)^//\s+@run-at\s+(\S+)\s*$", metadata)
     noframes = re.findall(r"(?m)^//\s+@noframes\s*$", metadata)
     names = re.findall(r"(?m)^//\s+@name\s+(.+?)\s*$", metadata)
-    if grants != [READER_GATE_GRANT]:
+    if grants != list(READER_GATE_GRANTS):
         raise IntegrityFailure(
-            "Reader Gate v2 must declare exactly one @grant GM_addElement"
+            "Reader Gate v2 must declare the exact ordered grants "
+            "GM_addElement and window.onurlchange"
+        )
+    if download_urls != [RELEASE_USERSCRIPT_URL] or update_urls != [
+        RELEASE_USERSCRIPT_URL
+    ]:
+        raise IntegrityFailure(
+            "Reader Gate v2 update metadata must use the exact release install URL"
         )
     if run_at != ["document-start"] or len(noframes) != 1:
         raise IntegrityFailure(
@@ -835,25 +861,22 @@ def _manifest_contract(manifest_bytes: bytes) -> tuple[dict[str, Any], dict[str,
     value = _decode_json(manifest_bytes, "release-manifest.json")
     if not isinstance(value, dict):
         raise IntegrityFailure("release manifest root must be an object")
-    if value.get("schemaVersion") != 1 or value.get("status") != "release-ready":
-        raise IntegrityFailure("release manifest is not release-ready schema-v1")
+    if set(value) != RELEASE_MANIFEST_V2_KEYS:
+        raise IntegrityFailure("release manifest schema-v2 top-level field set is not exact")
+    if value.get("schemaVersion") != 2 or value.get("status") != "release-ready":
+        raise IntegrityFailure("release manifest is not release-ready schema-v2")
     artifacts = value.get("artifacts")
     if not isinstance(artifacts, dict) or set(artifacts) != set(PUBLIC_ARTIFACT_NAMES):
         raise IntegrityFailure("release manifest public artifact set is not exact")
-    filter_entry = artifacts.get("filter.txt")
     script_entry = artifacts.get("hotdeal-focus.user.js")
-    if not isinstance(filter_entry, dict) or not isinstance(script_entry, dict):
+    if not isinstance(script_entry, dict) or set(script_entry) != {
+        "version", "bytes", "sha256", "canonicalTextSha256"
+    }:
         raise IntegrityFailure("release manifest artifact entry is malformed")
-    for label, entry in (
-        ("filter.txt", filter_entry),
-        ("hotdeal-focus.user.js", script_entry),
-    ):
-        byte_count = entry.get("bytes")
-        if type(byte_count) is not int or byte_count < 1:
-            raise IntegrityFailure(f"invalid release manifest byte count: {label}")
+    byte_count = script_entry.get("bytes")
+    if type(byte_count) is not int or byte_count < 1:
+        raise IntegrityFailure("invalid release manifest byte count: hotdeal-focus.user.js")
     required_hashes = {
-        "filter.txt.sha256": filter_entry.get("sha256"),
-        "filter.txt.installedRulesSha256": filter_entry.get("installedRulesSha256"),
         "hotdeal-focus.user.js.sha256": script_entry.get("sha256"),
         "hotdeal-focus.user.js.canonicalTextSha256": script_entry.get(
             "canonicalTextSha256"
@@ -863,26 +886,46 @@ def _manifest_contract(manifest_bytes: bytes) -> tuple[dict[str, Any], dict[str,
         if not isinstance(digest, str) or not SHA256_RE.fullmatch(digest):
             raise IntegrityFailure(f"invalid release manifest digest: {label}")
     release_version = value.get("releaseVersion")
-    gate_version = value.get("gateArtifactVersion")
     if not isinstance(release_version, str) or not SEMANTIC_VERSION_RE.fullmatch(
         release_version
     ):
         raise IntegrityFailure("release manifest has no releaseVersion")
-    if not isinstance(gate_version, str) or not SEMANTIC_VERSION_RE.fullmatch(gate_version):
-        raise IntegrityFailure("release manifest has no gateArtifactVersion")
     if type(value.get("protocolVersion")) is not int or (
         value["protocolVersion"] != READER_GATE_PROTOCOL_VERSION
     ):
         raise IntegrityFailure("release manifest protocolVersion is not exactly 2")
-    if gate_version != GATE_LOCK_ARTIFACT_VERSION:
-        raise IntegrityFailure("release manifest gateArtifactVersion is not exactly 2.0.2")
-    if value.get("filterSubscriptionUrl") != GATE_LOCK_SUBSCRIPTION_URL:
-        raise IntegrityFailure("release manifest does not select the immutable v2 gate")
-    _gate_subscription_coordinates(value.get("filterSubscriptionUrl"), gate_version)
-    if filter_entry.get("version") != gate_version:
-        raise IntegrityFailure("filter artifact version differs from gateArtifactVersion")
+    if value.get("installUrl") != RELEASE_USERSCRIPT_URL:
+        raise IntegrityFailure("release manifest installUrl is not the exact Userscript URL")
     if script_entry.get("version") != release_version:
         raise IntegrityFailure("userscript artifact version differs from releaseVersion")
+    if not isinstance(value.get("generatorVersion"), str) or not SEMANTIC_VERSION_RE.fullmatch(
+        value["generatorVersion"]
+    ):
+        raise IntegrityFailure("release manifest generatorVersion is malformed")
+    if not isinstance(value.get("configSha256"), str) or not SHA256_RE.fullmatch(
+        value["configSha256"]
+    ):
+        raise IntegrityFailure("release manifest configSha256 is malformed")
+    if not isinstance(value.get("coverage"), dict):
+        raise IntegrityFailure("release manifest coverage is malformed")
+    if value.get("promotion") is not None and not isinstance(value["promotion"], dict):
+        raise IntegrityFailure("release manifest promotion is malformed")
+    source_integrity = value.get("sourceIntegrity")
+    if not isinstance(source_integrity, dict):
+        raise IntegrityFailure("release manifest sourceIntegrity is malformed")
+    high_water_prefix = source_integrity.get(RELEASE_HIGH_WATER_SOURCE_PATH)
+    if (
+        not isinstance(high_water_prefix, dict)
+        or set(high_water_prefix) != RELEASE_HIGH_WATER_PREFIX_KEYS
+        or high_water_prefix.get("mode") != "append-only-prefix-v1"
+        or type(high_water_prefix.get("recordCount")) is not int
+        or high_water_prefix["recordCount"] < 0
+        or type(high_water_prefix.get("bytes")) is not int
+        or high_water_prefix["bytes"] < 1
+        or not isinstance(high_water_prefix.get("sha256"), str)
+        or not SHA256_RE.fullmatch(high_water_prefix["sha256"])
+    ):
+        raise IntegrityFailure("release manifest high-water prefix entry is malformed")
     return value, required_hashes
 
 
@@ -893,23 +936,11 @@ def _verify_release_files(
     manifest, hashes = _manifest_contract(manifest_bytes)
     if set(artifact_bytes) != set(PUBLIC_ARTIFACT_NAMES):
         raise IntegrityFailure("provided release artifact set is not exact")
-    filter_bytes = artifact_bytes["filter.txt"]
     script_bytes = artifact_bytes["hotdeal-focus.user.js"]
-    filter_protocol = _marker_gate_v2_contract(filter_bytes)
     script_protocol = _reader_gate_v2_contract(script_bytes)
-    if (
-        filter_protocol != manifest["protocolVersion"]
-        or script_protocol != manifest["protocolVersion"]
-    ):
-        raise IntegrityFailure("release artifacts form a cross-protocol combination")
-    filter_version_match = FILTER_HEADER_VERSION_RE.search(filter_bytes)
+    if script_protocol != manifest["protocolVersion"]:
+        raise IntegrityFailure("userscript protocol differs from the release manifest")
     script_version_match = USERSCRIPT_HEADER_VERSION_RE.search(script_bytes)
-    if (
-        filter_version_match is None
-        or filter_version_match.group(1).decode("ascii", errors="ignore")
-        != manifest["gateArtifactVersion"]
-    ):
-        raise IntegrityFailure("filter artifact metadata version mismatch")
     if (
         script_version_match is None
         or script_version_match.group(1).decode("ascii", errors="ignore")
@@ -917,9 +948,6 @@ def _verify_release_files(
     ):
         raise IntegrityFailure("userscript artifact metadata version mismatch")
     comparisons = {
-        "filter.txt.bytes": len(filter_bytes),
-        "filter.txt.sha256": sha256_bytes(filter_bytes),
-        "filter.txt.installedRulesSha256": installed_filter_rules_sha256(filter_bytes),
         "hotdeal-focus.user.js.bytes": len(script_bytes),
         "hotdeal-focus.user.js.sha256": sha256_bytes(script_bytes),
         "hotdeal-focus.user.js.canonicalTextSha256": sha256_bytes(
@@ -1031,7 +1059,6 @@ def _local_release_contract() -> tuple[dict[str, Any], list[dict[str, Any]]]:
     except OSError as error:
         raise IntegrityFailure("local release bundle is incomplete") from error
     manifest, records = _verify_release_files(manifest_bytes, artifacts)
-    _validate_gate_artifact_lock(manifest, artifacts["filter.txt"])
     return manifest, records
 
 
@@ -1108,14 +1135,12 @@ def command_doctor(_: argparse.Namespace) -> dict[str, Any]:
     capabilities = {
         "build": core_ok,
         "cloud": bool(tools["gh"]["available"]),
-        "immutableGateRelease": bool(tools["gh"]["available"]),
         "adguardWindowsInspect": (
             sys.platform == "win32" and bool(tools["powershell.exe"]["available"])
         ),
         "adguardWindowsDeployment": (
             sys.platform == "win32"
             and bool(tools["powershell.exe"]["available"])
-            and bool(tools["gh"]["available"])
         ),
     }
     return _base_result(
@@ -1938,51 +1963,7 @@ def _required_branch_ruleset_contracts() -> dict[str, dict[str, Any]]:
                 {"type": "required_linear_history"},
             ],
         },
-        "gateTagCreation": {
-            "name": GATE_TAG_CREATION_RULESET_NAME,
-            "target": "tag",
-            "enforcement": "active",
-            "bypass_actors": [{
-                "actor_id": None,
-                "actor_type": "DeployKey",
-                "bypass_mode": "always",
-            }],
-            "conditions": {
-                "ref_name": {
-                    "include": ["refs/tags/gate-v2.0.2"],
-                    "exclude": [],
-                }
-            },
-            "rules": [{"type": "creation"}],
-        },
-        "immutableGateTag": {
-            "name": GATE_TAG_FREEZE_RULESET_NAME,
-            "target": "tag",
-            "enforcement": "active",
-            "bypass_actors": [],
-            "conditions": {
-                "ref_name": {
-                    "include": ["refs/tags/gate-v2.0.2"],
-                    "exclude": [],
-                }
-            },
-            "rules": [
-                {
-                    "type": "update",
-                    "parameters": {"update_allows_fetch_and_merge": False},
-                },
-                {"type": "deletion"},
-            ],
-        },
     }
-
-
-def _gate_tag_bootstrap_freeze_contract() -> dict[str, Any]:
-    contract = json.loads(canonical_json_bytes(
-        _required_branch_ruleset_contracts()["immutableGateTag"]
-    ).decode("utf-8"))
-    contract["rules"] = [{"type": "creation"}, *contract["rules"]]
-    return contract
 
 
 def _ruleset_mutation_payload(contract: Mapping[str, Any]) -> dict[str, Any]:
@@ -2031,13 +2012,11 @@ def _ruleset_ref_scope(
     ruleset: Mapping[str, Any], default_branch: str
 ) -> dict[str, Any]:
     target = ruleset.get("target")
-    if target not in {"branch", "tag"}:
+    if target == "tag":
+        return {"relevant": False, "reason": "active-automation-does-not-write-tags"}
+    if target != "branch":
         return {"relevant": True, "reason": "unproven-non-ref-target"}
-    target_ref = (
-        f"refs/heads/{default_branch}"
-        if target == "branch"
-        else "refs/tags/gate-v2.0.2"
-    )
+    target_ref = f"refs/heads/{default_branch}"
     conditions = ruleset.get("conditions")
     ref_name = conditions.get("ref_name") if isinstance(conditions, Mapping) else None
     includes = ref_name.get("include") if isinstance(ref_name, Mapping) else None
@@ -2054,7 +2033,7 @@ def _ruleset_ref_scope(
         return bool(
             pattern == target_ref
             or pattern == "~ALL"
-            or (pattern == "~DEFAULT_BRANCH" and target == "branch")
+            or pattern == "~DEFAULT_BRANCH"
         )
 
     if any(exact_match(pattern) for pattern in excludes):
@@ -2212,7 +2191,7 @@ def _github_branch_governance_state(
             unproven_applicable.append(record)
     classic = _github_classic_branch_protection_state(repo, default_branch)
     return {
-        "target": "~DEFAULT_BRANCH and refs/tags/gate-v2.0.2",
+        "target": "~DEFAULT_BRANCH",
         "namedRulesets": observed,
         "repositoryRulesetCount": len(listing),
         "extraRulesets": extra_rulesets,
@@ -2297,6 +2276,224 @@ def _generated_automation_push_identity(repo: str) -> Iterator[dict[str, Any]]:
             "privatePath": private_path,
             "publicKey": public_key,
             "fingerprint": public_record["fingerprint"],
+        }
+
+
+@contextmanager
+def _automation_git_ssh_command(private_path: Path) -> Iterator[str]:
+    if not _command_exists("ssh"):
+        raise PrerequisiteFailure("OpenSSH ssh is unavailable")
+    host_record = _openssh_public_key_record(GITHUB_SSH_ED25519_HOST_KEY)
+    if host_record["fingerprint"] != GITHUB_SSH_ED25519_HOST_FINGERPRINT:
+        raise IntegrityFailure("pinned GitHub SSH host key fingerprint is inconsistent")
+    with tempfile.TemporaryDirectory(prefix="hotdeal-focus-automation-ssh-") as temporary:
+        root = Path(temporary)
+        known_hosts_path = root / "github-known-hosts"
+        config_path = root / "ssh-config"
+        private_config_path = private_path.resolve(strict=True).as_posix()
+        known_hosts_config_path = known_hosts_path.resolve(strict=False).as_posix()
+        _write_new_file(
+            known_hosts_path,
+            f"github.com {GITHUB_SSH_ED25519_HOST_KEY}\n".encode("ascii"),
+        )
+        config = "\n".join((
+            "Host github.com",
+            "  HostName github.com",
+            "  User git",
+            "  HostKeyAlgorithms ssh-ed25519",
+            f'  IdentityFile "{private_config_path}"',
+            "  IdentitiesOnly yes",
+            "  IdentityAgent none",
+            "  BatchMode yes",
+            "  StrictHostKeyChecking yes",
+            f'  UserKnownHostsFile "{known_hosts_config_path}"',
+            "  GlobalKnownHostsFile none",
+            "  PasswordAuthentication no",
+            "  KbdInteractiveAuthentication no",
+            "  ForwardAgent no",
+            "  ClearAllForwardings yes",
+            "  LogLevel ERROR",
+            "",
+        ))
+        _write_new_file(config_path, config.encode("utf-8"))
+        yield f'ssh -F "{config_path.resolve(strict=True).as_posix()}"'
+
+
+def _exact_ls_remote_head(
+    capture: ExecutionCapture, branch: str, expected_sha: str
+) -> dict[str, Any]:
+    if capture.returncode:
+        raise TransientFailure("automation deploy key could not read the default branch")
+    try:
+        text = capture.stdout.decode("utf-8").replace("\r\n", "\n")
+    except UnicodeDecodeError as error:
+        raise IntegrityFailure("SSH default-branch listing is not UTF-8") from error
+    records = [line for line in text.split("\n") if line]
+    expected_ref = f"refs/heads/{branch}"
+    if len(records) != 1:
+        raise IntegrityFailure("SSH default-branch listing is not unique")
+    fields = records[0].split("\t")
+    if (
+        len(fields) != 2
+        or fields[1] != expected_ref
+        or fields[0].lower() != expected_sha
+    ):
+        raise IntegrityFailure("SSH default-branch head differs from the authorized source")
+    return {
+        "branch": branch,
+        "expectedSha": expected_sha,
+        "observedSha": fields[0].lower(),
+        "exact": True,
+    }
+
+
+def _git_push_created_exact_tag(capture: ExecutionCapture, tag: str) -> bool:
+    if capture.returncode:
+        return False
+    try:
+        text = capture.stdout.decode("utf-8").replace("\r\n", "\n")
+    except UnicodeDecodeError:
+        return False
+    destination = f"refs/tags/{tag}"
+    matching: list[tuple[str, str, str]] = []
+    for line in text.split("\n"):
+        fields = line.split("\t")
+        if len(fields) != 3 or ":" not in fields[1]:
+            continue
+        _source, observed_destination = fields[1].rsplit(":", 1)
+        if observed_destination == destination:
+            matching.append((fields[0], fields[1], fields[2]))
+    return bool(
+        len(matching) == 1
+        and matching[0][0] == "*"
+        and matching[0][2] == "[new tag]"
+    )
+
+
+def _bind_immutable_gate_tag(
+    repo: str,
+    default_branch: str,
+    source_sha: str,
+    generated_identity: Mapping[str, Any],
+    mutate: Callable[[Callable[[], ExecutionCapture], str], bool],
+) -> dict[str, Any]:
+    current = _immutable_gate_tag_state(repo)
+    if current.get("exact") is True:
+        if current.get("sourceCommit") != source_sha:
+            raise IntegrityFailure(
+                "concurrent immutable gate tag targets a different source commit"
+            )
+        return {
+            **current,
+            "status": "already-bound",
+            "creationState": "not-required",
+            "mutationApplied": False,
+        }
+    if current.get("present") is not False:
+        raise IntegrityFailure("immutable gate tag state is not safely bindable")
+
+    governance = _gate_creation_governance_precondition(repo, default_branch)
+    identity = governance["automationPushIdentity"]
+    fingerprint = generated_identity.get("fingerprint")
+    private_path = generated_identity.get("privatePath")
+    if (
+        not isinstance(fingerprint, str)
+        or identity.get("configuredFingerprint") != fingerprint
+        or not isinstance(private_path, Path)
+    ):
+        raise IntegrityFailure(
+            "in-memory automation key is not the exact governed deploy identity"
+        )
+
+    gate_bytes = (PROJECT_ROOT / "filter.txt").read_bytes()
+    _validate_locked_gate_bytes(gate_bytes)
+    source_authority = _gate_tag_source_authority(
+        repo, IMMUTABLE_GATE_TAG, source_sha, gate_bytes
+    )
+
+    remote = f"git@github.com:{repo}.git"
+    push_capture: list[ExecutionCapture] = []
+    with _automation_git_ssh_command(private_path) as ssh_command:
+        remote_head = _capture_command(
+            (
+                "git", "-c", f"core.sshCommand={ssh_command}",
+                "ls-remote", "--heads", remote, f"refs/heads/{default_branch}",
+            ),
+            label="prove-automation-key-default-head",
+            timeout_seconds=60,
+        )
+        head = _exact_ls_remote_head(remote_head, default_branch, source_sha)
+
+        appeared = _immutable_gate_tag_state(repo)
+        if appeared.get("exact") is True:
+            if appeared.get("sourceCommit") != source_sha:
+                raise IntegrityFailure(
+                    "concurrent immutable gate tag targets a different source commit"
+                )
+            return {
+                **appeared,
+                "status": "observed-concurrent-exact-binding",
+                "creationState": "unknown",
+                "governancePrecondition": governance,
+                "automationHeadObservation": head,
+                "authorizedSource": source_authority,
+                "mutationApplied": None,
+            }
+
+        tag_ref = f"refs/tags/{IMMUTABLE_GATE_TAG}"
+
+        def push_tag() -> ExecutionCapture:
+            capture = _capture_command(
+                (
+                    "git", "-c", f"core.sshCommand={ssh_command}",
+                    "push", "--porcelain", "--no-verify", remote,
+                    f"{source_sha}:{tag_ref}",
+                ),
+                label="bind-immutable-gate-tag",
+                timeout_seconds=60,
+            )
+            push_capture.append(capture)
+            return capture
+
+        accepted = mutate(push_tag, "bind-immutable-gate-tag")
+        creation_state = (
+            "applied"
+            if accepted
+            and len(push_capture) == 1
+            and _git_push_created_exact_tag(push_capture[0], IMMUTABLE_GATE_TAG)
+            else "unknown"
+        )
+
+        observation_error: str | None = None
+        observed: Mapping[str, Any] | None = None
+        for attempt in range(6):
+            try:
+                observed = _immutable_gate_tag_state(repo)
+                if observed.get("exact") is True:
+                    if observed.get("sourceCommit") != source_sha:
+                        raise IntegrityFailure(
+                            "immutable gate tag was frozen to a different source commit"
+                        )
+                    break
+            except (TransientFailure, PrerequisiteFailure, OSError) as error:
+                observation_error = _safe_error(str(error))
+            if attempt < 5:
+                time.sleep(5)
+        if observed is None or observed.get("exact") is not True:
+            raise TransientFailure(
+                "immutable gate tag binding was not observed exact"
+                + (f": {observation_error}" if observation_error else "")
+            )
+        return {
+            **observed,
+            "status": (
+                "bound" if creation_state == "applied" else "observed-exact"
+            ),
+            "creationState": creation_state,
+            "governancePrecondition": governance,
+            "automationHeadObservation": head,
+            "authorizedSource": source_authority,
+            "mutationApplied": True if creation_state == "applied" else None,
         }
 
 
@@ -2504,7 +2701,6 @@ def _github_privileged_environments_state(
     return {
         environment: _github_environment_state(repo, environment, default_branch)
         for environment in (
-            RELEASE_PUBLISHER_ENVIRONMENT,
             MAIN_AUTOMATION_ENVIRONMENT,
             PAGES_ENVIRONMENT,
         )
@@ -2556,7 +2752,6 @@ def _required_cloud_configuration() -> dict[str, Any]:
                 "branchType": "branch",
             }
             for environment in (
-                RELEASE_PUBLISHER_ENVIRONMENT,
                 MAIN_AUTOMATION_ENVIRONMENT,
                 PAGES_ENVIRONMENT,
             )
@@ -2608,10 +2803,12 @@ def _cloud_configuration_is_exact(state: Mapping[str, Any]) -> bool:
         return False
     if not _cloud_actions_contract_is_exact(actions, expected_enabled=True):
         return False
-    if identity.get("exact") is not True or governance.get("exact") is not True:
+    if (
+        identity.get("exact") is not True
+        or governance.get("exact") is not True
+    ):
         return False
     if set(environments) != {
-        RELEASE_PUBLISHER_ENVIRONMENT,
         MAIN_AUTOMATION_ENVIRONMENT,
         PAGES_ENVIRONMENT,
     } or any(
@@ -2803,13 +3000,19 @@ def _configure_cloud(
             mutationApplied=False,
         )
         return _attach_command_evidence(result, evidence_dir)
-    if (
+    credential_rotation_required = bool(
         before["automationPushIdentity"].get("exact") is not True
-        and not _command_exists("ssh-keygen")
-    ):
-        raise PrerequisiteFailure(
-            "OpenSSH ssh-keygen is required before any cloud mutation"
-        )
+    )
+    if credential_rotation_required:
+        missing_commands = [
+            command for command in ("ssh-keygen",)
+            if not _command_exists(command)
+        ]
+        if missing_commands:
+            raise PrerequisiteFailure(
+                "OpenSSH key generation is required before any cloud mutation: "
+                + ", ".join(missing_commands)
+            )
     attempts: list[dict[str, Any]] = []
     accepted_count = 0
     ambiguous = False
@@ -2887,6 +3090,7 @@ def _configure_cloud(
             ambiguous = True
             governance_observation_error = _safe_error(f"{phase}: {error}")
             return False
+        governance_observation_error = None
         return True
 
     def write_ruleset(
@@ -2925,7 +3129,7 @@ def _configure_cloud(
             raise IntegrityFailure("governance ruleset mutation order is incomplete")
 
         governance_sequence_ready = True
-        for contract_name in GOVERNANCE_RULESET_MUTATION_ORDER[:2]:
+        for contract_name in GOVERNANCE_RULESET_MUTATION_ORDER:
             observed_ruleset = staged_governance["namedRulesets"][contract_name]
             if observed_ruleset["exact"] is True:
                 continue
@@ -2942,73 +3146,12 @@ def _configure_cloud(
                 governance_sequence_ready = False
                 break
 
-        if governance_sequence_ready:
-            named_rulesets = staged_governance["namedRulesets"]
-            creation_state = named_rulesets["gateTagCreation"]
-            freeze_state = named_rulesets["immutableGateTag"]
-            if creation_state["exact"] is not True or freeze_state["exact"] is not True:
-                bootstrap_freeze = _gate_tag_bootstrap_freeze_contract()
-                if freeze_state.get("contract") != bootstrap_freeze:
-                    governance_sequence_ready = write_ruleset(
-                        "immutableGateTag",
-                        bootstrap_freeze,
-                        "bootstrap-gate-tag-freeze",
-                    )
-                    if governance_sequence_ready:
-                        governance_sequence_ready = observe_governance(
-                            "observe-bootstrap-gate-tag-freeze"
-                        )
-                if governance_sequence_ready:
-                    freeze_state = staged_governance["namedRulesets"]["immutableGateTag"]
-                    if freeze_state.get("contract") != bootstrap_freeze:
-                        ambiguous = True
-                        governance_observation_error = (
-                            "bootstrap gate-tag freeze was not observed exact"
-                        )
-                        governance_sequence_ready = False
-
-                if governance_sequence_ready:
-                    creation_state = staged_governance["namedRulesets"]["gateTagCreation"]
-                    if creation_state["exact"] is not True:
-                        governance_sequence_ready = write_ruleset(
-                            "gateTagCreation",
-                            required_rulesets["gateTagCreation"],
-                            "configure-ruleset-gateTagCreation",
-                        )
-                        if governance_sequence_ready:
-                            governance_sequence_ready = observe_governance(
-                                "observe-controlled-gate-tag-creation"
-                            )
-                if governance_sequence_ready:
-                    creation_state = staged_governance["namedRulesets"]["gateTagCreation"]
-                    freeze_state = staged_governance["namedRulesets"]["immutableGateTag"]
-                    if (
-                        creation_state["exact"] is not True
-                        or freeze_state.get("contract") != bootstrap_freeze
-                    ):
-                        ambiguous = True
-                        governance_observation_error = (
-                            "controlled tag creation and bootstrap freeze were not both "
-                            "observed exact"
-                        )
-                        governance_sequence_ready = False
-
-                if governance_sequence_ready:
-                    governance_sequence_ready = write_ruleset(
-                        "immutableGateTag",
-                        required_rulesets["immutableGateTag"],
-                        "finalize-gate-tag-freeze",
-                    )
-                    if governance_sequence_ready:
-                        observe_governance("observe-final-gate-tag-freeze")
-
     require_head("after-governance")
 
     staged_environments: dict[str, dict[str, Any]] = {}
     environment_error: str | None = None
     try:
         for environment in (
-            RELEASE_PUBLISHER_ENVIRONMENT,
             MAIN_AUTOMATION_ENVIRONMENT,
             PAGES_ENVIRONMENT,
         ):
@@ -3025,7 +3168,6 @@ def _configure_cloud(
         staged_environments = dict(before["privilegedEnvironments"])
     environments_proven = bool(
         set(staged_environments) == {
-            RELEASE_PUBLISHER_ENVIRONMENT,
             MAIN_AUTOMATION_ENVIRONMENT,
             PAGES_ENVIRONMENT,
         }
@@ -3050,149 +3192,175 @@ def _configure_cloud(
     identity_before = before["automationPushIdentity"]
     staged_identity: Mapping[str, Any] = identity_before
     identity_observation_error: str | None = None
-    if identity_before["exact"] is not True:
+    if credential_rotation_required and staged_governance.get("exact") is True:
         try:
             staged_governance = _github_branch_governance_state(repo, default_branch)
+            if staged_governance.get("exact") is not True:
+                raise VerificationFailure(
+                    "branch governance was not exact before credential rotation"
+                )
+            governance_observation_error = None
+            staged_identity = _automation_push_identity_state(repo)
+            _validate_governance_mutation_source({
+                "automationPushIdentity": staged_identity,
+                "branchGovernance": staged_governance,
+            })
         except (CliFailure, OSError) as error:
             ambiguous = True
-            governance_observation_error = _safe_error(str(error))
-        if staged_governance.get("exact") is True:
-            try:
-                staged_identity = _automation_push_identity_state(repo)
-                _validate_governance_mutation_source({
-                    "automationPushIdentity": staged_identity,
-                    "branchGovernance": staged_governance,
-                })
-            except (CliFailure, OSError) as error:
-                ambiguous = True
-                identity_observation_error = _safe_error(str(error))
-                staged_identity = identity_before
-    if (
+            identity_observation_error = _safe_error(str(error))
+
+    identity_rotation_required = bool(
         staged_identity.get("exact") is not True
+    )
+    credential_preconditions_proven = bool(
+        identity_rotation_required
         and staged_governance.get("exact") is True
         and credential_actions_proven
         and environments_proven
         and identity_observation_error is None
-    ):
-        if before["enableStateCommits"]:
-            mutate(
-                lambda: _capture_command(
-                    (
-                        "gh", "variable", "set", "ENABLE_STATE_COMMITS",
-                        "--body", "false", "--repo", repo,
-                    ),
-                    label="deactivate-state-commits-for-key-rotation",
-                    timeout_seconds=60,
+    )
+    if credential_preconditions_proven:
+        mutate(
+            lambda: _capture_command(
+                (
+                    "gh", "variable", "set", "ENABLE_STATE_COMMITS",
+                    "--body", "false", "--repo", repo,
                 ),
-                "deactivate-state-commits-for-key-rotation",
-            )
-        require_head("immediately-before-environment-secret")
-        with _generated_automation_push_identity(repo) as generated_identity:
-            secret_write_accepted = mutate(
-                lambda: _capture_command_with_private_stdin_file(
-                    (
-                        "gh", "secret", "set", AUTOMATION_PUSH_SECRET_NAME,
-                        "--env", MAIN_AUTOMATION_ENVIRONMENT, "--repo", repo,
-                    ),
-                    generated_identity["privatePath"],
-                    label="set-automation-push-private-key-secret",
-                    timeout_seconds=60,
-                ),
-                "set-automation-push-private-key-secret",
-            )
-            mutate(
-                lambda: _capture_command(
-                    (
-                        "gh", "variable", "set",
-                        AUTOMATION_PUSH_FINGERPRINT_VARIABLE,
-                        "--body", generated_identity["fingerprint"],
-                        "--repo", repo,
-                    ),
-                    label="set-automation-push-fingerprint",
-                    timeout_seconds=60,
-                ),
-                "set-automation-push-fingerprint",
-            )
-            identity_material_staged = False
-            try:
-                staged_variables = _repository_variables(repo)
-                staged_environment_secrets = _environment_secret_names(
-                    repo, MAIN_AUTOMATION_ENVIRONMENT
-                )
-                identity_material_staged = bool(
-                    secret_write_accepted
-                    and staged_variables.get(AUTOMATION_PUSH_FINGERPRINT_VARIABLE)
-                    == generated_identity["fingerprint"]
-                    and AUTOMATION_PUSH_SECRET_NAME in staged_environment_secrets
-                )
-            except (CliFailure, OSError) as error:
-                ambiguous = True
-                identity_observation_error = _safe_error(str(error))
-            if identity_material_staged:
-                for existing_key in staged_identity.get("deployKeys", []):
-                    if existing_key.get("readOnly") is False:
-                        label = f"rotate-automation-push-deploy-key-{existing_key['id']}"
-                        mutate(
-                            lambda key_id=existing_key["id"], label=label: (
-                                _github_api_mutation(
-                                    f"repos/{repo}/keys/{key_id}",
-                                    label,
-                                    method="DELETE",
-                                )
-                            ),
-                            label,
-                        )
-                mutate(
-                    lambda: _github_api_mutation(
-                        f"repos/{repo}/keys",
-                        "create-automation-push-deploy-key",
-                        method="POST",
-                        payload={
-                            "title": AUTOMATION_PUSH_DEPLOY_KEY_TITLE,
-                            "key": generated_identity["publicKey"],
-                            "read_only": False,
-                        },
-                    ),
-                    "create-automation-push-deploy-key",
-                )
-            else:
-                ambiguous = True
-                identity_observation_error = identity_observation_error or (
-                    "automation secret and fingerprint were not both proven; "
-                    "deploy-key creation was skipped"
-                )
+                label="deactivate-state-commits-for-key-rotation",
+                timeout_seconds=60,
+            ),
+            "deactivate-state-commits-for-key-rotation",
+        )
         try:
-            staged_identity = _automation_push_identity_state(repo)
-            if (
-                staged_identity.get("keyExact") is True
-                and staged_identity.get("environmentSecretPresent") is True
-                and staged_identity.get("repositorySecretPresent") is True
-            ):
-                mutate(
-                    lambda: _capture_command(
-                        (
-                            "gh", "secret", "delete", AUTOMATION_PUSH_SECRET_NAME,
-                            "--repo", repo,
-                        ),
-                        label="remove-repository-scoped-automation-secret",
-                        timeout_seconds=60,
-                    ),
-                    "remove-repository-scoped-automation-secret",
+            rotation_variables = _repository_variables(repo)
+            if rotation_variables.get("ENABLE_STATE_COMMITS") != "false":
+                raise IntegrityFailure(
+                    "state commits were not observed disabled before key rotation"
                 )
-                staged_identity = _automation_push_identity_state(repo)
         except (CliFailure, OSError) as error:
             ambiguous = True
             identity_observation_error = _safe_error(str(error))
-            staged_identity = identity_before
-    elif staged_identity.get("exact") is not True:
+
+        if identity_observation_error is None:
+            try:
+                with _generated_automation_push_identity(repo) as generated_identity:
+                    require_head("immediately-before-deploy-key-retirement")
+                    if staged_identity.get("repositorySecretPresent") is True:
+                        mutate(
+                            lambda: _capture_command(
+                                (
+                                    "gh", "secret", "delete",
+                                    AUTOMATION_PUSH_SECRET_NAME, "--repo", repo,
+                                ),
+                                label="remove-repository-scoped-automation-secret",
+                                timeout_seconds=60,
+                            ),
+                            "remove-repository-scoped-automation-secret",
+                        )
+                    for existing_key in staged_identity.get("deployKeys", []):
+                        if existing_key.get("readOnly") is False:
+                            label = (
+                                "retire-automation-push-deploy-key-"
+                                f"{existing_key['id']}"
+                            )
+                            mutate(
+                                lambda key_id=existing_key["id"], label=label: (
+                                    _github_api_mutation(
+                                        f"repos/{repo}/keys/{key_id}",
+                                        label,
+                                        method="DELETE",
+                                    )
+                                ),
+                                label,
+                            )
+                    staged_identity = _automation_push_identity_state(repo)
+                    if (
+                        staged_identity.get("writeKeyCount") != 0
+                        or staged_identity.get("reservedTitleKeyCount") != 0
+                        or staged_identity.get("repositorySecretPresent") is not False
+                    ):
+                        raise VerificationFailure(
+                            "retired automation identity was not observed absent"
+                        )
+
+                    require_head("immediately-before-environment-secret")
+                    secret_write_accepted = mutate(
+                        lambda: _capture_command_with_private_stdin_file(
+                            (
+                                "gh", "secret", "set", AUTOMATION_PUSH_SECRET_NAME,
+                                "--env", MAIN_AUTOMATION_ENVIRONMENT, "--repo", repo,
+                            ),
+                            generated_identity["privatePath"],
+                            label="set-automation-push-private-key-secret",
+                            timeout_seconds=60,
+                        ),
+                        "set-automation-push-private-key-secret",
+                    )
+                    mutate(
+                        lambda: _capture_command(
+                            (
+                                "gh", "variable", "set",
+                                AUTOMATION_PUSH_FINGERPRINT_VARIABLE,
+                                "--body", generated_identity["fingerprint"],
+                                "--repo", repo,
+                            ),
+                            label="set-automation-push-fingerprint",
+                            timeout_seconds=60,
+                        ),
+                        "set-automation-push-fingerprint",
+                    )
+                    staged_variables = _repository_variables(repo)
+                    staged_environment_secrets = _environment_secret_names(
+                        repo, MAIN_AUTOMATION_ENVIRONMENT
+                    )
+                    staged_repository_secrets = _repository_secret_names(repo)
+                    identity_material_staged = bool(
+                        secret_write_accepted
+                        and staged_variables.get(AUTOMATION_PUSH_FINGERPRINT_VARIABLE)
+                        == generated_identity["fingerprint"]
+                        and AUTOMATION_PUSH_SECRET_NAME in staged_environment_secrets
+                        and AUTOMATION_PUSH_SECRET_NAME not in staged_repository_secrets
+                    )
+                    if not identity_material_staged:
+                        raise VerificationFailure(
+                            "replacement automation secret and fingerprint were not "
+                            "both proven"
+                        )
+                    mutate(
+                        lambda: _github_api_mutation(
+                            f"repos/{repo}/keys",
+                            "create-automation-push-deploy-key",
+                            method="POST",
+                            payload={
+                                "title": AUTOMATION_PUSH_DEPLOY_KEY_TITLE,
+                                "key": generated_identity["publicKey"],
+                                "read_only": False,
+                            },
+                        ),
+                        "create-automation-push-deploy-key",
+                    )
+                    staged_identity = _automation_push_identity_state(repo)
+                    if (
+                        staged_identity.get("exact") is not True
+                        or staged_identity.get("configuredFingerprint")
+                        != generated_identity["fingerprint"]
+                    ):
+                        raise VerificationFailure(
+                            "replacement automation identity was not observed exact"
+                        )
+            except IntegrityFailure:
+                raise
+            except (CliFailure, OSError) as error:
+                ambiguous = True
+                identity_observation_error = _safe_error(str(error))
+    elif identity_rotation_required:
         ambiguous = True
         if identity_observation_error is None:
             identity_observation_error = (
-                "branch governance was not proven; "
-                "automation key provisioning was skipped"
+                "branch governance was not proven; automation key rotation was skipped"
                 if staged_governance.get("exact") is not True
                 else "Actions policy, privileged environments, or source lease was not "
-                "proven; automation key provisioning was skipped"
+                "proven; automation key rotation was skipped"
             )
         if credential_actions_error:
             identity_observation_error = (
@@ -3236,6 +3404,8 @@ def _configure_cloud(
             and identity_proven
             and governance_proven
             and environment_policy_proven
+            and identity_observation_error is None
+            and governance_observation_error is None
         )
         activation_precondition = {
             "proven": complete_precondition,
@@ -3263,10 +3433,7 @@ def _configure_cloud(
                 activation_precondition["environmentObservationError"] = environment_error
 
     if activation_precondition["proven"]:
-        for name, key in (
-            ("ENABLE_STATE_COMMITS", "enableStateCommits"),
-            ("ENABLE_PAGES_PUBLISH", "enablePagesPublish"),
-        ):
+        for name in ("ENABLE_STATE_COMMITS", "ENABLE_PAGES_PUBLISH"):
             mutate(
                 lambda name=name: _capture_command(
                     ("gh", "variable", "set", name, "--body", "true", "--repo", repo),
@@ -3286,7 +3453,8 @@ def _configure_cloud(
                 ),
                 "enable-github-pages-workflow",
             )
-        for workflow, workflow_state in before["workflows"].items():
+        for workflow in WORKFLOW_FILES:
+            workflow_state = before["workflows"][workflow]
             if workflow_state["state"] != "active":
                 encoded_workflow = urllib.parse.quote(workflow, safe="")
                 mutate(
@@ -3422,8 +3590,6 @@ def _dispatch_cloud(
     dispatch_error: str | None = None
     try:
         dispatch_fields = ["--field", f"dispatch_nonce={dispatch_nonce}"]
-        if workflow == "publish-gate.yml":
-            dispatch_fields.extend(("--field", f"source_sha={source_sha}"))
         dispatched = _capture_command(
             (
                 "gh", "workflow", "run", workflow, "--repo", repo, "--ref", branch,
@@ -3510,8 +3676,6 @@ def _artifact_name_allowed(name: str, workflow: str, run_id: int) -> bool:
         return bool(re.fullmatch(
             rf"(?:filter-integrity|release-draft)-{escaped_id}", name
         ))
-    if workflow == "publish-gate.yml":
-        return name == f"gate-release-evidence-{run_id}"
     prefixes = (
         "candidate-queue", "dom-audit-json", "dom-audit-failure-screenshots",
         "candidate-aggregate", "promotion", "promotion-push",
@@ -4123,7 +4287,6 @@ def _public_release_bundle(manifest_url: str) -> tuple[
     dict[str, bytes],
     list[dict[str, Any]],
     dict[str, str],
-    dict[str, Any],
 ]:
     owner, repo_name, canonical_url = _validate_pages_manifest_url(manifest_url)
     binding = (owner, repo_name)
@@ -4139,24 +4302,10 @@ def _public_release_bundle(manifest_url: str) -> tuple[
         artifact_bytes[name] = content
         artifact_urls[name] = url
     manifest, records = _verify_release_files(manifest_bytes, artifact_bytes)
-    _validate_gate_artifact_lock(manifest, artifact_bytes["filter.txt"])
-    gate_owner, gate_repo, gate_tag = _gate_subscription_coordinates(
-        manifest["filterSubscriptionUrl"], manifest["gateArtifactVersion"]
-    )
-    if (gate_owner.casefold(), gate_repo.casefold()) != (
-        owner.casefold(), repo_name.casefold()
-    ):
-        raise IntegrityFailure("immutable gate release belongs to a different repository")
-    gate_release = _verify_immutable_gate_release(
-        f"{owner}/{repo_name}",
-        gate_tag,
-        manifest["filterSubscriptionUrl"],
-        artifact_bytes["filter.txt"],
-    )
-    artifact_urls["filterMirrorUrl"] = artifact_urls["filter.txt"]
-    artifact_urls["filter.txt"] = manifest["filterSubscriptionUrl"]
     artifact_urls["release-manifest.json"] = canonical_url
-    return manifest, artifact_bytes, records, artifact_urls, gate_release
+    if artifact_urls["hotdeal-focus.user.js"] != manifest["installUrl"]:
+        raise IntegrityFailure("release manifest installUrl differs from its Pages artifact")
+    return manifest, artifact_bytes, records, artifact_urls
 
 
 def _gate_release_binding(
@@ -4325,6 +4474,32 @@ def _gate_tag_source_authority(
         "filterBytes": len(remote_gate_bytes),
         "filterSha256": sha256_bytes(remote_gate_bytes),
         "exact": True,
+    }
+
+
+def _immutable_gate_tag_state(repo: str) -> dict[str, Any]:
+    gate_bytes = (PROJECT_ROOT / "filter.txt").read_bytes()
+    _validate_locked_gate_bytes(gate_bytes)
+    source_sha = _remote_gate_tag_commit(
+        repo, IMMUTABLE_GATE_TAG, allow_missing=True
+    )
+    if source_sha is None:
+        return {
+            "tag": IMMUTABLE_GATE_TAG,
+            "present": False,
+            "sourceCommit": None,
+            "sourceAuthority": None,
+            "exact": False,
+        }
+    authority = _gate_tag_source_authority(
+        repo, IMMUTABLE_GATE_TAG, source_sha, gate_bytes
+    )
+    return {
+        "tag": IMMUTABLE_GATE_TAG,
+        "present": True,
+        "sourceCommit": source_sha,
+        "sourceAuthority": authority,
+        "exact": authority.get("exact") is True,
     }
 
 
@@ -4945,6 +5120,30 @@ def _gate_release_source_context(repo: str, source_sha: str) -> dict[str, Any]:
     return {"repository": repository, "defaultBranch": default_branch}
 
 
+def _gate_creation_governance_precondition(
+    repo: str, default_branch: str
+) -> dict[str, Any]:
+    governance = _github_branch_governance_state(repo, default_branch)
+    if governance.get("exact") is not True:
+        raise IntegrityFailure(
+            "immutable gate tag creation governance is not exact"
+        )
+    identity = _automation_push_identity_state(repo)
+    _validate_governance_mutation_source({
+        "automationPushIdentity": identity,
+        "branchGovernance": governance,
+    })
+    if identity.get("exact") is not True:
+        raise IntegrityFailure(
+            "immutable gate tag creation requires one exact automation identity"
+        )
+    return {
+        "branchGovernance": governance,
+        "automationPushIdentity": identity,
+        "exact": True,
+    }
+
+
 def _prepare_gate_publication(
     args: argparse.Namespace,
     repo: str,
@@ -4981,34 +5180,31 @@ def _prepare_gate_publication(
     if policy["enabled"] is not True:
         raise IntegrityFailure("repository immutable releases are not enabled")
     tag_source_sha = _remote_gate_tag_commit(repo, tag, allow_missing=True)
-    tag_authority = None
     if tag_source_sha is None:
         if existing is not None:
             raise IntegrityFailure("recoverable gate draft has no frozen tag")
-        head = _gate_default_head_observation(
-            repo, default_branch, source_sha, "prepare-before-tag"
+        raise IntegrityFailure(
+            "immutable gate tag must be bound by cloud configure before publication"
         )
-        _require_exact_gate_head_observation(head)
-    else:
-        tag_authority = _gate_tag_source_authority(
-            repo, tag, tag_source_sha, gate_bytes
+    tag_authority = _gate_tag_source_authority(
+        repo, tag, tag_source_sha, gate_bytes
+    )
+    head = _gate_default_head_observation(
+        repo, default_branch, source_sha, "prepare-existing-tag"
+    )
+    if existing is not None:
+        _exact_gate_draft_has_asset(
+            existing,
+            repo,
+            tag,
+            subscription_url,
+            gate_bytes,
+            tag_source_sha,
         )
-        head = _gate_default_head_observation(
-            repo, default_branch, source_sha, "prepare-existing-tag"
-        )
-        if existing is not None:
-            _exact_gate_draft_has_asset(
-                existing,
-                repo,
-                tag,
-                subscription_url,
-                gate_bytes,
-                tag_source_sha,
-            )
     result = _base_result(
         "gate-release.prepare-publish",
         ok=True,
-        status=("ready-to-bind-tag" if tag_source_sha is None else "ready-to-recover"),
+        status="ready-to-recover",
         source_sha=source_sha,
         artifacts=artifacts,
         immutableReleasePolicy=policy,
@@ -5016,7 +5212,7 @@ def _prepare_gate_publication(
         release=(
             _gate_release_view_summary(existing) if existing is not None else None
         ),
-        tagPresent=tag_source_sha is not None,
+        tagPresent=True,
         tagSourceCommit=tag_source_sha,
         tagSourceAuthority=tag_authority,
         releaseComplete=False,
@@ -5945,7 +6141,7 @@ def command_adguard(args: argparse.Namespace) -> dict[str, Any]:
             raise UsageFailure("adguard csp-probe does not accept --manifest-source")
         return _command_adguard_csp_probe(args, ps_cli)
     if action == "inspect":
-        if args.apply or args.approve_exclusive_target_migration:
+        if args.apply:
             raise UsageFailure("adguard inspect is read-only")
         child = _powershell_json(
             (
@@ -5963,8 +6159,6 @@ def command_adguard(args: argparse.Namespace) -> dict[str, Any]:
     if action == "rollback":
         if not args.backup_path:
             raise UsageFailure("adguard rollback requires --backup-path")
-        if args.approve_exclusive_target_migration:
-            raise UsageFailure("rollback does not accept migration approval")
         child_args = [
             "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
             "-File", str(ps_cli), "restore-backup", "-BackupPath", args.backup_path,
@@ -5990,31 +6184,21 @@ def command_adguard(args: argparse.Namespace) -> dict[str, Any]:
         raise UsageFailure("backup-path is accepted only by adguard rollback")
     if action in {"inspect", "plan", "verify"} and args.apply:
         raise UsageFailure(f"adguard {action} is non-mutating and rejects --apply")
-    if action == "deploy" and args.apply and not args.approve_exclusive_target_migration:
-        raise UsageFailure(
-            "deploy --apply requires --approve-exclusive-target-migration"
-        )
-    if action != "deploy" and args.approve_exclusive_target_migration:
-        raise UsageFailure("migration approval is accepted only by adguard deploy")
-    manifest, _, artifacts, urls, gate_release = _public_release_bundle(
+    manifest, _, artifacts, urls = _public_release_bundle(
         args.manifest_source
     )
-    filter_entry = manifest["artifacts"]["filter.txt"]
     script_entry = manifest["artifacts"]["hotdeal-focus.user.js"]
     delegated_action = "verify" if action == "verify" else "deploy"
     child_args = [
         "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", str(ps_cli), delegated_action,
         "-UserscriptSource", urls["hotdeal-focus.user.js"],
-        "-FilterUrl", urls["filter.txt"],
         "-ReleaseManifestSource", urls["release-manifest.json"],
         "-ExpectedUserscriptSha256", script_entry["canonicalTextSha256"],
-        "-ExpectedFilterSha256", filter_entry["sha256"],
-        "-ExpectedInstalledFilterRulesSha256", filter_entry["installedRulesSha256"],
     ]
     apply_mutation = action == "deploy" and bool(args.apply)
     if apply_mutation:
-        child_args.extend(("-ApproveExclusiveTargetMigration", "-Apply"))
+        child_args.append("-Apply")
     elif delegated_action == "deploy":
         child_args.append("-WhatIf")
     child = _powershell_json(
@@ -6029,11 +6213,9 @@ def command_adguard(args: argparse.Namespace) -> dict[str, Any]:
         artifacts=artifacts,
         releaseVersion=manifest["releaseVersion"],
         protocolVersion=manifest["protocolVersion"],
-        gateArtifactVersion=manifest["gateArtifactVersion"],
-        gateRelease=gate_release,
+        installUrl=manifest["installUrl"],
         manifestSource=args.manifest_source,
         mutationApplied=apply_mutation,
-        exclusiveTargetMigrationApproved=apply_mutation,
         adguard=child,
     )
     return (
@@ -6085,17 +6267,6 @@ def build_parser() -> JsonArgumentParser:
     cloud.add_argument("--json", action="store_true", required=True)
     cloud.set_defaults(execute=command_cloud)
 
-    gate_release = commands.add_parser("gate-release")
-    gate_release.add_argument(
-        "action", choices=("enable-policy", "verify", "prepare-publish", "publish")
-    )
-    gate_release.add_argument("--repo", required=True)
-    gate_release.add_argument("--source-ref")
-    gate_release.add_argument("--evidence-dir")
-    gate_release.add_argument("--apply", action="store_true")
-    gate_release.add_argument("--json", action="store_true", required=True)
-    gate_release.set_defaults(execute=command_gate_release_entry)
-
     adguard = commands.add_parser("adguard")
     adguard.add_argument(
         "action", choices=(
@@ -6105,7 +6276,6 @@ def build_parser() -> JsonArgumentParser:
     adguard.add_argument("--manifest-source", default=DEFAULT_PAGES_MANIFEST)
     adguard.add_argument("--backup-path")
     adguard.add_argument("--evidence-dir")
-    adguard.add_argument("--approve-exclusive-target-migration", action="store_true")
     adguard.add_argument("--apply", action="store_true")
     adguard.add_argument("--json", action="store_true", required=True)
     adguard.set_defaults(execute=command_adguard)
@@ -6119,7 +6289,7 @@ def _failure_command(argv: Sequence[str], args: argparse.Namespace | None) -> st
         return f"{top}.{action}" if action else top
     if argv and argv[0] in {
         "doctor", "build", "verify", "release-evidence", "cloud",
-        "gate-release", "adguard",
+        "adguard",
     }:
         return str(argv[0])
     return "unknown"

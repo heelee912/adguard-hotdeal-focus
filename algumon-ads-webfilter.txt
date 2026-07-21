@@ -1,0 +1,19 @@
+! Title: Algumon scoped Google ad delivery exceptions
+! Description: Permits only listed Google delivery hosts when a request originates from Algumon.
+! Version: 1.0.0
+! Homepage: https://github.com/heelee912/adguard-hotdeal-focus
+! Expires: 12 hours
+! License: MIT
+!
+! Keep ordinary AdGuard web filtering and HTTPS filtering enabled.
+! DNS Allowlist entries are global; these web exceptions are the only
+! initiator-aware boundary and must remain scoped to Algumon.
+@@||safeframe.googlesyndication.com^$domain=algumon.com
+@@||pagead2.googlesyndication.com^$domain=algumon.com
+@@||tpc.googlesyndication.com^$domain=algumon.com
+@@||securepubads.g.doubleclick.net^$domain=algumon.com
+@@||pubads.g.doubleclick.net^$domain=algumon.com
+@@||googleads.g.doubleclick.net^$domain=algumon.com
+@@||googletagservices.com^$domain=algumon.com
+@@||googleadservices.com^$domain=algumon.com
+@@||beacons.gvt2.com^$domain=algumon.com

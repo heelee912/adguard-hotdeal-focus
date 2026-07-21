@@ -20,7 +20,9 @@ foreach ($statement in $ast.EndBlock.Statements) {
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
 $script:MaximumSourceBytes = 8MB
 $script:ReaderGateProtocolVersion = 2
-$script:ReaderGateGrant = 'GM_addElement'
+$script:ReaderGateGrants = @('GM_addElement', 'window.onurlchange')
+$script:ReleaseUserscriptUrl = ('https://heelee912.github.io/' +
+    'adguard-hotdeal-focus/hotdeal-focus.user.js')
 $script:MarkerGateArtifactVersion = '2.0.2'
 $script:MarkerGateSubscriptionUrl = ('https://github.com/heelee912/' +
     'adguard-hotdeal-focus/releases/download/gate-v2.0.2/filter.txt')
@@ -450,6 +452,44 @@ $state = [pscustomobject]@{
 }
 $client = New-FakeClient -State $state
 
+# Standalone deployment protects the exact User filter bytes and every installed
+# standard-filter subscription inventory without classifying or mutating rules.
+$unrelatedFilter = [pscustomobject]@{
+    FilterId = 42; FilterType = 'Standard'; IsEnabled = $true; IsTrusted = $false
+    IsCustom = $false; IsEditable = $false; Name = 'Unrelated privacy filter'
+    Version = '7.0.0'; SubscriptionUrl = 'https://filters.example/privacy.txt'
+}
+$state.Filters = @($unrelatedFilter)
+$state.FilterRules['42'] = [pscustomobject]@{
+    Rules = @('||tracker.example^', 'example.net##.sponsor')
+    DisabledRules = @('example.net##.sponsor')
+}
+$protectedStable = Get-StableProtectedFilterStateEvidence -Client $client
+$protectedRecord = ConvertTo-ProtectedFilterStateManifestRecord `
+    -StableEvidence $protectedStable
+$protectedBackup = [pscustomobject]@{ Manifest = [pscustomobject]@{
+        protected_filter_state = $protectedRecord } }
+$protectedCurrent = Assert-ProtectedFilterStateEqualsBackup -Client $client `
+    -Backup $protectedBackup -Phase 'contract no-op'
+Assert-Contract ([int] $protectedCurrent.subscription_inventory.count -eq 1) `
+    'unrelated subscription inventory count was not exact'
+Assert-Contract ([long] $protectedCurrent.subscription_inventory.bytes -gt 0) `
+    'unrelated subscription inventory byte evidence was empty'
+$state.FilterRules['42'].Rules = @('||tracker.example^', 'example.net##.changed')
+Assert-ThrowsLike -Action {
+    [void] (Assert-ProtectedFilterStateEqualsBackup -Client $client `
+            -Backup $protectedBackup -Phase 'contract tamper')
+} -Pattern '*subscription inventory changed*'
+$state.FilterRules['42'].Rules = @('||tracker.example^', 'example.net##.sponsor')
+$state.UserRules = @($ruleA, $ruleB, $ruleC, '||changed.example^')
+Assert-ThrowsLike -Action {
+    [void] (Assert-ProtectedFilterStateEqualsBackup -Client $client `
+            -Backup $protectedBackup -Phase 'contract User-filter tamper')
+} -Pattern '*User filter or subscription inventory changed*'
+$state.UserRules = @($ruleA, $ruleB, $ruleC, $unrelated)
+$state.Filters = @()
+$state.FilterRules = @{}
+
 # GetUserscriptMeta's local-source IsCustom=false value is promoted only after
 # name, version, style, and authenticated content validation all succeed.
 $manualSourceText = @'
@@ -543,6 +583,52 @@ Assert-ThrowsLike -Action {
     Assert-UserscriptMutationPreconditions -Snapshot $unownedNonCustom `
         -Desired $desiredUserscript
 } -Pattern '*lacks exact Reader Gate ownership metadata*'
+
+# Legacy migration uses this same exact-source installed-state check before it
+# may plan, back up, or disable any User-filter rule.
+$disabledRulesBeforeMigrationPrecondition = @($state.UserDisabledRules)
+$state.Userscripts = @()
+$state.UserscriptCode = ''
+$state.UserscriptGmProperties = ''
+Assert-ThrowsLike -Action {
+    [void] (Assert-UserscriptInstalled -Client $client -Desired $desiredUserscript)
+} -Pattern '*observed_count=0*'
+$state.Userscripts = @((New-UserscriptSnapshot -Version '2.0.0' -Enabled $false `
+            -Code '' -GmProperties '' -Custom $true).Info)
+$state.UserscriptCode = 'desired-code'
+$state.UserscriptGmProperties = '{"preserved":"migration"}'
+Assert-ThrowsLike -Action {
+    [void] (Assert-UserscriptInstalled -Client $client -Desired $desiredUserscript)
+} -Pattern '*observed_enabled=false*'
+$disabledMigrationSnapshot = Get-UserscriptSnapshot -Client $client
+Assert-ThrowsLike -Action {
+    Assert-BackupUserscriptMatchesDesired -Snapshot $disabledMigrationSnapshot `
+        -Desired $desiredUserscript
+} -Pattern '*exact enabled desired userscript*'
+$state.Userscripts[0].IsEnabled = $true
+$state.UserscriptCode = 'wrong-migration-code'
+Assert-ThrowsLike -Action {
+    [void] (Assert-UserscriptInstalled -Client $client -Desired $desiredUserscript)
+} -Pattern '*code SHA-256 does not match*'
+$state.UserscriptCode = 'desired-code'
+$validMigrationSnapshot = Get-UserscriptSnapshot -Client $client
+Assert-BackupUserscriptMatchesDesired -Snapshot $validMigrationSnapshot `
+    -Desired $desiredUserscript
+$unchangedProof = Assert-LegacyMigrationUserscriptUnchanged -Client $client `
+    -BackupSnapshot $validMigrationSnapshot -DesiredUserscript $desiredUserscript
+Assert-Contract ([bool] $unchangedProof.verified) `
+    'exact migration Userscript unchanged proof was not emitted'
+$state.UserscriptGmProperties = '{"externally":"changed"}'
+Assert-ThrowsLike -Action {
+    [void] (Assert-LegacyMigrationUserscriptUnchanged -Client $client `
+            -BackupSnapshot $validMigrationSnapshot `
+            -DesiredUserscript $desiredUserscript)
+} -Pattern '*changed during legacy migration*'
+$state.UserscriptGmProperties = [string] $validMigrationSnapshot.GmProperties
+Assert-Contract (Test-ExactStringMultiset -Left $disabledRulesBeforeMigrationPrecondition `
+        -Right $state.UserDisabledRules) `
+    'failed migration Userscript preconditions changed User-filter state'
+
 $state.Userscripts = @((New-UserscriptSnapshot -Version '1.0.0' -Enabled $true `
             -Code '' -GmProperties '' -Custom $true).Info)
 $state.UserscriptCode = 'stale-code'
@@ -811,20 +897,14 @@ $temporary = Join-Path ([System.IO.Path]::GetTempPath()) (
 [void] [System.IO.Directory]::CreateDirectory($temporary)
 try {
     # Parse the actual release artifacts through the same source contracts.
-    $manifestPath = Join-Path $PSScriptRoot '..\release-manifest.json'
-    $manifestContract = Get-ReleaseManifestContract -Source $manifestPath
-    $ExpectedUserscriptSha256 = $manifestContract.UserscriptCanonicalTextSha256
-    $ExpectedFilterSha256 = $manifestContract.FilterRawSha256
-    $ExpectedInstalledFilterRulesSha256 = $manifestContract.FilterInstalledRulesSha256
+    $ExpectedUserscriptSha256 = $null
     $builtUserscript = Get-UserscriptSource -Source (
         (Join-Path $PSScriptRoot '..\hotdeal-focus.user.js'))
-    $filterBytes = [System.IO.File]::ReadAllBytes((Join-Path $PSScriptRoot '..\filter.txt'))
-    $builtFilter = ConvertFrom-FilterSourceBytes -Bytes $filterBytes `
-        -Url $manifestContract.FilterSubscriptionUrl
-    Assert-ReleaseInputsMatchManifest -ManifestContract $manifestContract `
-        -DesiredUserscript $builtUserscript -DesiredFilter $builtFilter
-    Assert-Contract ($builtFilter.Name -ceq $FilterName) `
-        'actual built filter does not satisfy the CLI Title contract'
+    Assert-Contract (Test-ExactStringSequence -Left $builtUserscript.Grants `
+            -Right @('GM_addElement', 'window.onurlchange')) `
+        'actual release Userscript grants are not exact'
+    Assert-Contract ($builtUserscript.InstallUrl -ceq $script:ReleaseUserscriptUrl) `
+        'actual release Userscript install URL is not exact'
 
     # A schema-v2 backup is accepted only when its payloads reconstruct the
     # complete-state hash committed by two identical reads.
@@ -956,6 +1036,7 @@ finally {
     ok = $true
     tests = @('scope-classification', 'userscript-all-crash-prefixes',
         'userscript-authenticated-custom-promotion',
+        'migration-authenticated-userscript-precondition',
         'userscript-owned-noncustom-reclassification-and-exact-rollback',
         'userscript-visibility-convergence', 'filter-all-crash-prefixes',
         'disabled-filter-rule-rejection', 'inter-read-mutation-rejection',

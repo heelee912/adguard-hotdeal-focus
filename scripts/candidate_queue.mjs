@@ -4,8 +4,9 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-const QUEUE_SCHEMA_VERSION = 1;
-const RESULT_SCHEMA_VERSION = 1;
+const QUEUE_SCHEMA_VERSION = 2;
+const RESULT_SCHEMA_VERSION = 2;
+const PROMOTION_SCHEMA_VERSION = 2;
 const MAX_MATRIX_CANDIDATES = 256;
 const MATRIX_BATCH_SIZE = 8;
 const SHA256_PATTERN = /^[0-9a-f]{64}$/;
@@ -30,12 +31,12 @@ const RESULT_STATUSES = new Set([
 const RELEASE_REQUIRED_FILES = [
   "config/sites.json",
   "filter-static.txt",
-  "filter.txt",
   "hotdeal-focus.user.js",
   "package-lock.json",
   "package.json",
   "release-manifest.json",
   "state/approved-variants.json",
+  "state/release-high-water.json",
 ];
 const PROOF_REQUIRED_FILES = [
   "draft-manifest.json",
@@ -97,6 +98,17 @@ function canonicalValue(value) {
 
 function canonicalJson(value) {
   return JSON.stringify(canonicalValue(value));
+}
+
+function requireExactObjectKeys(value, expectedKeys, label) {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    fail(`${label} must be an object`);
+  }
+  const actual = Object.keys(value).sort();
+  const expected = [...expectedKeys].sort();
+  if (canonicalJson(actual) !== canonicalJson(expected)) {
+    fail(`${label} keys are not exact`);
+  }
 }
 
 function sha256Bytes(bytes) {
@@ -316,7 +328,7 @@ function candidateBatch(runNumber, candidateCount) {
   };
 }
 
-function queueSignaturePayload(queue, queueSha256) {
+function queueSealPayload(queue, queueSha256) {
   return {
     auditReportSha256: queue.auditReport?.sha256 ?? null,
     baseSha: queue.baseSha,
@@ -442,16 +454,17 @@ function createQueue(values) {
     const queuePath = path.join(temporary, "queue.json");
     writeJson(queuePath, emittedQueue);
     emittedQueueSha256 = sha256File(queuePath);
-    const signaturePayload = queueSignaturePayload(emittedQueue, emittedQueueSha256);
+    const sealPayload = queueSealPayload(emittedQueue, emittedQueueSha256);
     const manifest = {
       schemaVersion: QUEUE_SCHEMA_VERSION,
-      signature: {
+      seal: {
+        kind: "digest-bound",
         algorithm: "sha256",
-        payloadSha256: sha256Bytes(canonicalJson(signaturePayload)),
+        payloadSha256: sha256Bytes(canonicalJson(sealPayload)),
       },
-      signedQueueFile: "queue.json",
-      signedQueueSha256: emittedQueueSha256,
-      ...signaturePayload,
+      sealedQueueFile: "queue.json",
+      sealedQueueSha256: emittedQueueSha256,
+      ...sealPayload,
       candidateCount: candidates.length,
     };
     writeJson(path.join(temporary, "queue-manifest.json"), manifest);
@@ -487,6 +500,30 @@ function verifyQueue(queueRoot, expectedBaseSha = null, expectedQueueSha256 = nu
   const manifestPath = path.join(root, "queue-manifest.json");
   const queue = readJson(queuePath);
   const manifest = readJson(manifestPath);
+  requireExactObjectKeys(queue, [
+    "auditReport",
+    "baseSha",
+    "batch",
+    "candidates",
+    "schemaVersion",
+  ], "candidate queue");
+  requireExactObjectKeys(manifest, [
+    "auditReportSha256",
+    "baseSha",
+    "batch",
+    "candidateCount",
+    "orderedCandidates",
+    "queueSha256",
+    "schemaVersion",
+    "seal",
+    "sealedQueueFile",
+    "sealedQueueSha256",
+  ], "candidate queue manifest");
+  requireExactObjectKeys(
+    manifest.seal,
+    ["algorithm", "kind", "payloadSha256"],
+    "candidate queue seal",
+  );
   if (queue.schemaVersion !== QUEUE_SCHEMA_VERSION ||
       manifest.schemaVersion !== QUEUE_SCHEMA_VERSION) {
     fail("unsupported candidate queue schema");
@@ -547,20 +584,21 @@ function verifyQueue(queueRoot, expectedBaseSha = null, expectedQueueSha256 = nu
   if (expectedQueueSha256 !== null && queueSha256 !== expectedQueueSha256) {
     fail("candidate queue digest does not match the audit job output");
   }
-  const signaturePayload = queueSignaturePayload(queue, queueSha256);
-  const expectedSignature = sha256Bytes(canonicalJson(signaturePayload));
-  if (manifest.signedQueueFile !== "queue.json" ||
-      manifest.signedQueueSha256 !== queueSha256 ||
+  const sealPayload = queueSealPayload(queue, queueSha256);
+  const expectedSeal = sha256Bytes(canonicalJson(sealPayload));
+  if (manifest.sealedQueueFile !== "queue.json" ||
+      manifest.sealedQueueSha256 !== queueSha256 ||
       manifest.queueSha256 !== queueSha256 ||
       manifest.baseSha !== queue.baseSha ||
       canonicalJson(manifest.batch) !== canonicalJson(queue.batch) ||
       manifest.auditReportSha256 !== (queue.auditReport?.sha256 ?? null) ||
       manifest.candidateCount !== queue.candidates.length ||
       canonicalJson(manifest.orderedCandidates) !==
-        canonicalJson(signaturePayload.orderedCandidates) ||
-      manifest.signature?.algorithm !== "sha256" ||
-      manifest.signature?.payloadSha256 !== expectedSignature) {
-    fail("candidate queue signature manifest mismatch");
+        canonicalJson(sealPayload.orderedCandidates) ||
+      manifest.seal?.kind !== "digest-bound" ||
+      manifest.seal?.algorithm !== "sha256" ||
+      manifest.seal?.payloadSha256 !== expectedSeal) {
+    fail("candidate queue digest-bound seal mismatch");
   }
   return { manifest, queue, queueSha256 };
 }
@@ -579,10 +617,10 @@ function prepareCandidate(values) {
     (entry) => entry.fingerprint === fingerprint,
   );
   if (!candidate || candidate.index !== expectedIndex) {
-    fail("matrix tuple does not exist at the signed queue index");
+    fail("matrix tuple does not exist at the sealed queue index");
   }
   if (!verified.queue.batch.candidateIndexes.includes(candidate.index)) {
-    fail("matrix tuple is outside the signed circular batch");
+    fail("matrix tuple is outside the sealed circular batch");
   }
   createDirectoryAtomically(outputPath, (temporary) => {
     copyFile(
@@ -725,7 +763,7 @@ function capScreenshots(values) {
   });
 }
 
-function resultSignaturePayload(result, files) {
+function resultSealPayload(result, files) {
   return {
     baseSha: result.baseSha,
     draftSha256: result.draftSha256,
@@ -738,11 +776,8 @@ function resultSignaturePayload(result, files) {
 }
 
 function verifyProvenPayload(resultRoot, candidate) {
-  for (const relative of RELEASE_REQUIRED_FILES) {
-    if (!fs.existsSync(path.join(resultRoot, "release", ...relative.split("/")))) {
-      fail(`proven result is missing release/${relative}`);
-    }
-  }
+  const releaseRoot = path.join(resultRoot, "release");
+  requireExactFiles(releaseRoot, RELEASE_REQUIRED_FILES);
   for (const relative of PROOF_REQUIRED_FILES) {
     if (!fs.existsSync(path.join(resultRoot, "proof", relative))) {
       fail(`proven result is missing proof/${relative}`);
@@ -758,8 +793,13 @@ function verifyProvenPayload(resultRoot, candidate) {
     }
   }
   const proofRoot = path.join(resultRoot, "proof");
+  const releaseManifest = readJson(path.join(releaseRoot, "release-manifest.json"));
+  if (canonicalJson(Object.keys(releaseManifest.artifacts ?? {}).sort()) !==
+      canonicalJson(["hotdeal-focus.user.js"])) {
+    fail("candidate release manifest public artifact set is not userscript-only");
+  }
   if (sha256File(path.join(proofRoot, "promotion-draft.json")) !== candidate.draftSha256) {
-    fail("proven result promotion draft does not match the signed queue");
+    fail("proven result promotion draft does not match the sealed queue");
   }
   const draft = readJson(path.join(proofRoot, "promotion-draft.json"));
   const ready = readJson(path.join(proofRoot, "promotion-ready.json"));
@@ -786,10 +826,10 @@ function sealResult(values) {
     (entry) => entry.fingerprint === fingerprint,
   );
   if (!candidate || candidate.index !== expectedIndex) {
-    fail("candidate result does not match a signed queue tuple");
+    fail("candidate result does not match a sealed queue tuple");
   }
   if (!verified.queue.batch.candidateIndexes.includes(candidate.index)) {
-    fail("candidate result is outside the signed circular batch");
+    fail("candidate result is outside the sealed circular batch");
   }
   if (!fs.existsSync(resultRoot) || !fs.statSync(resultRoot).isDirectory()) {
     fail("candidate result directory does not exist");
@@ -822,11 +862,12 @@ function sealResult(values) {
       sha256: sha256File(absolute),
     };
   });
-  const payload = resultSignaturePayload(result, files);
+  const payload = resultSealPayload(result, files);
   writeJson(path.join(resultRoot, "result-manifest.json"), {
     schemaVersion: RESULT_SCHEMA_VERSION,
     ...payload,
-    signature: {
+    seal: {
+      kind: "digest-bound",
       algorithm: "sha256",
       payloadSha256: sha256Bytes(canonicalJson(payload)),
     },
@@ -837,6 +878,32 @@ function verifyResult(resultRoot, queueVerification, candidate) {
   const root = path.resolve(resultRoot);
   const result = readJson(path.join(root, "result.json"));
   const manifest = readJson(path.join(root, "result-manifest.json"));
+  requireExactObjectKeys(result, [
+    "baseSha",
+    "draftSha256",
+    "fingerprint",
+    "index",
+    "queueSha256",
+    "reason",
+    "schemaVersion",
+    "status",
+  ], "candidate result");
+  requireExactObjectKeys(manifest, [
+    "baseSha",
+    "draftSha256",
+    "files",
+    "fingerprint",
+    "index",
+    "queueSha256",
+    "schemaVersion",
+    "seal",
+    "status",
+  ], "candidate result manifest");
+  requireExactObjectKeys(
+    manifest.seal,
+    ["algorithm", "kind", "payloadSha256"],
+    "candidate result seal",
+  );
   if (result.schemaVersion !== RESULT_SCHEMA_VERSION ||
       manifest.schemaVersion !== RESULT_SCHEMA_VERSION ||
       !RESULT_STATUSES.has(result.status)) {
@@ -865,16 +932,17 @@ function verifyResult(resultRoot, queueVerification, candidate) {
       fail(`candidate result file digest mismatch: ${entry.path}`);
     }
   }
-  const payload = resultSignaturePayload(result, manifest.files);
+  const payload = resultSealPayload(result, manifest.files);
   if (manifest.baseSha !== payload.baseSha ||
       manifest.draftSha256 !== payload.draftSha256 ||
       manifest.fingerprint !== payload.fingerprint ||
       manifest.index !== payload.index ||
       manifest.queueSha256 !== payload.queueSha256 ||
       manifest.status !== payload.status ||
-      manifest.signature?.algorithm !== "sha256" ||
-      manifest.signature?.payloadSha256 !== sha256Bytes(canonicalJson(payload))) {
-    fail(`candidate result signature mismatch: ${candidate.fingerprint}`);
+      manifest.seal?.kind !== "digest-bound" ||
+      manifest.seal?.algorithm !== "sha256" ||
+      manifest.seal?.payloadSha256 !== sha256Bytes(canonicalJson(payload))) {
+    fail(`candidate result digest-bound seal mismatch: ${candidate.fingerprint}`);
   }
   if (result.status === "proven") {
     verifyProvenPayload(root, candidate);
@@ -884,7 +952,7 @@ function verifyResult(resultRoot, queueVerification, candidate) {
   return { manifest, result, root };
 }
 
-function promotionSignaturePayload(manifest) {
+function promotionSealPayload(manifest) {
   return {
     baseSha: manifest.baseSha,
     files: manifest.files,
@@ -909,9 +977,10 @@ function writePromotionManifest(promotionRoot, selection) {
     selectedFingerprint: selection.selectedFingerprint,
   };
   writeJson(path.join(promotionRoot, "promotion-manifest.json"), {
-    schemaVersion: 1,
+    schemaVersion: PROMOTION_SCHEMA_VERSION,
     ...payload,
-    signature: {
+    seal: {
+      kind: "digest-bound",
       algorithm: "sha256",
       payloadSha256: sha256Bytes(canonicalJson(payload)),
     },
@@ -1070,8 +1139,22 @@ function verifyPromotion(values) {
   const expectedQueueSha256 = required(values, "expected-queue-sha256");
   const manifestPath = path.join(root, "promotion-manifest.json");
   const manifest = readJson(manifestPath);
+  requireExactObjectKeys(manifest, [
+    "baseSha",
+    "files",
+    "queueSha256",
+    "schemaVersion",
+    "seal",
+    "selectedFingerprint",
+  ], "promotion manifest");
+  requireExactObjectKeys(
+    manifest.seal,
+    ["algorithm", "kind", "payloadSha256"],
+    "promotion seal",
+  );
   if (!SHA256_PATTERN.test(expectedQueueSha256) ||
-      manifest.schemaVersion !== 1 || manifest.baseSha !== expectedBaseSha ||
+      manifest.schemaVersion !== PROMOTION_SCHEMA_VERSION ||
+      manifest.baseSha !== expectedBaseSha ||
       !FINGERPRINT_PATTERN.test(manifest.selectedFingerprint) ||
       manifest.queueSha256 !== expectedQueueSha256 || !Array.isArray(manifest.files)) {
     fail("invalid promotion manifest binding");
@@ -1086,10 +1169,11 @@ function verifyPromotion(values) {
       fail(`promotion artifact digest mismatch: ${entry.path}`);
     }
   }
-  const payload = promotionSignaturePayload(manifest);
-  if (manifest.signature?.algorithm !== "sha256" ||
-      manifest.signature?.payloadSha256 !== sha256Bytes(canonicalJson(payload))) {
-    fail("promotion artifact signature mismatch");
+  const payload = promotionSealPayload(manifest);
+  if (manifest.seal?.kind !== "digest-bound" ||
+      manifest.seal?.algorithm !== "sha256" ||
+      manifest.seal?.payloadSha256 !== sha256Bytes(canonicalJson(payload))) {
+    fail("promotion artifact digest-bound seal mismatch");
   }
   const selection = readJson(path.join(root, "proof", "promotion-selection.json"));
   const queue = readJson(path.join(root, "proof", "candidate-queue.json"));
@@ -1103,7 +1187,7 @@ function verifyPromotion(values) {
       queue.baseSha !== expectedBaseSha ||
       sha256File(path.join(root, "proof", "candidate-queue.json")) !==
         expectedQueueSha256 ||
-      queueManifest.signedQueueSha256 !== manifest.queueSha256 ||
+      queueManifest.sealedQueueSha256 !== manifest.queueSha256 ||
       result.status !== "proven" ||
       result.fingerprint !== manifest.selectedFingerprint ||
       result.queueSha256 !== manifest.queueSha256) {
@@ -1118,10 +1202,10 @@ function printUsage() {
   process.stdout.write(`Candidate queue workflow helper\n\n`);
   process.stdout.write(`Commands:\n`);
   process.stdout.write(`  create-queue       Freeze ordered drafts and their immutable audit base\n`);
-  process.stdout.write(`  prepare-candidate  Verify and extract one signed matrix tuple\n`);
+  process.stdout.write(`  prepare-candidate  Verify and extract one sealed matrix tuple\n`);
   process.stdout.write(`  collect-evidence   Copy bounded JSON/hash evidence only\n`);
   process.stdout.write(`  cap-screenshots    Copy a deterministic bounded PNG subset\n`);
-  process.stdout.write(`  seal-result        Bind one isolated proof result to the signed queue\n`);
+  process.stdout.write(`  seal-result        Bind one isolated proof result to the sealed queue\n`);
   process.stdout.write(`  aggregate-results  Verify the exact matrix result set and select one\n`);
   process.stdout.write(`  verify-promotion   Verify the selected promotion provenance and bytes\n`);
 }

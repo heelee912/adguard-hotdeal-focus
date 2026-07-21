@@ -1,19 +1,13 @@
 {
   "artifacts": {
-    "filter.txt": {
-      "bytes": 70270,
-      "installedRulesSha256": "a7619be2bebf35f6f502366627697c19690c81adb6833c7cdaf7440066b593bb",
-      "sha256": "778c88297473f1aa94564e24780cdcc763164e6de9a7c6ab5ffd42df0e18ae38",
-      "version": "2.0.2"
-    },
     "hotdeal-focus.user.js": {
-      "bytes": 313912,
-      "canonicalTextSha256": "058937eb89e03e225de75e452880ebe185fab6a143265a9f95fcd9b7381cb3c7",
-      "sha256": "4c75c608c9e9d0ff7a489b8b4a5a03d4461e67e85073345ff35c4a2432d45d2c",
-      "version": "0.5.6"
+      "bytes": 324903,
+      "canonicalTextSha256": "862003b0c18e72b8abb83ecee5ca322ed7c90c59306a8ba67972807e972d9852",
+      "sha256": "ef380842e91161a0dc051b9f15d7e64763a74a293ba518f7d5ba2b0db2c55fd9",
+      "version": "0.6.4"
     }
   },
-  "configSha256": "8886a76fa013a6de50b17fbf18eaaaf3fb8fd7137f0bacfb3ed80559207344b6",
+  "configSha256": "319d1250756f1552ad37465e3a2b47c1ecb1e65f408835c6bcc70685733a5e27",
   "coverage": {
     "approvedVariantCount": 0,
     "contractCount": 9,
@@ -218,38 +212,39 @@
       }
     ]
   },
-  "filterSubscriptionUrl": "https://github.com/heelee912/adguard-hotdeal-focus/releases/download/gate-v2.0.2/filter.txt",
-  "gateArtifactVersion": "2.0.2",
-  "generatorVersion": "0.5.6",
+  "generatorVersion": "0.6.4",
+  "installUrl": "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
   "promotion": null,
   "protocolVersion": 2,
-  "releaseVersion": "0.5.6",
+  "releaseVersion": "0.6.4",
   "rollback_of": null,
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "sourceIntegrity": {
-    "config/gate-artifacts.json": {
-      "bytes": 449,
-      "sha256": "ea35eaa942216b5166b11cb8d86220cc6c8c52ebc1453b657d91fc64738df150"
-    },
     "config/sites.json": {
       "bytes": 22141,
-      "sha256": "8886a76fa013a6de50b17fbf18eaaaf3fb8fd7137f0bacfb3ed80559207344b6"
+      "sha256": "319d1250756f1552ad37465e3a2b47c1ecb1e65f408835c6bcc70685733a5e27"
     },
     "filter-static.txt": {
       "bytes": 7551,
-      "sha256": "00daf918aa0a274e1ec8533091260717ab356d5e8da482a7373967cdb5c75da0"
+      "sha256": "1485951c505f29f3b10fec1d6c8dc9175c10ca42ebc5032fb8c0cd81f0654b17"
     },
     "package-lock.json": {
-      "bytes": 2258,
-      "sha256": "470565c9926dc3d2e44c36aeb7727cec6f695af7e7cafcebff9ae5375705cd8f"
+      "bytes": 1826,
+      "sha256": "5d088d550193e9fcde009a3bb3420b95c8190f887b77da27f73db41bb1fa1943"
     },
     "package.json": {
-      "bytes": 1944,
-      "sha256": "e58e5508dfcbfcf268ab659c93a74e62771eddc12129d08b0e436a16cef13ad6"
+      "bytes": 1996,
+      "sha256": "6b02d53f3fda8b54a92c0e166c82955af9d3167d332c5387e5177fe2f9e2b6c3"
+    },
+    "state/release-high-water.json": {
+      "bytes": 70,
+      "mode": "append-only-prefix-v1",
+      "recordCount": 0,
+      "sha256": "718085737e9878bfd957a026df9177bf99bfa802811b6a1ffcefbb725369f875"
     },
     "tests/fixtures/behavior-baseline.json": {
       "bytes": 2322,
-      "sha256": "f585e1c67326a857da3f2db93b53fb0ff6ed159f76eda38cb91b688dfa93c16f"
+      "sha256": "bd2028256406197110c89f5fdc6127388e39043b4144fd00a32b42fdccd6d8db"
     },
     "tests/fixtures/dom-regressions.json": {
       "bytes": 25753,
