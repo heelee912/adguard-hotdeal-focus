@@ -1,6 +1,6 @@
 {
   "name": "adguard-hotdeal-focus",
-  "version": "0.6.22",
+  "version": "0.6.23",
   "private": true,
   "description": "Fail-closed AdGuard hot-deal reader gate and cloud DOM monitor",
   "type": "module",
