@@ -237,10 +237,10 @@
       "sha256": "a5547239d35e68604bb5c31412563d91d6189140b27d688cf52c35d56e32af47"
     },
     "state/release-high-water.json": {
-      "bytes": 882,
+      "bytes": 475,
       "mode": "append-only-prefix-v1",
-      "recordCount": 2,
-      "sha256": "59b69f33760a4efe1124d618b8cfaea991648902252b901090deb6ff08ac1e59"
+      "recordCount": 1,
+      "sha256": "b6ef9588c1d30bfdf9f59ff2fb6dcbd599df1217925cc55fe78727ca3c22aa1c"
     },
     "tests/fixtures/behavior-baseline.json": {
       "bytes": 2427,

@@ -15,23 +15,10 @@
       }
     },
     {
-      "bundleSha256": "5ea95322d95bf9b6ce586d4bc6e5c2899d1197808ce0a17039c6031be76586dd",
+      "bundleSha256": "b2730264306e5afad8062a62568a8944500f2489da4616356ddc38568f3c11a4",
       "manifest": {
         "bytes": 6277,
-        "sha256": "d5fcdcb6ec616aae3d612d922b7398957b2e9dba20ceb3fe1cf203b010a5cf89"
-      },
-      "releaseVersion": "0.6.24",
-      "userscript": {
-        "bytes": 310708,
-        "canonicalTextSha256": "366691a25d5caa15efbff12da93c04b1f85fe9409ef7f34cad3500064b4ea898",
-        "sha256": "cc83389e4ef42fd7d00a71721b7a13f18dbb7ba0a879239c105e576347c60608"
-      }
-    },
-    {
-      "bundleSha256": "5969c3f9c25a035c3ad1985587d37af08e965bea1edcc8f852e410b98439881c",
-      "manifest": {
-        "bytes": 6277,
-        "sha256": "c8235afaf48d5454511e237b9ca863631b801f1577dc8bc52111a9cd660f13f9"
+        "sha256": "acb9861d5ab53f4f927803841924716a37c15ce31e83fab262d40a5997be9fb9"
       },
       "releaseVersion": "0.6.25",
       "userscript": {
