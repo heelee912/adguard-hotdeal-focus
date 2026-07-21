@@ -115,6 +115,7 @@ const DEFAULT_ALGUMON_REQUEST_START_BUDGET =
   1 + REQUIRED_SITE_IDS.length * (1 + ALGUMON_SITE_LINK_SCAN_LIMIT);
 const REQUIRED_ROLE_NAMES = Object.freeze(["title", "body", "comments"]);
 const READER_GATE_PROTOCOL_VERSION = 2;
+const PREAUTHORIZED_ADGUARD_CONTROL_SCHEMA_VERSION = 3;
 const READER_GATE_INSTALL_URL =
   "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js";
 const FIRST_PAINT_PROBE_SCHEMA_VERSION = 1;
@@ -2637,9 +2638,16 @@ async function navigate(page, targetUrl, timeoutMs, externalResponseObserver = n
   let response = null;
   const responseObserver = externalResponseObserver ?? observeMainDocumentResponses(page);
   const navigationProof = seededNavigationProof(targetUrl);
+  const navigationUrl = navigationProof
+    ? (() => {
+        const parsed = new URL(targetUrl);
+        parsed.hash = "";
+        return parsed.href;
+      })()
+    : targetUrl;
   try {
     try {
-      response = await page.goto(targetUrl, {
+      response = await page.goto(navigationUrl, {
         waitUntil: "domcontentloaded",
         timeout: timeoutMs,
         ...(navigationProof ? { referer: ALGUMON_GLOBAL_DISCOVERY_URL } : {}),
@@ -4958,7 +4966,7 @@ async function auditUserscriptGate(
 ) {
   await page
     .waitForFunction(
-      ({ expectation, protocolVersion }) => {
+      ({ expectation, protocolVersion, preauthorizedControlSchemaVersion }) => {
         const html = document.documentElement;
         const state = html.getAttribute("data-hotdeal-focus-state");
         const status = html.getAttribute("data-hotdeal-focus-status");
@@ -4989,7 +4997,7 @@ async function auditUserscriptGate(
           diagnostics?.standaloneCascadeProof?.nonceBound === true &&
           diagnostics?.standaloneCascadeProof?.unownedHidden === true &&
           preauthorized?.kind === "preauthorized-userscript-style-control" &&
-          preauthorized?.schemaVersion === protocolVersion &&
+          preauthorized?.schemaVersion === preauthorizedControlSchemaVersion &&
           preauthorized?.gmAddElementCalls === 1 &&
           document.querySelectorAll(
             'style[data-hotdeal-focus-runtime-style="2"]',
@@ -4998,6 +5006,8 @@ async function auditUserscriptGate(
       {
         expectation: runtimeExpectation,
         protocolVersion: READER_GATE_PROTOCOL_VERSION,
+        preauthorizedControlSchemaVersion:
+          PREAUTHORIZED_ADGUARD_CONTROL_SCHEMA_VERSION,
       },
       { timeout: timeoutMs },
     )
@@ -5345,7 +5355,7 @@ function userscriptGateFailures(gate, requiredRoles) {
   }
   if (
     gate.testOnlyAdguardControl?.kind !== "preauthorized-userscript-style-control" ||
-    gate.testOnlyAdguardControl?.schemaVersion !== READER_GATE_PROTOCOL_VERSION ||
+    gate.testOnlyAdguardControl?.schemaVersion !== PREAUTHORIZED_ADGUARD_CONTROL_SCHEMA_VERSION ||
     gate.testOnlyAdguardControl?.gmAddElementCalls !== 1
   ) {
     failures.push("userscript-manager style control did not provide exactly one GM style");
@@ -7646,7 +7656,7 @@ async function auditSyntheticEdgeFixtures(
       seed: true,
       seedSiteType: "ppomppu",
       expectedState: "blocked",
-      expectedStatus: "terminal-algumon-site-mismatch",
+      expectedStatus: "terminal-article-identity-required",
       body: pathDriftBody,
     },
     {
@@ -7806,7 +7816,7 @@ async function auditSyntheticEdgeFixtures(
           );
         }
       }
-      if (!state.fragmentCleared) {
+      if (!fixture.forgedDirectNavigation && !state.fragmentCleared) {
         fixtureResult.failures.push("public Algumon seed fragment was not cleared");
       }
       if (state.paintFlashCount !== 0) {

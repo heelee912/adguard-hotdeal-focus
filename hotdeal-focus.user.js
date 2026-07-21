@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.20
+// @version      0.6.22
 // @description  Fail-closed semantic reader gate for Algumon hot-deal destinations.
 // @match        https://www.algumon.com/*
 // @match        https://*.clien.net/*
@@ -37,7 +37,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.6.20";
+  const GENERATOR_VERSION = "0.6.22";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -3555,9 +3555,17 @@
           !followsNode(element, bodyNode) ||
           element.matches("[itemtype*='schema.org/Comment'], [itemprop='comment']") ||
          elementMatchesAny(element, itemHints) ||
-         elementMatchesAny(element, controlHints) ||
+          elementMatchesAny(element, controlHints) ||
           elementMatchesAny(element, ignoredHints) ||
           isFormOnlyCommentEvidenceSurface(element)
+        ) {
+          return false;
+        }
+        const configuredMounts = queryAllSafe(element, mountHints);
+        if (
+          configuredMounts.length > 0 &&
+          queryAllSafe(element, itemHints).length === 0 &&
+          queryAllSafe(element, controlHints).length > 0
         ) {
           return false;
         }
