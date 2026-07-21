@@ -831,7 +831,9 @@ class SemanticContractTests(unittest.TestCase):
             self.source.index("function start(browserRoot)"):
             self.source.index("return { mode: \"reader-gate\"")
         ]
-        self.assertIn("const referrerSeed = referrerProjectionSeed(browserRoot, contract.id)", start)
+        self.assertIn("waitForReferrerProjectionSeed(", start)
+        self.assertIn("configureTargetWithReferrer(referrerSeed)", start)
+        self.assertIn("const REFERRER_SEED_WAIT_MS = 5_000", self.source)
         self.assertNotIn("readAndClearSeeds(browserRoot)", start)
         self.assertIn("resolveDocumentFromSeedCandidates", self.source)
         self.assertIn('"seed-title-match"', self.source)
@@ -1712,14 +1714,25 @@ process.stdout.write(JSON.stringify({
             self.source.index("function start(browserRoot)"):
             self.source.index("return { mode: \"reader-gate\"")
         ]
-        self.assertIn("const referrerSeed = referrerProjectionSeed(browserRoot, contract.id)", start)
-        self.assertIn("function configureTargetWithReferrer()", start)
+        self.assertIn("waitForReferrerProjectionSeed(", start)
+        self.assertIn("function configureTargetWithReferrer(referrerSeed)", start)
         self.assertIn("const canonicalSeeds = referrerSeed ? Object.freeze([referrerSeed])", start)
         self.assertIn("layouts.length === 0", start)
         self.assertIn("isInitialActivation", start)
         self.assertIn('terminalNavigationBlock("route-unapproved")', start)
         self.assertIn("const evaluationLayouts = layouts", start)
         self.assertNotIn("contract.layouts", start)
+
+    def test_projection_rechecks_atomic_role_visibility_and_external_controls(self) -> None:
+        paint_risk = self.source[
+            self.source.index("function projectionHasPublisherPaintRiskWithPublisherStyles"):
+            self.source.index("function projectionHasPublisherPaintRisk(document, state)")
+        ]
+        self.assertIn("!isRendered(root)", paint_risk)
+        self.assertIn("state.commentControlScope", paint_risk)
+        self.assertIn("function insideCommentProjection", self.source)
+        self.assertIn("queryAllSafe(pageRoot, controlHints)", self.source)
+        self.assertIn("commentControlScope: pageRoot", self.source)
 
 
 class CandidatePromotionContractTests(unittest.TestCase):

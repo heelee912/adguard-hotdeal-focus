@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FILTER_PATH = ROOT / "algumon-ads-webfilter.txt"
 POLICY_PATH = ROOT / "ALGUMON_ADS_NETWORK_POLICY.md"
+CLI_PATH = ROOT / "scripts" / "adguard_windows_cli.ps1"
 SUBSCRIPTION_URL = (
     "https://raw.githubusercontent.com/heelee912/adguard-hotdeal-focus/main/"
     "algumon-ads-webfilter.txt"
@@ -54,6 +55,20 @@ class AlgumonAdsWebFilterTests(unittest.TestCase):
         self.assertIn("fail-closed", policy)
         self.assertIn("NextDNS alone cannot", policy)
         self.assertNotIn("@@||algumon.com^$document", FILTER_PATH.read_text(encoding="utf-8"))
+
+    def test_stale_policy_is_refreshed_before_exact_verification(self) -> None:
+        cli = CLI_PATH.read_text(encoding="utf-8")
+        install = cli[
+            cli.index("function Install-AlgumonAdDeliveryPolicy"):
+            cli.index("function Get-EnabledAlgumonDocumentWideExceptions")
+        ]
+        self.assertIn("$requiresRefresh", install)
+        self.assertIn("CheckForFilterSubscriptionsUpdate", install)
+        self.assertIn("Assert-AlgumonAdDeliveryPolicyInstalled", install)
+        self.assertLess(
+            install.index("CheckForFilterSubscriptionsUpdate"),
+            install.index("Assert-AlgumonAdDeliveryPolicyInstalled"),
+        )
 
 
 if __name__ == "__main__":

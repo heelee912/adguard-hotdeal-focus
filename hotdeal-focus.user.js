@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.24
+// @version      0.6.25
 // @description  Fail-closed semantic reader gate for Algumon hot-deal destinations.
 // @match        https://www.algumon.com/*
 // @match        https://*.clien.net/*
@@ -37,7 +37,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.6.24";
+  const GENERATOR_VERSION = "0.6.25";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -87,6 +87,7 @@
   const MEASUREMENT_HTML_RESTORES = new WeakMap();
   let measurementStyleSheetMutationDepth = 0;
   const CASCADE_PROOF_FRAMES = 2;
+  const REFERRER_SEED_WAIT_MS = 5_000;
   const RUNTIME_GLOBAL = typeof globalThis === "object" ? globalThis : null;
   const NATIVE = Object.freeze({
     MutationObserver: RUNTIME_GLOBAL?.MutationObserver ?? null,
@@ -1210,6 +1211,68 @@
     return title
       ? Object.freeze({ siteType, title, commentCount: null })
       : null;
+  }
+
+  function waitForReferrerProjectionSeed(browserRoot, siteType, callback) {
+    const document = browserRoot?.document;
+    if (!document || !isAlgumonReferrer(document.referrer)) {
+      callback(null);
+      return;
+    }
+    const initialSeed = referrerProjectionSeed(browserRoot, siteType);
+    if (initialSeed) {
+      callback(initialSeed);
+      return;
+    }
+    let settled = false;
+    let observer = null;
+    const subscriptions = [];
+    const subscribe = function subscribe(target, type, listener) {
+      if (typeof NATIVE.addEventListener !== "function" || !target) return;
+      NATIVE.reflectApply(NATIVE.addEventListener, target, [type, listener, true]);
+      subscriptions.push([target, type, listener]);
+    };
+    const finish = function finish(seed) {
+      if (settled) return;
+      settled = true;
+      if (observer) observer.disconnect();
+      if (typeof NATIVE.removeEventListener === "function") {
+        subscriptions.forEach(function unsubscribe([target, type, listener]) {
+          NATIVE.reflectApply(NATIVE.removeEventListener, target, [type, listener, true]);
+        });
+      }
+      callback(seed);
+    };
+    const inspect = function inspect() {
+      const seed = referrerProjectionSeed(browserRoot, siteType);
+      if (seed) finish(seed);
+    };
+    try {
+      observer = createNativeMutationObserver(browserRoot, inspect);
+      observer.observe(document, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+        attributeFilter: ["content"],
+      });
+    } catch (_error) {
+      finish(null);
+      return;
+    }
+    subscribe(document, "DOMContentLoaded", inspect);
+    subscribe(browserRoot, "load", inspect);
+    const schedule = browserRoot === RUNTIME_GLOBAL
+      ? NATIVE.setTimeout
+      : browserRoot?.setTimeout?.bind(browserRoot);
+    if (typeof schedule !== "function") {
+      finish(null);
+      return;
+    }
+    schedule(function failClosedWhenTitleNeverArrives() {
+      finish(referrerProjectionSeed(browserRoot, siteType));
+    }, REFERRER_SEED_WAIT_MS);
+    inspect();
   }
 
   function utf8ByteLength(value) {
@@ -2360,9 +2423,14 @@
     return false;
   }
 
-  function commentProjectionShells(commentMount, commentItems, commentControls) {
+  function commentProjectionShells(
+    commentMount,
+    commentItems,
+    commentControls,
+    commentControlScope,
+  ) {
     const shells = new Set([commentMount]);
-    commentItems.concat(commentControls).forEach(function collectShellChain(surface) {
+    commentItems.forEach(function collectItemShellChain(surface) {
       for (
         let current = surface.parentElement;
         current && commentMount.contains(current);
@@ -2370,6 +2438,17 @@
       ) {
         shells.add(current);
         if (current === commentMount) break;
+      }
+    });
+    commentControls.forEach(function collectControlShellChain(surface) {
+      const boundary = commentMount.contains(surface) ? commentMount : commentControlScope;
+      for (
+        let current = surface;
+        current && boundary && boundary.contains(current);
+        current = current.parentElement
+      ) {
+        shells.add(current);
+        if (current === boundary) break;
       }
     });
     return Array.from(shells);
@@ -2396,6 +2475,7 @@
     commentControls,
     commentIgnored,
     allowStableZeroAreaMount,
+    commentControlScope,
   ) {
     const visibleItems = commentItems.filter(isRendered);
     const visibleControls = commentControls.filter(isRendered);
@@ -2422,6 +2502,7 @@
       commentMount,
       commentItems,
       commentControls,
+      commentControlScope || commentMount,
     ).filter(function shellOutsideIgnored(shell) {
       return !insideAnyRoot(shell, commentIgnored || []);
     });
@@ -4419,6 +4500,16 @@
     });
   }
 
+  function insideCommentProjection(state, element) {
+    return Boolean(state && element && (
+      state.roles.comments === element ||
+      state.roles.comments.contains(element) ||
+      Array.from(state.commentControlRoots).some(function insideTrackedControl(control) {
+        return control === element || control.contains(element);
+      })
+    ));
+  }
+
   function roleClass(role) {
     return `${CLASS.rolePrefix}${role}`;
   }
@@ -4686,7 +4777,7 @@
 
   function orderedCommentControls(state) {
     return uniqueElements(queryAllSafe(
-      state.roles.comments,
+      state.commentControlScope,
       state.commentControlSelectors,
     )).sort(documentOrder);
   }
@@ -4730,7 +4821,7 @@
 
   function approvedDormantCommentControl(control, state) {
     return control.isConnected &&
-      state.roles.comments.contains(control) &&
+      state.commentControlScope.contains(control) &&
       state.toggleableCommentControls.has(control) &&
       state.commentControlRoots.has(control) &&
       state.ownedElements.has(control) &&
@@ -4834,6 +4925,7 @@
       commentIgnoredSelectors: commentIgnoredSelectors.slice(),
       commentItemRoots: new Set(roles.commentItems),
       commentControlRoots: new Set(roles.commentControls),
+      commentControlScope: roles.commentControlScope || roles.comments,
       toggleableCommentControls: new Set(roles.commentDormantControls || []),
       commentIgnoredRoots: new Set(roles.commentIgnored),
       commentCountBoundary: roles.commentCountBoundary || commonRoot,
@@ -4953,6 +5045,7 @@
     const projectionInvariantFails = function projectionInvariantFails(role, excludedRoots) {
       const root = state.roles[role];
       return Boolean(root) && (
+        !isRendered(root) ||
         containsUnprovenShadowBoundary(root, Array.from(excludedRoots || [])) ||
         containsPublisherPaintRisk(root, Array.from(excludedRoots || []))
       );
@@ -4974,6 +5067,7 @@
         Array.from(state.commentIgnoredRoots),
         state.projectionPolicy.allowEmptyComments === true &&
           state.projectionPolicy.provenCommentCount === 0,
+        state.commentControlScope,
       );
   }
 
@@ -5121,7 +5215,7 @@
       queryAllSafe(state.roles.comments, state.commentItemSelectors)
     );
     const currentCommentControls = uniqueElements(
-      queryAllSafe(state.roles.comments, state.commentControlSelectors)
+      queryAllSafe(state.commentControlScope, state.commentControlSelectors)
     );
     const currentCommentIgnored = uniqueElements(
       queryAllSafe(state.roles.comments, state.commentIgnoredSelectors)
@@ -5679,7 +5773,7 @@
       return { ok: false, role: "product", reason: "approved-order" };
     }
     const commentItems = uniqueElements(queryAllSafe(commentMount, itemHints));
-    const commentControls = uniqueElements(queryAllSafe(commentMount, controlHints));
+    const commentControls = uniqueElements(queryAllSafe(pageRoot, controlHints));
     const commentIgnored = uniqueElements(queryAllSafe(commentMount, ignoredHints));
     const commentDormantControls = commentControls.filter(
       function dormantInitialControl(control) { return !isRendered(control); }
@@ -5701,6 +5795,7 @@
       commentControls,
       commentIgnored,
       allowStableZeroAreaMount,
+      pageRoot,
     )) {
       return { ok: false, role: "comments", reason: "publisher-paint" };
     }
@@ -5857,6 +5952,7 @@
       commentControls,
       commentDormantControls,
       commentIgnored,
+      commentControlScope: pageRoot,
       commentCountBoundary: pageRoot,
       commentTotalEvidence: visibleCommentTotal.elements,
       bodyIgnored,
@@ -6332,12 +6428,12 @@
           mutation?.type !== "attributes" ||
           !COMMENT_CONTROL_STATE_ATTRIBUTES.has(mutation.attributeName) ||
           target?.nodeType !== 1 ||
-          !state.roles.comments.contains(target)
+          !insideCommentProjection(state, target)
         ) {
           return false;
         }
         let candidate = target;
-        while (candidate && state.roles.comments.contains(candidate)) {
+        while (candidate && state.commentControlScope.contains(candidate)) {
           if (
             state.commentControlRoots.has(candidate) &&
             elementMatchesAny(candidate, state.commentControlSelectors)
@@ -6395,7 +6491,7 @@
         const mutationParent = mutation?.target?.nodeType === 1
           ? mutation.target
           : mutation?.target?.parentElement;
-        if (!state || !mutationParent || !state.roles.comments.contains(mutationParent)) {
+        if (!state || !mutationParent || !insideCommentProjection(state, mutationParent)) {
           return false;
         }
         if (mutation.type === "characterData") return true;
@@ -6869,7 +6965,7 @@
     };
     const closestTrackedRoot = function closestTrackedRoot(element, rootSet) {
       let candidate = element;
-      while (candidate && state.roles.comments.contains(candidate)) {
+      while (candidate && state.commentControlScope.contains(candidate)) {
         if (rootSet.has(candidate)) {
           return candidate;
         }
@@ -7078,7 +7174,7 @@
           const inBody = state.roles.body.contains(target);
           const inProduct = Boolean(state.roles.product?.contains(target));
           const inTitle = insideOwnedTitleSurface(target);
-          const inComments = state.roles.comments.contains(target);
+          const inComments = insideCommentProjection(state, target);
           if (!inBody && !inProduct && !inTitle && !inComments) {
             continue;
           }
@@ -7090,9 +7186,7 @@
           ) {
             continue;
           }
-          const controlRoot = inComments
-            ? closestTrackedRoot(target, state.commentControlRoots)
-            : null;
+          const controlRoot = closestTrackedRoot(target, state.commentControlRoots);
           if (
             controlRoot &&
             COMMENT_CONTROL_STATE_ATTRIBUTES.has(name) &&
@@ -7125,9 +7219,7 @@
           mutationParent && state.roles.product?.contains(mutationParent),
         );
         const inTitle = insideOwnedTitleSurface(mutationParent);
-        const inComments = Boolean(
-          mutationParent && state.roles.comments.contains(mutationParent),
-        );
+        const inComments = insideCommentProjection(state, mutationParent);
         const inIgnoredProjection = Boolean(mutationParent) && (
           insideAnyRoot(mutationParent, trackedRoots(state.bodyIgnoredRoots)) ||
           insideAnyRoot(mutationParent, trackedRoots(state.productIgnoredRoots)) ||
@@ -7803,8 +7895,7 @@
         html.style.setProperty("display", "none", "important");
         return;
       }
-      const referrerSeed = referrerProjectionSeed(browserRoot, contract.id);
-      function configureTargetWithReferrer() {
+      function configureTargetWithReferrer(referrerSeed) {
       const canonicalSeeds = referrerSeed ? Object.freeze([referrerSeed]) : Object.freeze([]);
       const initialSeedCandidates = Object.freeze(canonicalSeeds.filter(function matchesTargetSite(seed) {
         return seed.siteType === contract.id;
@@ -7980,7 +8071,11 @@
         terminalNavigationBlock("navigation-guard-unavailable");
       }
       }
-      configureTargetWithReferrer();
+      waitForReferrerProjectionSeed(
+        browserRoot,
+        contract.id,
+        configureTargetWithReferrer,
+      );
     });
     return { mode: "reader-gate", site: contract.id };
   }

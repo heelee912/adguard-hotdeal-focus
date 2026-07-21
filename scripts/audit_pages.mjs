@@ -6488,10 +6488,16 @@ async function auditSyntheticNoFlashFixture(
         status: 200,
         contentType: "text/html; charset=utf-8",
         body: `<!doctype html>
-<html lang="ko"><head><meta charset="utf-8"><title>${fixtureTitle}</title>
-<meta property="og:title" content="${fixtureTitle}"></head>
+<html lang="ko"><head><meta charset="utf-8"></head>
 <body><header id="noise-before-core">navigation noise</header><main id="fixture-root"></main>
 <script>
+window.setTimeout(() => {
+  document.title = '${fixtureTitle}';
+  const metadata = document.createElement('meta');
+  metadata.setAttribute('property', 'og:title');
+  metadata.setAttribute('content', '${fixtureTitle}');
+  document.head.append(metadata);
+}, 50);
 window.setTimeout(() => {
   document.querySelector('#fixture-root').innerHTML =
     '<section class="content_view"><h1 class="post_subject">검증용 핫딜 제목</h1>' +

@@ -3,7 +3,7 @@
   "metadata": {
     "title": "AdGuard Hotdeal Focus",
     "description": "Shows only the hot-deal title, purchase information, article body, and comments.",
-    "version": "0.6.24",
+    "version": "0.6.25",
     "expires_hours": 12,
     "license": "MIT",
     "rollback_of": null

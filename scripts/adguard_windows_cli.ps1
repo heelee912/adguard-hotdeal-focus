@@ -2044,7 +2044,7 @@ function Initialize-AdGuardAssemblies {
             'GetUserscriptGmProperties', 'GetUserscriptMeta', 'InstallUserscriptFromMeta',
             'UpdateUserscriptCode', 'UpdateUserscriptGmProperties', 'SetUserscriptStatus',
             'RemoveUserscript', 'GetSubscriptionsMetaSet', 'InstallCustomFilter',
-            'UpdateFilterSubscriptionState', 'RemoveFilterSubscription',
+            'CheckForFilterSubscriptionsUpdate', 'UpdateFilterSubscriptionState', 'RemoveFilterSubscription',
             'DisableFilterRules', 'EnableFilterRules')) {
         if (-not $script:ApiClientType.GetMethod($methodName)) {
             throw "Installed AdGuard IPC contract is missing method: $methodName"
@@ -5009,12 +5009,36 @@ function Install-AlgumonAdDeliveryPolicy {
         throw 'Algumon ad-delivery policy URL is installed more than once'
     }
     $created = $false
+    $refreshed = $false
     $priorEnabled = if ($before.Count -eq 1) { [bool] $before[0].IsEnabled } else { $false }
     $priorTrusted = if ($before.Count -eq 1) { [bool] $before[0].IsTrusted } else { $false }
     try {
         if ($before.Count -eq 0) {
             $Client.InstallCustomFilter($Source.MetaSet, $script:StandardFilterType)
             $created = $true
+        } else {
+            $beforeRules = $Client.GetFilterSubscriptionRules(
+                $before[0].FilterId,
+                $script:StandardFilterType
+            )
+            $beforePolicyRules = @($beforeRules.Rules | ForEach-Object { [string] $_ } |
+                Where-Object { $_.Trim().Length -gt 0 -and -not $_.TrimStart().StartsWith('!') })
+            $ruleDifference = Compare-Object -ReferenceObject ($Source.Rules | Sort-Object) `
+                -DifferenceObject ($beforePolicyRules | Sort-Object)
+            $requiresRefresh = $before[0].Name -cne $script:AlgumonAdPolicyName -or
+                $before[0].Version -cne $Source.Version -or
+                @($beforeRules.DisabledRules).Count -ne 0 -or
+                @($ruleDifference).Count -ne 0
+            if ($requiresRefresh) {
+                # AdGuard exposes subscription refresh by type, not by filter id.  Invoke it
+                # only after proving this exact custom policy is stale, then verify the exact
+                # URL, version, and rules below before enabling any exception.
+                [void] $Client.CheckForFilterSubscriptionsUpdate(
+                    $true,
+                    @($script:StandardFilterType)
+                )
+                $refreshed = $true
+            }
         }
         $current = @(Get-AlgumonAdDeliveryFilters -Client $Client)
         if ($current.Count -ne 1) {
@@ -5028,7 +5052,7 @@ function Install-AlgumonAdDeliveryPolicy {
         )
         $verified = Assert-AlgumonAdDeliveryPolicyInstalled -Client $Client -Source $Source
         return [pscustomobject]@{
-            Changed = $created -or -not $priorEnabled -or -not $priorTrusted
+            Changed = $created -or $refreshed -or -not $priorEnabled -or -not $priorTrusted
             Verified = $verified
         }
     }
