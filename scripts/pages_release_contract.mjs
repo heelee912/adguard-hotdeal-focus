@@ -197,6 +197,9 @@ function verifyUserscriptMetadata(bytes, version) {
   const grants = metadataValues(source, "grant");
   if (JSON.stringify(grants) !== JSON.stringify([
     "GM_addElement",
+    "GM_getValue",
+    "GM_setValue",
+    "GM_deleteValue",
     "window.onurlchange",
   ])) {
     fail("userscript grants are not the exact standalone contract");

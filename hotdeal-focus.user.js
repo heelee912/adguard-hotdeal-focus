@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.25
+// @version      0.6.26
 // @description  Fail-closed semantic reader gate for Algumon hot-deal destinations.
 // @match        https://www.algumon.com/*
 // @match        https://*.clien.net/*
@@ -13,6 +13,9 @@
 // @match        https://*.arca.live/*
 // @run-at       document-start
 // @grant        GM_addElement
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
 // @grant        window.onurlchange
 // @noframes
 // @downloadURL  https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
@@ -37,7 +40,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.6.25";
+  const GENERATOR_VERSION = "0.6.26";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -87,7 +90,9 @@
   const MEASUREMENT_HTML_RESTORES = new WeakMap();
   let measurementStyleSheetMutationDepth = 0;
   const CASCADE_PROOF_FRAMES = 2;
-  const REFERRER_SEED_WAIT_MS = 5_000;
+  const ALGUMON_NAVIGATION_STORAGE_KEY = "hdf-v2.algumon-navigation-seeds";
+  const ALGUMON_NAVIGATION_SEED_TTL_MS = 120_000;
+  const MAX_ALGUMON_NAVIGATION_SEEDS = 8;
   const RUNTIME_GLOBAL = typeof globalThis === "object" ? globalThis : null;
   const NATIVE = Object.freeze({
     MutationObserver: RUNTIME_GLOBAL?.MutationObserver ?? null,
@@ -105,6 +110,9 @@
       : null,
     setTimeout: typeof RUNTIME_GLOBAL?.setTimeout === "function"
       ? RUNTIME_GLOBAL.setTimeout.bind(RUNTIME_GLOBAL)
+      : null,
+    cryptoGetRandomValues: typeof RUNTIME_GLOBAL?.crypto?.getRandomValues === "function"
+      ? RUNTIME_GLOBAL.crypto.getRandomValues.bind(RUNTIME_GLOBAL.crypto)
       : null,
     addEventListener: RUNTIME_GLOBAL?.EventTarget?.prototype?.addEventListener ?? null,
     removeEventListener: RUNTIME_GLOBAL?.EventTarget?.prototype?.removeEventListener ?? null,
@@ -1197,82 +1205,216 @@
     }
   }
 
-  function referrerProjectionSeed(browserRoot, siteType) {
-    const document = browserRoot?.document;
-    if (!document || !isAlgumonReferrer(document.referrer)) return null;
-    const titleCandidates = [
-      document.querySelector('meta[property="og:title"]')?.getAttribute("content"),
-      document.querySelector('meta[name="twitter:title"]')?.getAttribute("content"),
-      document.title,
-    ];
-    const title = titleCandidates.map(function normalizeCandidate(candidate) {
-      return truncateRawTitle(candidate, 240);
-    }).find(Boolean);
-    return title
-      ? Object.freeze({ siteType, title, commentCount: null })
+  function canonicalAlgumonNavigationUrl(urlLike) {
+    try {
+      const url = new URL(urlLike);
+      if (
+        url.protocol !== "https:" || !isAlgumonHostname(url.hostname) ||
+        url.username || url.password || url.port
+      ) return null;
+      url.hash = "";
+      return url.href;
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function navigationStorageApi(browserRoot) {
+    const get = browserRoot?.GM_getValue;
+    const set = browserRoot?.GM_setValue;
+    const remove = browserRoot?.GM_deleteValue;
+    return typeof get === "function" && typeof set === "function" && typeof remove === "function"
+      ? Object.freeze({ get, set, remove })
       : null;
   }
 
-  function waitForReferrerProjectionSeed(browserRoot, siteType, callback) {
-    const document = browserRoot?.document;
-    if (!document || !isAlgumonReferrer(document.referrer)) {
-      callback(null);
-      return;
-    }
-    const initialSeed = referrerProjectionSeed(browserRoot, siteType);
-    if (initialSeed) {
-      callback(initialSeed);
-      return;
-    }
-    let settled = false;
-    let observer = null;
-    const subscriptions = [];
-    const subscribe = function subscribe(target, type, listener) {
-      if (typeof NATIVE.addEventListener !== "function" || !target) return;
-      NATIVE.reflectApply(NATIVE.addEventListener, target, [type, listener, true]);
-      subscriptions.push([target, type, listener]);
-    };
-    const finish = function finish(seed) {
-      if (settled) return;
-      settled = true;
-      if (observer) observer.disconnect();
-      if (typeof NATIVE.removeEventListener === "function") {
-        subscriptions.forEach(function unsubscribe([target, type, listener]) {
-          NATIVE.reflectApply(NATIVE.removeEventListener, target, [type, listener, true]);
-        });
-      }
-      callback(seed);
-    };
-    const inspect = function inspect() {
-      const seed = referrerProjectionSeed(browserRoot, siteType);
-      if (seed) finish(seed);
-    };
+  function readAlgumonNavigationSeeds(browserRoot) {
+    const storage = navigationStorageApi(browserRoot);
+    if (!storage) return null;
     try {
-      observer = createNativeMutationObserver(browserRoot, inspect);
-      observer.observe(document, {
-        subtree: true,
-        childList: true,
-        characterData: true,
-        attributes: true,
-        attributeFilter: ["content"],
-      });
+      const raw = NATIVE.reflectApply(storage.get, browserRoot, [
+        ALGUMON_NAVIGATION_STORAGE_KEY,
+        "",
+      ]);
+      if (raw === null || typeof raw === "undefined" || String(raw) === "") {
+        return [];
+      }
+      const payload = JSON.parse(String(raw));
+      if (!Array.isArray(payload?.records)) return [];
+      const now = Date.now();
+      return payload.records.filter(function validStoredSeed(record) {
+        return record && typeof record === "object" &&
+          /^[a-f0-9]{48}$/u.test(String(record.token || "")) &&
+          typeof record.siteType === "string" &&
+          typeof record.title === "string" &&
+          canonicalAlgumonNavigationUrl(record.sourceReferrer) === record.sourceReferrer &&
+          Number.isSafeInteger(record.expiresAt) &&
+          record.expiresAt >= now &&
+          record.expiresAt <= now + ALGUMON_NAVIGATION_SEED_TTL_MS &&
+          (record.commentCount === null || normalizeCommentCount(record.commentCount) === record.commentCount);
+      }).slice(-MAX_ALGUMON_NAVIGATION_SEEDS);
     } catch (_error) {
-      finish(null);
-      return;
+      return null;
     }
-    subscribe(document, "DOMContentLoaded", inspect);
-    subscribe(browserRoot, "load", inspect);
-    const schedule = browserRoot === RUNTIME_GLOBAL
-      ? NATIVE.setTimeout
-      : browserRoot?.setTimeout?.bind(browserRoot);
-    if (typeof schedule !== "function") {
-      finish(null);
-      return;
+  }
+
+  function writeAlgumonNavigationSeeds(browserRoot, records) {
+    const storage = navigationStorageApi(browserRoot);
+    if (!storage || !Array.isArray(records)) return false;
+    try {
+      if (records.length === 0) {
+        NATIVE.reflectApply(storage.remove, browserRoot, [ALGUMON_NAVIGATION_STORAGE_KEY]);
+      } else {
+        NATIVE.reflectApply(storage.set, browserRoot, [
+          ALGUMON_NAVIGATION_STORAGE_KEY,
+          JSON.stringify({ records: records.slice(-MAX_ALGUMON_NAVIGATION_SEEDS) }),
+        ]);
+      }
+      return true;
+    } catch (_error) {
+      return false;
     }
-    schedule(function failClosedWhenTitleNeverArrives() {
-      finish(referrerProjectionSeed(browserRoot, siteType));
-    }, REFERRER_SEED_WAIT_MS);
-    inspect();
+  }
+
+  function createAlgumonNavigationToken(browserRoot) {
+    const getRandomValues = browserRoot === RUNTIME_GLOBAL
+      ? NATIVE.cryptoGetRandomValues
+      : browserRoot?.crypto?.getRandomValues?.bind(browserRoot.crypto);
+    if (typeof getRandomValues !== "function") return null;
+    const bytes = new Uint8Array(24);
+    try {
+      getRandomValues(bytes);
+      return Array.from(bytes).map(function encodeByte(value) {
+        return value.toString(16).padStart(2, "0");
+      }).join("");
+    } catch (_error) {
+      return null;
+    }
+  }
+
+  function seedCardForAnchor(anchor) {
+    return anchor.closest(
+      "[data-site-type], [data-source-site], [data-source-comment-count], " +
+      "[data-origin-comment-count], article, li, section",
+    ) || anchor.parentElement;
+  }
+
+  function sourceSeedSiteType(anchor, destination) {
+    const directContract = findSiteContract(destination.hostname);
+    if (directContract && articleIdentity(destination, directContract.id)) {
+      return directContract.id;
+    }
+    if (!isAlgumonHostname(destination.hostname)) return null;
+    const card = seedCardForAnchor(anchor);
+    const declared = [
+      card?.getAttribute("data-site-type"),
+      card?.getAttribute("data-source-site"),
+      anchor.getAttribute("data-site-type"),
+    ].map(function normalizeSiteType(value) {
+      return String(value || "").trim().toLocaleLowerCase();
+    }).find(Boolean);
+    return declared && findSiteContractById(declared) ? declared : null;
+  }
+
+  function findSiteContractById(siteId) {
+    return SITE_CONTRACTS.find(function matchingSiteContract(contract) {
+      return contract.id === siteId;
+    }) || null;
+  }
+
+  function captureAlgumonNavigationSeed(browserRoot, anchor) {
+    const sourceReferrer = canonicalAlgumonNavigationUrl(browserRoot.location?.href);
+    if (!sourceReferrer || !anchor?.href) return false;
+    let destination;
+    try {
+      destination = new URL(anchor.href, sourceReferrer);
+    } catch (_error) {
+      return false;
+    }
+    const siteType = sourceSeedSiteType(anchor, destination);
+    const card = seedCardForAnchor(anchor);
+    const titleCandidates = [
+      card?.getAttribute("data-source-title"),
+      card?.getAttribute("data-title"),
+      card?.querySelector("h1, h2, h3, .title, [data-title]")?.textContent,
+      anchor.textContent,
+    ];
+    const title = titleCandidates.map(function normalizeSourceTitle(candidate) {
+      return truncateRawTitle(candidate, 240);
+    }).find(Boolean);
+    if (!siteType || !title) return false;
+    const commentCount = [
+      card?.getAttribute("data-source-comment-count"),
+      card?.getAttribute("data-origin-comment-count"),
+      card?.getAttribute("data-comment-count"),
+      anchor.getAttribute("data-source-comment-count"),
+    ].map(normalizeCommentCount).find(function knownCount(value) { return value !== null; }) ?? null;
+    const records = readAlgumonNavigationSeeds(browserRoot);
+    const token = createAlgumonNavigationToken(browserRoot);
+    if (!records || !token) return false;
+    const expiresAt = Date.now() + ALGUMON_NAVIGATION_SEED_TTL_MS;
+    const retainedRecords = records.filter(function discardSupersededSourceSeed(record) {
+      return record.sourceReferrer !== sourceReferrer;
+    });
+    return writeAlgumonNavigationSeeds(browserRoot, retainedRecords.concat([{
+      token,
+      sourceReferrer,
+      siteType,
+      title,
+      commentCount,
+      expiresAt,
+    }]));
+  }
+
+  function forwardAlgumonNavigationSeed(browserRoot) {
+    const current = canonicalAlgumonNavigationUrl(browserRoot.location?.href);
+    const referrer = canonicalAlgumonNavigationUrl(browserRoot.document?.referrer);
+    const records = readAlgumonNavigationSeeds(browserRoot);
+    if (!current || !referrer || !records) return false;
+    const candidates = records.filter(function matchingSource(record) {
+      return record.sourceReferrer === referrer;
+    });
+    if (candidates.length !== 1) return false;
+    return writeAlgumonNavigationSeeds(browserRoot, records.map(function forwardRecord(record) {
+      return record.token === candidates[0].token ? { ...record, sourceReferrer: current } : record;
+    }));
+  }
+
+  function installAlgumonSeedCapture(browserRoot) {
+    const document = browserRoot?.document;
+    if (!document || typeof NATIVE.addEventListener !== "function") return false;
+    forwardAlgumonNavigationSeed(browserRoot);
+    const capture = function captureQualifiedAlgumonClick(event) {
+      if (event.defaultPrevented || (event.type === "click" && event.button !== 0) ||
+        (event.type === "auxclick" && event.button !== 1)) return;
+      const anchor = event.target?.closest?.("a[href]");
+      if (anchor) captureAlgumonNavigationSeed(browserRoot, anchor);
+    };
+    ["click", "auxclick"].forEach(function registerSeedCapture(type) {
+      NATIVE.reflectApply(NATIVE.addEventListener, document, [type, capture, true]);
+    });
+    return true;
+  }
+
+  function consumeAlgumonNavigationSeed(browserRoot) {
+    const document = browserRoot?.document;
+    const referrer = canonicalAlgumonNavigationUrl(document?.referrer);
+    if (!referrer || !isAlgumonReferrer(referrer)) return null;
+    const records = readAlgumonNavigationSeeds(browserRoot);
+    if (!records) return null;
+    const candidates = records.filter(function matchingNavigationSeed(record) {
+      return record.sourceReferrer === referrer;
+    });
+    if (candidates.length !== 1) return null;
+    const seed = candidates[0];
+    if (!writeAlgumonNavigationSeeds(browserRoot, records.filter(function discardConsumedSeed(record) {
+      return record.token !== seed.token;
+    }))) return null;
+    return Object.freeze({
+      siteType: seed.siteType,
+      title: seed.title,
+      commentCount: seed.commentCount,
+    });
   }
 
   function utf8ByteLength(value) {
@@ -4501,13 +4643,20 @@
   }
 
   function insideCommentProjection(state, element) {
-    return Boolean(state && element && (
-      state.roles.comments === element ||
-      state.roles.comments.contains(element) ||
-      Array.from(state.commentControlRoots).some(function insideTrackedControl(control) {
+    if (!state || !element) return false;
+    const insideTrackedControl = Array.from(state.commentControlRoots).some(
+      function matchingTrackedControl(control) {
         return control === element || control.contains(element);
-      })
-    ));
+      },
+    );
+    const insideExternalControlParent = Array.from(
+      state.commentControlMutationRoots || [],
+    ).some(function matchingExternalControlParent(parent) {
+      return parent === element || parent.contains(element);
+    });
+    return state.roles.comments === element ||
+      state.roles.comments.contains(element) ||
+      insideTrackedControl || insideExternalControlParent;
   }
 
   function roleClass(role) {
@@ -4926,6 +5075,16 @@
       commentItemRoots: new Set(roles.commentItems),
       commentControlRoots: new Set(roles.commentControls),
       commentControlScope: roles.commentControlScope || roles.comments,
+      commentControlMutationRoots: new Set(
+        roles.commentControls
+          .filter(function externalCommentControl(control) {
+            return !roles.comments.contains(control);
+          })
+          .map(function externalControlParent(control) { return control.parentElement; })
+          .filter(function validExternalControlParent(parent) {
+            return parent && (roles.commentControlScope || roles.comments).contains(parent);
+          }),
+      ),
       toggleableCommentControls: new Set(roles.commentDormantControls || []),
       commentIgnoredRoots: new Set(roles.commentIgnored),
       commentCountBoundary: roles.commentCountBoundary || commonRoot,
@@ -7881,6 +8040,12 @@
     if (!browserRoot || !browserRoot.document || !browserRoot.location) {
       return { mode: "library" };
     }
+    if (isAlgumonHostname(browserRoot.location.hostname)) {
+      return {
+        mode: "algumon-seed-capture",
+        installed: installAlgumonSeedCapture(browserRoot),
+      };
+    }
     const contract = findSiteContract(browserRoot.location.hostname);
     if (!contract) {
       return { mode: "out-of-scope" };
@@ -7895,8 +8060,8 @@
         html.style.setProperty("display", "none", "important");
         return;
       }
-      function configureTargetWithReferrer(referrerSeed) {
-      const canonicalSeeds = referrerSeed ? Object.freeze([referrerSeed]) : Object.freeze([]);
+      function configureTargetWithNavigationSeed(navigationSeed) {
+      const canonicalSeeds = navigationSeed ? Object.freeze([navigationSeed]) : Object.freeze([]);
       const initialSeedCandidates = Object.freeze(canonicalSeeds.filter(function matchesTargetSite(seed) {
         return seed.siteType === contract.id;
       }));
@@ -8035,7 +8200,7 @@
           return;
         }
         const evaluationLayouts = layouts;
-        const targetReason = "algumon-referrer-known-route";
+        const targetReason = "algumon-navigation-seed-known-route";
         initialActivation = false;
         try {
           activeStyle = installRuntimeGateStyle(document);
@@ -8071,10 +8236,8 @@
         terminalNavigationBlock("navigation-guard-unavailable");
       }
       }
-      waitForReferrerProjectionSeed(
-        browserRoot,
-        contract.id,
-        configureTargetWithReferrer,
+      configureTargetWithNavigationSeed(
+        consumeAlgumonNavigationSeed(browserRoot),
       );
     });
     return { mode: "reader-gate", site: contract.id };
@@ -8094,6 +8257,8 @@
     pathPatternMatches,
     articleIdentity,
     sameArticleNavigation,
+    captureAlgumonNavigationSeed,
+    consumeAlgumonNavigationSeed,
     scoreBodyFeatures,
     scoreCommentFeatures,
     decideCandidate,

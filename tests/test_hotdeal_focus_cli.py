@@ -54,6 +54,9 @@ def release_bundle():
 // @match        https://*.arca.live/*
 // @run-at       document-start
 // @grant        GM_addElement
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
 // @grant        window.onurlchange
 // @downloadURL  https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 // @updateURL    https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js

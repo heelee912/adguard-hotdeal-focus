@@ -21,7 +21,7 @@ $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
 $script:MaximumSourceBytes = 8MB
 $script:ReaderGateProtocolVersion = 2
 $script:ReaderGateGrants = @(
-    'GM_addElement', 'window.onurlchange'
+    'GM_addElement', 'GM_getValue', 'GM_setValue', 'GM_deleteValue', 'window.onurlchange'
 )
 $script:ReleaseUserscriptUrl = ('https://heelee912.github.io/' +
     'adguard-hotdeal-focus/hotdeal-focus.user.js')
@@ -982,7 +982,7 @@ try {
         (Join-Path $PSScriptRoot '..\hotdeal-focus.user.js'))
     Assert-Contract (Test-ExactStringSequence -Left $builtUserscript.Grants `
             -Right @(
-                'GM_addElement', 'window.onurlchange'
+                'GM_addElement', 'GM_getValue', 'GM_setValue', 'GM_deleteValue', 'window.onurlchange'
             )) `
         'actual release Userscript grants are not exact'
     Assert-Contract ($builtUserscript.InstallUrl -ceq $script:ReleaseUserscriptUrl) `

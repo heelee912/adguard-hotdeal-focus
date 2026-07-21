@@ -37,6 +37,9 @@ function userscript(version = "1.2.3") {
 // @updateURL    ${installUrl}
 // @run-at       document-start
 // @grant        GM_addElement
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
 // @grant        window.onurlchange
 // ==/UserScript==
 (() => {})();

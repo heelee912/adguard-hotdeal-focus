@@ -215,9 +215,62 @@ const FIRST_PAINT_PROBE_SOURCE = String.raw`
 })();
 `;
 
+const PREAUTHORIZED_AUDIT_NAVIGATION_STORAGE_SOURCE = String.raw`(() => {
+  "use strict";
+  const storageKey = "hdf-v2.algumon-navigation-seeds";
+  let storedValue = "";
+  const encoded = new URLSearchParams(location.hash.slice(1)).get("hdf-audit-seed");
+  if (encoded && /^[A-Za-z0-9_-]+$/.test(encoded)) {
+    try {
+      const padded = encoded.replace(/-/g, "+").replace(/_/g, "/") +
+        "=".repeat((4 - (encoded.length % 4)) % 4);
+      const seed = JSON.parse(decodeURIComponent(Array.prototype.map.call(
+        atob(padded),
+        (character) => "%" + character.charCodeAt(0).toString(16).padStart(2, "0"),
+      ).join("")));
+      if (
+        typeof seed?.siteType === "string" && typeof seed?.title === "string" &&
+        (seed.commentCount === null || Number.isSafeInteger(seed.commentCount))
+      ) {
+        const sourceUrl = new URL(document.referrer);
+        if (sourceUrl.protocol !== "https:" ||
+            !/(^|\.)algumon\.com$/i.test(sourceUrl.hostname) ||
+            sourceUrl.username || sourceUrl.password || sourceUrl.port) {
+          throw new Error("audit seed requires an actual Algumon referrer");
+        }
+        sourceUrl.hash = "";
+        storedValue = JSON.stringify({
+          records: [{
+            token: "a".repeat(48),
+            sourceReferrer: sourceUrl.href,
+            siteType: seed.siteType,
+            title: seed.title,
+            commentCount: seed.commentCount,
+            expiresAt: Date.now() + 120000,
+          }],
+        });
+      }
+      history.replaceState(null, "", location.pathname + location.search);
+    } catch (_error) {
+      storedValue = "";
+    }
+  }
+  Object.defineProperties(globalThis, {
+    GM_getValue: { configurable: false, value: (key, fallback) =>
+      key === storageKey && storedValue ? storedValue : fallback },
+    GM_setValue: { configurable: false, value: (key, value) => {
+      if (key === storageKey) storedValue = String(value);
+    } },
+    GM_deleteValue: { configurable: false, value: (key) => {
+      if (key === storageKey) storedValue = "";
+    } },
+  });
+})();`;
+
 function userscriptAuditInitSource(userscriptContent) {
   return `${FIRST_PAINT_PROBE_SOURCE}\n` +
-    `${PREAUTHORIZED_ADGUARD_CONTROL_SOURCE}\n${userscriptContent}`;
+    `${PREAUTHORIZED_ADGUARD_CONTROL_SOURCE}\n` +
+    `${PREAUTHORIZED_AUDIT_NAVIGATION_STORAGE_SOURCE}\n${userscriptContent}`;
 }
 
 function parseArguments(argv) {
@@ -2194,8 +2247,11 @@ async function buildIntegrityManifest(
   const userscriptContractCovered =
     !userscript?.missing &&
     /^\/\/\s*@grant\s+GM_addElement\s*$/mu.test(userscript.content) &&
+    /^\/\/\s*@grant\s+GM_getValue\s*$/mu.test(userscript.content) &&
+    /^\/\/\s*@grant\s+GM_setValue\s*$/mu.test(userscript.content) &&
+    /^\/\/\s*@grant\s+GM_deleteValue\s*$/mu.test(userscript.content) &&
     /^\/\/\s*@grant\s+window\.onurlchange\s*$/mu.test(userscript.content) &&
-    (userscript.content.match(/^\/\/\s*@grant\s+/gmu) ?? []).length === 2 &&
+    (userscript.content.match(/^\/\/\s*@grant\s+/gmu) ?? []).length === 5 &&
     userscript.content.includes('const PROTOCOL_VERSION = "2"') &&
     userscript.content.includes('GM_addElement(parent, "style", {') &&
     userscript.content.includes("function proveStandaloneCascadeRelease") &&
@@ -2638,16 +2694,9 @@ async function navigate(page, targetUrl, timeoutMs, externalResponseObserver = n
   let response = null;
   const responseObserver = externalResponseObserver ?? observeMainDocumentResponses(page);
   const navigationProof = seededNavigationProof(targetUrl);
-  const navigationUrl = navigationProof
-    ? (() => {
-        const parsed = new URL(targetUrl);
-        parsed.hash = "";
-        return parsed.href;
-      })()
-    : targetUrl;
   try {
     try {
-      response = await page.goto(navigationUrl, {
+      response = await page.goto(targetUrl, {
         waitUntil: "domcontentloaded",
         timeout: timeoutMs,
         ...(navigationProof ? { referer: ALGUMON_GLOBAL_DISCOVERY_URL } : {}),
@@ -3543,7 +3592,7 @@ function seededNavigationUrl(url, siteType, title, dealId, signedRelayUrl = null
   };
   const encoded = Buffer.from(JSON.stringify(seed), "utf8").toString("base64url");
   const parsed = new URL(url);
-  parsed.hash = `hdf-seed=${encoded}`;
+  parsed.hash = `hdf-audit-seed=${encoded}`;
   return parsed.href;
 }
 
@@ -3554,7 +3603,7 @@ function seededNavigationProof(url) {
   } catch {
     return null;
   }
-  const encoded = new URLSearchParams(parsed.hash.replace(/^#/u, "")).get("hdf-seed");
+  const encoded = new URLSearchParams(parsed.hash.replace(/^#/u, "")).get("hdf-audit-seed");
   if (!encoded || !/^[A-Za-z0-9_-]+$/u.test(encoded)) return null;
   try {
     const seed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
@@ -6622,9 +6671,8 @@ async function auditSyntheticAlgumonRelayFixtures(
     const entryUrl = signedUrl(dealId, query);
     const finalUrl = destinationUrl(articleId);
     const fixture = { id, failures: [] };
-    const targetProof = seededNavigationProof(
-      seededNavigationUrl(finalUrl, "clien", title, dealId, entryUrl),
-    );
+    const seededFinalUrl = seededNavigationUrl(finalUrl, "clien", title, dealId, entryUrl);
+    const targetProof = seededNavigationProof(seededFinalUrl);
     if (!targetProof?.seed) {
       throw new Error("synthetic relay target seed could not be constructed");
     }
@@ -6649,7 +6697,7 @@ async function auditSyntheticAlgumonRelayFixtures(
           status: response?.status ?? 200,
           contentType: response?.contentType ?? "text/html; charset=utf-8",
           headers: response?.headers,
-          body: response?.body ?? relayHtml(finalUrl),
+          body: response?.body ?? relayHtml(seededFinalUrl),
         });
         return;
       }
@@ -7662,7 +7710,7 @@ async function auditSyntheticEdgeFixtures(
       seed: true,
       seedSiteType: "ppomppu",
       expectedState: "blocked",
-      expectedStatus: "terminal-article-identity-required",
+      expectedStatus: "terminal-algumon-site-mismatch",
       body: pathDriftBody,
     },
     {
@@ -7782,7 +7830,7 @@ async function auditSyntheticEdgeFixtures(
               (node) => node.hasAttribute("data-hotdeal-focus-keep"),
             ),
           },
-          fragmentCleared: !location.hash.includes("hdf-seed="),
+          fragmentCleared: !location.hash.includes("hdf-audit-seed="),
           paintFlashCount:
             window.__HOTDEAL_FOCUS_PAINT_PROBE__?.flashFrameCount ?? 1,
         };
@@ -7823,7 +7871,7 @@ async function auditSyntheticEdgeFixtures(
         }
       }
       if (!fixture.forgedDirectNavigation && !state.fragmentCleared) {
-        fixtureResult.failures.push("public Algumon seed fragment was not cleared");
+        fixtureResult.failures.push("preauthorized audit seed fragment was not cleared");
       }
       if (state.paintFlashCount !== 0) {
         fixtureResult.failures.push(

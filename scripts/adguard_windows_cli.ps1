@@ -128,7 +128,7 @@ $script:RecoveryBackupPath = $null
 $script:RecoveryCommand = $null
 $script:ReaderGateProtocolVersion = 2
 $script:ReaderGateGrants = @(
-    'GM_addElement', 'window.onurlchange'
+    'GM_addElement', 'GM_getValue', 'GM_setValue', 'GM_deleteValue', 'window.onurlchange'
 )
 $script:ReleaseUserscriptUrl = ('https://heelee912.github.io/' +
     'adguard-hotdeal-focus/hotdeal-focus.user.js')
@@ -2044,7 +2044,7 @@ function Initialize-AdGuardAssemblies {
             'GetUserscriptGmProperties', 'GetUserscriptMeta', 'InstallUserscriptFromMeta',
             'UpdateUserscriptCode', 'UpdateUserscriptGmProperties', 'SetUserscriptStatus',
             'RemoveUserscript', 'GetSubscriptionsMetaSet', 'InstallCustomFilter',
-            'CheckForFilterSubscriptionsUpdate', 'UpdateFilterSubscriptionState', 'RemoveFilterSubscription',
+            'UpdateFilterSubscriptionState', 'RemoveFilterSubscription',
             'DisableFilterRules', 'EnableFilterRules')) {
         if (-not $script:ApiClientType.GetMethod($methodName)) {
             throw "Installed AdGuard IPC contract is missing method: $methodName"
@@ -5009,7 +5009,7 @@ function Install-AlgumonAdDeliveryPolicy {
         throw 'Algumon ad-delivery policy URL is installed more than once'
     }
     $created = $false
-    $refreshed = $false
+    $replaced = $false
     $priorEnabled = if ($before.Count -eq 1) { [bool] $before[0].IsEnabled } else { $false }
     $priorTrusted = if ($before.Count -eq 1) { [bool] $before[0].IsTrusted } else { $false }
     try {
@@ -5030,14 +5030,14 @@ function Install-AlgumonAdDeliveryPolicy {
                 @($beforeRules.DisabledRules).Count -ne 0 -or
                 @($ruleDifference).Count -ne 0
             if ($requiresRefresh) {
-                # AdGuard exposes subscription refresh by type, not by filter id.  Invoke it
-                # only after proving this exact custom policy is stale, then verify the exact
-                # URL, version, and rules below before enabling any exception.
-                [void] $Client.CheckForFilterSubscriptionsUpdate(
-                    $true,
-                    @($script:StandardFilterType)
+                # The public IPC only refreshes an entire filter type, which could mutate
+                # unrelated subscriptions. Replace only this exact custom URL instead.
+                $Client.RemoveFilterSubscription(
+                    $before[0].FilterId,
+                    $script:StandardFilterType
                 )
-                $refreshed = $true
+                $Client.InstallCustomFilter($Source.MetaSet, $script:StandardFilterType)
+                $replaced = $true
             }
         }
         $current = @(Get-AlgumonAdDeliveryFilters -Client $Client)
@@ -5052,7 +5052,7 @@ function Install-AlgumonAdDeliveryPolicy {
         )
         $verified = Assert-AlgumonAdDeliveryPolicyInstalled -Client $Client -Source $Source
         return [pscustomobject]@{
-            Changed = $created -or $refreshed -or -not $priorEnabled -or -not $priorTrusted
+            Changed = $created -or $replaced -or -not $priorEnabled -or -not $priorTrusted
             Verified = $verified
         }
     }
@@ -5060,9 +5060,9 @@ function Install-AlgumonAdDeliveryPolicy {
         $original = $_
         try {
             $current = @(Get-AlgumonAdDeliveryFilters -Client $Client)
-            if ($created -and $current.Count -eq 1) {
+            if (($created -or $replaced) -and $current.Count -eq 1) {
                 $Client.RemoveFilterSubscription($current[0].FilterId, $script:StandardFilterType)
-            } elseif (-not $created -and $current.Count -eq 1) {
+            } elseif (-not $created -and -not $replaced -and $current.Count -eq 1) {
                 $Client.UpdateFilterSubscriptionState(
                     $current[0].FilterId,
                     $priorEnabled,

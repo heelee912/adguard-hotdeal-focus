@@ -22,7 +22,7 @@ $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
 $script:MaximumSourceBytes = 8MB
 $script:ReaderGateProtocolVersion = 2
 $script:ReaderGateGrants = @(
-    'GM_addElement', 'window.onurlchange'
+    'GM_addElement', 'GM_getValue', 'GM_setValue', 'GM_deleteValue', 'window.onurlchange'
 )
 $script:ReleaseUserscriptUrl = ('https://heelee912.github.io/' +
     'adguard-hotdeal-focus/hotdeal-focus.user.js')
@@ -70,6 +70,9 @@ try {
 // @match        https://*.arca.live/*
 // @run-at       document-start
 // @grant        GM_addElement
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
 // @grant        window.onurlchange
 // @downloadURL  https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 // @updateURL    https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
@@ -102,8 +105,8 @@ GM_addElement(document.documentElement, "style", {
     $userscript = Get-UserscriptSource -Source $validUserscriptPath
     Assert-Contract ($userscript.ProtocolVersion -eq 2) 'Reader protocol was not parsed as 2'
     Assert-Contract (Test-ExactStringSequence -Left $userscript.Grants `
-            -Right @(
-                'GM_addElement', 'window.onurlchange'
+        -Right @(
+                'GM_addElement', 'GM_getValue', 'GM_setValue', 'GM_deleteValue', 'window.onurlchange'
             )) 'Reader grants were not exact'
     Assert-Contract ($userscript.InstallUrl -ceq $script:ReleaseUserscriptUrl) `
         'Reader install URL was not exact'

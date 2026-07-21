@@ -293,6 +293,9 @@ def validate_userscript_release_metadata(content: bytes) -> None:
     grants = re.findall(r"^//\s*@grant\s+(.+?)\s*$", source, re.MULTILINE)
     if grants != [
         "GM_addElement",
+        "GM_getValue",
+        "GM_setValue",
+        "GM_deleteValue",
         "window.onurlchange",
     ]:
         raise ConfigError("userscript grants must be the exact standalone contract")

@@ -173,8 +173,28 @@ async function openClienGate(browser, options = {}) {
   page.on("pageerror", (error) => pageErrors.push(error.message));
   const destinationUrl = "https://www.clien.net/service/board/jirum/123";
   await page.addInitScript(
-    ({ controlSource, userSource }) => {
+    ({ controlSource, userSource, sourceTitle }) => {
       (0, eval)(controlSource);
+      let navigationSeeds = JSON.stringify({
+        records: [{
+          token: "a".repeat(48),
+          sourceReferrer: "https://www.algumon.com/",
+          siteType: "clien",
+          title: sourceTitle,
+          commentCount: null,
+          expiresAt: Date.now() + 120_000,
+        }],
+      });
+      Object.defineProperties(globalThis, {
+        GM_getValue: { configurable: false, value: (_key, fallback) =>
+          navigationSeeds || fallback },
+        GM_setValue: { configurable: false, value: (_key, value) => {
+          navigationSeeds = String(value);
+        } },
+        GM_deleteValue: { configurable: false, value: () => {
+          navigationSeeds = "";
+        } },
+      });
       const paintProbe = { sampleCount: 0, visibleLeakFrames: 0 };
       Object.defineProperty(globalThis, "__HDF_STANDALONE_LEAK_PROBE__", {
         configurable: false,
@@ -208,6 +228,7 @@ async function openClienGate(browser, options = {}) {
     {
       controlSource: PREAUTHORIZED_ADGUARD_CONTROL_SOURCE,
       userSource: userscriptSource,
+      sourceTitle: title,
     },
   );
   await page.route(`${destinationUrl}*`, async (route) => {

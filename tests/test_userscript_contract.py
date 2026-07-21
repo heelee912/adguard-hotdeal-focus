@@ -194,6 +194,9 @@ class UserscriptMetadataTests(unittest.TestCase):
         self.assertEqual(
             [
                 "GM_addElement",
+                "GM_getValue",
+                "GM_setValue",
+                "GM_deleteValue",
                 "window.onurlchange",
             ],
             metadata_values(self.source, "grant"),
@@ -246,13 +249,17 @@ class UserscriptMetadataTests(unittest.TestCase):
             self.source.index("function start(browserRoot)"):
             self.source.index("return { mode: \"reader-gate\"")
         ]
-        self.assertNotIn("installAlgumonSeedCapture(browserRoot)", start)
-        self.assertIn("function referrerProjectionSeed", self.source)
-        self.assertIn("isAlgumonReferrer(document.referrer)", self.source)
-        self.assertNotIn("storeAlgumonSeed(browserRoot, navigationSeed)", start)
-        self.assertNotIn("GM_getValue", self.source)
-        self.assertNotIn("GM_setValue", self.source)
-        self.assertNotIn("GM_deleteValue", self.source)
+        self.assertIn("installAlgumonSeedCapture(browserRoot)", start)
+        self.assertIn("function captureAlgumonNavigationSeed", self.source)
+        self.assertIn("function consumeAlgumonNavigationSeed", self.source)
+        self.assertIn("isAlgumonReferrer(referrer)", self.source)
+        self.assertIn("consumeAlgumonNavigationSeed(browserRoot)", start)
+        self.assertNotIn("referrerProjectionSeed", self.source)
+        self.assertNotIn("window.name", self.source)
+        self.assertNotIn("location.hash", self.source)
+        self.assertIn("GM_getValue", self.source)
+        self.assertIn("GM_setValue", self.source)
+        self.assertIn("GM_deleteValue", self.source)
         return
         javascript = r"""
 const fs = require("fs");
@@ -390,6 +397,73 @@ process.stdout.write(JSON.stringify({
         self.assertIn("if (!isPromiseLike(stored)) return;", capture)
         self.assertIn("deferredNavigation(anchor)", capture)
         self.assertIn("event.preventDefault()", capture)
+
+    def test_algumon_source_seed_carries_its_card_title_and_comment_count_once(self) -> None:
+        javascript = r"""
+const fs = require("fs");
+const vm = require("vm");
+const moduleRecord = { exports: {} };
+const sandbox = {
+  module: moduleRecord, URL, Set, Map, WeakMap, WeakSet, Object, Array, String,
+  Number, RegExp, JSON, Date, Math, encodeURIComponent, decodeURIComponent,
+  escape, unescape, Uint8Array, Uint32Array, Reflect,
+};
+vm.runInNewContext(fs.readFileSync("hotdeal-focus.user.js", "utf8"), sandbox);
+const api = moduleRecord.exports;
+let storage = "";
+const calls = { get: 0, set: 0, remove: 0 };
+const sourceHref = "https://www.algumon.com/n/deal?sites=CLIEN";
+const storageApi = {
+  GM_getValue(_key, fallback) { calls.get += 1; return storage || fallback; },
+  GM_setValue(_key, value) { calls.set += 1; storage = String(value); },
+  GM_deleteValue() { calls.remove += 1; storage = ""; },
+};
+const sourceRoot = {
+  ...storageApi,
+  location: { href: sourceHref },
+  crypto: { getRandomValues(bytes) { bytes.fill(7); return bytes; } },
+};
+const title = { textContent: "Source card title only", getAttribute() { return null; } };
+const card = {
+  getAttribute(name) {
+    return ({ "data-site-type": "clien", "data-source-title": "Source card title only", "data-source-comment-count": "37" })[name] ?? null;
+  },
+  querySelector() { return title; },
+};
+const anchor = {
+  href: "https://www.clien.net/service/board/jirum/12345678",
+  textContent: "destination title must not be used",
+  getAttribute() { return null; },
+  closest(selector) { return selector === "a[href]" ? anchor : card; },
+};
+const stored = api.captureAlgumonNavigationSeed(sourceRoot, anchor);
+const targetRoot = {
+  ...storageApi,
+  document: { referrer: sourceHref },
+};
+const first = api.consumeAlgumonNavigationSeed(targetRoot);
+const second = api.consumeAlgumonNavigationSeed(targetRoot);
+process.stdout.write(JSON.stringify({ stored, first, second, calls, records: storage }));
+"""
+        completed = subprocess.run(
+            ["node", "-e", javascript],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+        self.assertTrue(result["stored"])
+        self.assertEqual(
+            {"siteType": "clien", "title": "Source card title only", "commentCount": 37},
+            result["first"],
+        )
+        self.assertIsNone(result["second"])
+        self.assertGreaterEqual(result["calls"]["get"], 3)
+        self.assertEqual(1, result["calls"]["set"])
+        self.assertEqual(1, result["calls"]["remove"])
+        self.assertEqual("", result["records"])
 
     def test_protocol_markers_and_no_text_diagnostics_are_explicit(self) -> None:
         for token in (
@@ -825,21 +899,30 @@ class SemanticContractTests(unittest.TestCase):
         )
 
     def test_algumon_referrer_is_the_only_navigation_authority(self) -> None:
-        self.assertIn("function referrerProjectionSeed", self.source)
-        self.assertIn("isAlgumonReferrer(document.referrer)", self.source)
+        self.assertIn("function captureAlgumonNavigationSeed", self.source)
+        self.assertIn("function consumeAlgumonNavigationSeed", self.source)
+        self.assertIn("isAlgumonReferrer(referrer)", self.source)
         start = self.source[
             self.source.index("function start(browserRoot)"):
             self.source.index("return { mode: \"reader-gate\"")
         ]
-        self.assertIn("waitForReferrerProjectionSeed(", start)
-        self.assertIn("configureTargetWithReferrer(referrerSeed)", start)
-        self.assertIn("const REFERRER_SEED_WAIT_MS = 5_000", self.source)
-        self.assertNotIn("readAndClearSeeds(browserRoot)", start)
+        self.assertIn("installAlgumonSeedCapture(browserRoot)", start)
+        self.assertIn("configureTargetWithNavigationSeed(", start)
+        self.assertIn("consumeAlgumonNavigationSeed(browserRoot)", start)
+        self.assertNotIn("waitForReferrerProjectionSeed", self.source)
         self.assertIn("resolveDocumentFromSeedCandidates", self.source)
         self.assertIn('"seed-title-match"', self.source)
         self.assertIn('"seed-count-match"', self.source)
         self.assertIn("UNTRUSTED_SIGNALS", self.source)
-        self.assertNotRegex(self.source, r"seed\.(?:body|content|html|user|email|token)")
+        self.assertNotRegex(self.source, r"seed\.(?:body|content|html|user|email)")
+        capture = self.source[
+            self.source.index("function captureAlgumonNavigationSeed"):
+            self.source.index("function forwardAlgumonNavigationSeed")
+        ]
+        self.assertIn('card?.getAttribute("data-source-title")', capture)
+        self.assertIn('card?.getAttribute("data-source-comment-count")', capture)
+        self.assertIn("commentCount,", capture)
+        self.assertIn("discardSupersededSourceSeed", capture)
 
     def test_navigation_identity_normalizes_only_proven_approved_article_aliases(
         self,
@@ -1605,6 +1688,9 @@ process.stdout.write(JSON.stringify({
         self.assertEqual(
             [
                 "GM_addElement",
+                "GM_getValue",
+                "GM_setValue",
+                "GM_deleteValue",
                 "window.onurlchange",
             ],
             metadata_values(self.source, "grant"),
@@ -1714,9 +1800,9 @@ process.stdout.write(JSON.stringify({
             self.source.index("function start(browserRoot)"):
             self.source.index("return { mode: \"reader-gate\"")
         ]
-        self.assertIn("waitForReferrerProjectionSeed(", start)
-        self.assertIn("function configureTargetWithReferrer(referrerSeed)", start)
-        self.assertIn("const canonicalSeeds = referrerSeed ? Object.freeze([referrerSeed])", start)
+        self.assertIn("function configureTargetWithNavigationSeed(navigationSeed)", start)
+        self.assertIn("consumeAlgumonNavigationSeed(browserRoot)", start)
+        self.assertIn("const canonicalSeeds = navigationSeed ? Object.freeze([navigationSeed])", start)
         self.assertIn("layouts.length === 0", start)
         self.assertIn("isInitialActivation", start)
         self.assertIn('terminalNavigationBlock("route-unapproved")', start)
@@ -1731,6 +1817,7 @@ process.stdout.write(JSON.stringify({
         self.assertIn("!isRendered(root)", paint_risk)
         self.assertIn("state.commentControlScope", paint_risk)
         self.assertIn("function insideCommentProjection", self.source)
+        self.assertIn("commentControlMutationRoots", self.source)
         self.assertIn("queryAllSafe(pageRoot, controlHints)", self.source)
         self.assertIn("commentControlScope: pageRoot", self.source)
 
