@@ -5139,6 +5139,10 @@ function Disable-AlgumonDocumentWideExceptions {
                 [System.Collections.Generic.List[string]] @($before.Rules),
                 $script:StandardFilterType
             )
+            $restored = Get-EnabledAlgumonDocumentWideExceptions -Client $Client
+            if (-not (Test-ExactStringMultiset -Left $before.Rules -Right $restored.Rules)) {
+                throw 'Algumon web-filtering repair rollback did not restore every exception'
+            }
         }
         catch {
             throw 'Algumon web-filtering repair failed and rollback was incomplete'
