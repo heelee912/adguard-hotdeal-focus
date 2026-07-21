@@ -175,10 +175,9 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
 
     def test_every_forward_mutation_substep_has_durable_intent(self) -> None:
         for event in (
-            "intent-userscript-update-code",
             "intent-userscript-install",
-            "intent-userscript-reclassification-remove",
-            "intent-userscript-reclassification-restore-gm",
+            "intent-userscript-replacement-remove",
+            "intent-userscript-replacement-restore-gm",
             "intent-userscript-enable",
             "intent-legacy-disable-rule",
             "intent-filter-install",
@@ -193,7 +192,8 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
         ]
         self.assertIn("UpdateUserscriptGmProperties", forward)
         self.assertIn("if ($replacementRequired)", forward)
-        self.assertNotIn("intent-userscript-update-gm", forward)
+        self.assertIn("Test-UserscriptEntryReplacementRequired", forward)
+        self.assertNotIn("UpdateUserscriptCode", forward)
 
     def test_userscript_verification_exposes_protected_filter_state_hashes(self) -> None:
         for token in (
@@ -305,7 +305,7 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
         ]
         self.assertIn("MetadataBlock = $metadata", source_parser)
         self.assertIn("FreshInstallGmProperties", source_parser)
-        self.assertIn("intent-userscript-reclassification-restore-gm", forward)
+        self.assertIn("intent-userscript-replacement-restore-gm", forward)
         self.assertIn("UpdateUserscriptGmProperties", forward)
         self.assertIn("UpdateUserscriptGmProperties", restore)
 
@@ -347,10 +347,10 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
             mutation.index("SetUserscriptStatus"),
         )
         for intent, write in (
-            ("intent-userscript-reclassification-remove", "RemoveUserscript"),
+            ("intent-userscript-replacement-remove", "RemoveUserscript"),
             ("intent-userscript-install", "InstallUserscriptFromMeta"),
             (
-                "intent-userscript-reclassification-restore-gm",
+                "intent-userscript-replacement-restore-gm",
                 "UpdateUserscriptGmProperties",
             ),
             ("intent-userscript-enable", "SetUserscriptStatus"),
@@ -359,8 +359,8 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
                 self.assertLess(mutation.index(intent), mutation.index(write))
         for token in (
             "Get-UserscriptMetaForSnapshotRestore",
-            "intent-rollback-userscript-reclassification-remove",
-            "intent-rollback-userscript-reclassification-install",
+            "intent-rollback-userscript-replacement-remove",
+            "intent-rollback-userscript-replacement-install",
             "Assert-UserscriptInstallReceipt",
             "Assert-UserscriptSnapshotConverged",
         ):
@@ -368,11 +368,11 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
                 self.assertIn(token, restore)
         for intent, write in (
             (
-                "intent-rollback-userscript-reclassification-remove",
+                "intent-rollback-userscript-replacement-remove",
                 "RemoveUserscript",
             ),
             (
-                "intent-rollback-userscript-reclassification-install",
+                "intent-rollback-userscript-replacement-install",
                 "InstallUserscriptFromMeta",
             ),
             ("intent-rollback-userscript-gm", "UpdateUserscriptGmProperties"),

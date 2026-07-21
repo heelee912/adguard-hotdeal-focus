@@ -149,27 +149,6 @@ function exactPage({
   </main>`;
 }
 
-function encodedClienSeed(destinationUrl, commentCount) {
-  const now = Date.now();
-  const navigationNonce = `hdf-${"a".repeat(28)}`;
-  const seed = {
-    v: 1,
-    siteType: "clien",
-    dealId: "123",
-    title,
-    commentCount,
-    ts: now,
-    relayV: "a".repeat(32),
-    relayT: String(now),
-    navigationNonce,
-    destinationUrl,
-  };
-  return {
-    navigationNonce,
-    encoded: Buffer.from(JSON.stringify(seed), "utf8").toString("base64url"),
-  };
-}
-
 function clienPage({
   titleHtml = `<div class="post_subject">${title}</div>`,
   bodyExtra = "",
@@ -193,10 +172,9 @@ async function openClienGate(browser, options = {}) {
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
   const destinationUrl = "https://www.clien.net/service/board/jirum/123";
-  const seed = encodedClienSeed(destinationUrl, options.commentCount ?? 1);
   await page.addInitScript(
-    ({ source, seedCarrier }) => {
-      window.name = "hdf-provenance:" + seedCarrier;
+    ({ controlSource, userSource }) => {
+      (0, eval)(controlSource);
       const paintProbe = { sampleCount: 0, visibleLeakFrames: 0 };
       Object.defineProperty(globalThis, "__HDF_STANDALONE_LEAK_PROBE__", {
         configurable: false,
@@ -225,11 +203,11 @@ async function openClienGate(browser, options = {}) {
         requestAnimationFrame(sampleLeaks);
       };
       requestAnimationFrame(sampleLeaks);
-      (0, eval)(source);
+      (0, eval)(userSource);
     },
     {
-      source: `${PREAUTHORIZED_ADGUARD_CONTROL_SOURCE}\n${userscriptSource}`,
-      seedCarrier: seed.encoded,
+      controlSource: PREAUTHORIZED_ADGUARD_CONTROL_SOURCE,
+      userSource: userscriptSource,
     },
   );
   await page.route(`${destinationUrl}*`, async (route) => {
@@ -239,7 +217,7 @@ async function openClienGate(browser, options = {}) {
       body: clienPage(options),
     });
   });
-  await page.goto(`${destinationUrl}#hdf-seed=${seed.encoded}`, {
+  await page.goto(destinationUrl, {
     referer: "https://www.algumon.com/",
     waitUntil: "domcontentloaded",
   });
@@ -2453,7 +2431,7 @@ try {
     });
     assert.deepEqual(state.preauthorizedControl, {
       kind: "preauthorized-userscript-style-control",
-      schemaVersion: 2,
+      schemaVersion: 3,
       gmAddElementCalls: 1,
     });
     assert.equal(state.releaseProbe, null);

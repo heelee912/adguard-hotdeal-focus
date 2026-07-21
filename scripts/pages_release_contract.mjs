@@ -195,7 +195,10 @@ function verifyUserscriptMetadata(bytes, version) {
   exact("updateURL", INSTALL_URL);
   exact("run-at", "document-start");
   const grants = metadataValues(source, "grant");
-  if (JSON.stringify(grants) !== JSON.stringify(["GM_addElement", "window.onurlchange"])) {
+  if (JSON.stringify(grants) !== JSON.stringify([
+    "GM_addElement",
+    "window.onurlchange",
+  ])) {
     fail("userscript grants are not the exact standalone contract");
   }
   for (const forbidden of ["connect", "require", "resource"]) {

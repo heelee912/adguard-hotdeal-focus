@@ -2639,15 +2639,6 @@ async function navigate(page, targetUrl, timeoutMs, externalResponseObserver = n
   const navigationProof = seededNavigationProof(targetUrl);
   try {
     try {
-      if (navigationProof) {
-        await page.goto("about:blank", {
-          waitUntil: "commit",
-          timeout: timeoutMs,
-        });
-        await page.evaluate((name) => {
-          window.name = name;
-        }, `hdf-provenance:${navigationProof.encoded}`);
-      }
       response = await page.goto(targetUrl, {
         waitUntil: "domcontentloaded",
         timeout: timeoutMs,
@@ -3560,7 +3551,7 @@ function seededNavigationProof(url) {
   try {
     const seed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
     return /^hdf-[0-9a-z]{28}$/u.test(String(seed?.navigationNonce ?? ""))
-      ? { encoded, navigationNonce: seed.navigationNonce }
+      ? { encoded, navigationNonce: seed.navigationNonce, seed }
       : null;
   } catch {
     return null;
@@ -4067,11 +4058,17 @@ async function countExistingApprovedLayoutMatches(
       const layouts = (projectionLayouts ?? site?.layouts ?? []).filter((candidate) =>
         (candidate.paths ?? [candidate.path]).some((configuredPath) =>
           api.pathPatternMatches(pathAndQuery, configuredPath)));
-      const validatedSeed = api.validateSeed(oracleSeed, Date.now(), false);
+      const projectionSeed = oracleSeed?.siteType === site?.id
+        ? Object.freeze({
+          siteType: oracleSeed.siteType,
+          title: oracleSeed.title,
+          commentCount: oracleSeed.commentCount ?? null,
+        })
+        : null;
       const projection = api.resolveProjectionClasses(
         document,
         layouts,
-        validatedSeed?.siteType === site?.id ? validatedSeed : null,
+        projectionSeed,
       );
       return {
         semanticProjectionCount: projection.projectionClasses.length,
@@ -6609,6 +6606,12 @@ async function auditSyntheticAlgumonRelayFixtures(
     const entryUrl = signedUrl(dealId, query);
     const finalUrl = destinationUrl(articleId);
     const fixture = { id, failures: [] };
+    const targetProof = seededNavigationProof(
+      seededNavigationUrl(finalUrl, "clien", title, dealId, entryUrl),
+    );
+    if (!targetProof?.seed) {
+      throw new Error("synthetic relay target seed could not be constructed");
+    }
     const context = await browser.newContext({
       ...contextOptions("desktop"),
       serviceWorkers: "block",
@@ -6684,13 +6687,12 @@ async function auditSyntheticAlgumonRelayFixtures(
           document.documentElement.getAttribute("data-hotdeal-focus-ready") === "1",
         null, { timeout: timeoutMs });
         const security = await page.evaluate(() => ({
-          name: window.name,
           fragment: location.hash,
           state: document.documentElement.getAttribute("data-hotdeal-focus-state"),
         }));
         fixture.security = security;
         if (
-          security.name !== "" || security.fragment !== "" || security.state !== "ready" ||
+          security.fragment !== "" || security.state !== "ready" ||
           !page.url().startsWith(finalUrl)
         ) {
           fixture.failures.push("valid same-tab relay lost seed cleanup or reader readiness");
@@ -6710,7 +6712,6 @@ async function auditSyntheticAlgumonRelayFixtures(
         fixture.failureState = await observedPopup.evaluate(() => ({
           url: location.href,
           referrer: document.referrer,
-          name: window.name,
           hash: location.hash,
           state: document.documentElement.getAttribute("data-hotdeal-focus-state"),
           status: document.documentElement.getAttribute("data-hotdeal-focus-status"),
@@ -7345,15 +7346,6 @@ async function auditSyntheticEdgeFixtures(
         : seededNavigationUrl(fixtureUrl, "clien", title, 99999000 + index);
       if (fixture.lockedPixelProbe) {
         const navigationProof = seededNavigationProof(fixtureNavigationUrl);
-        if (navigationProof) {
-          await session.page.goto("about:blank", {
-            waitUntil: "commit",
-            timeout: timeoutMs,
-          });
-          await session.page.evaluate((name) => {
-            window.name = name;
-          }, `hdf-provenance:${navigationProof.encoded}`);
-        }
         await session.page.goto(fixtureNavigationUrl, {
           waitUntil: "domcontentloaded",
           timeout: timeoutMs,
@@ -7716,10 +7708,6 @@ async function auditSyntheticEdgeFixtures(
           `</body></html>`,
       }));
       if (fixture.forgedDirectNavigation) {
-        const proof = seededNavigationProof(navigationUrl);
-        await session.page.evaluate((name) => {
-          window.name = name;
-        }, `hdf-provenance:${proof.navigationNonce}`);
         await session.page.goto(navigationUrl, {
           waitUntil: "domcontentloaded",
           timeout: timeoutMs,

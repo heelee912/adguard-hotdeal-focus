@@ -55,7 +55,10 @@ GATE_LOCK_RULE_COUNT = 91
 READER_GATE_NAME = "AdGuard Hotdeal Focus Reader Gate"
 MARKER_GATE_NAME = "AdGuard Hotdeal Focus Marker Gate"
 READER_GATE_PROTOCOL_VERSION = 2
-READER_GATE_GRANTS = ("GM_addElement", "window.onurlchange")
+READER_GATE_GRANTS = (
+    "GM_addElement",
+    "window.onurlchange",
+)
 READER_GATE_REQUIRED_HOSTS = (
     "algumon.com", "clien.net", "ppomppu.co.kr", "ruliweb.com",
     "quasarzone.com", "eomisae.co.kr", "zod.kr", "arca.live",

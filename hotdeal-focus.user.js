@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.4
+// @version      0.6.20
 // @description  Fail-closed semantic reader gate for Algumon hot-deal destinations.
 // @match        https://www.algumon.com/*
 // @match        https://*.clien.net/*
@@ -37,7 +37,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.6.4";
+  const GENERATOR_VERSION = "0.6.20";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -87,10 +87,6 @@
   const MEASUREMENT_HTML_RESTORES = new WeakMap();
   let measurementStyleSheetMutationDepth = 0;
   const CASCADE_PROOF_FRAMES = 2;
-  const SEED_WINDOW_NAME_PREFIX = "hdf-provenance:";
-  const SEED_VERSION = 1;
-  const SEED_MAX_AGE_MS = 10 * 60 * 1000;
-  const SEED_MAX_BYTES = 1024;
   const RUNTIME_GLOBAL = typeof globalThis === "object" ? globalThis : null;
   const NATIVE = Object.freeze({
     MutationObserver: RUNTIME_GLOBAL?.MutationObserver ?? null,
@@ -215,27 +211,6 @@
       : browserRoot?.cancelAnimationFrame?.bind(browserRoot);
     if (typeof cancel === "function") cancel(frameId);
   }
-  const ALGUMON_SITE_ICON_TYPES = Object.freeze({
-    clien: "clien",
-    ppomppu: "ppomppu",
-    ruliweb: "ruliweb",
-    quasarzone: "quasarzone",
-    eomisae: "eomisae",
-    zod: "zod",
-    arcalive: "arcalive",
-  });
-  const ALGUMON_DESTINATION_DOMAINS = Object.freeze({
-    clien: "clien.net",
-    ppomppu: "ppomppu.co.kr",
-    ruliweb: "ruliweb.com",
-    quasarzone: "quasarzone.com",
-    eomisae: "eomisae.co.kr",
-    zod: "zod.kr",
-    arcalive: "arca.live",
-  });
-  const ALLOWED_ALGUMON_SITE_TYPES = Object.freeze(
-    new Set(Object.values(ALGUMON_SITE_ICON_TYPES))
-  );
   const MAX_PROJECTION_CANDIDATE_EVALUATIONS = 800;
   const MAX_PROJECTION_ROLE_CANDIDATES = 32;
   const MAX_PROJECTION_TUPLES = 4096;
@@ -321,7 +296,7 @@
               "body": [".board-contents"],
               "comments": ["#comment_list_area"],
               "commentItems": ["#comment_list_area > .comment_wrapper[id^='iC_']"],
-              "commentControls": ["#comment_list_area .comment_more", "#comment_list_area .pagination"],
+              "commentControls": ["#comment_list_area .comment_more", "#comment_list_area .pagination", "#quote > .cmt-more-btn-pc", "#quote > #comment_total_btn_area", "#quote > #comment_paging_area"],
               "commentIgnored": []
             }
           },
@@ -1221,424 +1196,29 @@
     }
   }
 
-  function utf8ByteLength(value) {
-    return unescape(encodeURIComponent(String(value))).length;
+  function referrerProjectionSeed(browserRoot, siteType) {
+    const document = browserRoot?.document;
+    if (!document || !isAlgumonReferrer(document.referrer)) return null;
+    const titleCandidates = [
+      document.querySelector('meta[property="og:title"]')?.getAttribute("content"),
+      document.querySelector('meta[name="twitter:title"]')?.getAttribute("content"),
+      document.title,
+    ];
+    const title = titleCandidates.map(function normalizeCandidate(candidate) {
+      return truncateRawTitle(candidate, 240);
+    }).find(Boolean);
+    return title
+      ? Object.freeze({ siteType, title, commentCount: null })
+      : null;
   }
 
-  function normalizeSiteType(value) {
-    return String(value || "")
-      .toLocaleLowerCase()
-      .replace(/[^a-z0-9_-]+/g, "-")
-      .replace(/^-+|-+$/g, "")
-      .slice(0, 32);
+  function utf8ByteLength(value) {
+    return unescape(encodeURIComponent(String(value))).length;
   }
 
   function normalizeCommentCount(value) {
     const number = Number.parseInt(String(value || "").replace(/[^0-9]/g, ""), 10);
     return Number.isSafeInteger(number) && number >= 0 && number <= 100000 ? number : null;
-  }
-
-  function validateSeed(seed, now, requireNavigationProof) {
-    if (!seed || typeof seed !== "object" || Array.isArray(seed)) {
-      return null;
-    }
-    const allowedKeys = new Set([
-      "v",
-      "siteType",
-      "dealId",
-      "title",
-      "commentCount",
-      "ts",
-      "relayV",
-      "relayT",
-      "navigationNonce",
-      "destinationUrl",
-    ]);
-    if (Object.keys(seed).some(function unknownKey(key) { return !allowedKeys.has(key); })) {
-      return null;
-    }
-    if (seed.v !== SEED_VERSION || !Number.isFinite(seed.ts)) {
-      return null;
-    }
-    if (now - seed.ts < 0 || now - seed.ts > SEED_MAX_AGE_MS) {
-      return null;
-    }
-    const dealId = String(seed.dealId || "");
-    // Preserve bounded punctuation such as model separators. Title evidence
-    // protects those tokens against a different article; canonicalizing them
-    // away here would make the trusted seed disagree with its own page title.
-    const title = truncateRawTitle(seed.title, 240);
-    const siteType = normalizeSiteType(seed.siteType);
-    const commentCount = seed.commentCount === null
-      ? null
-      : normalizeCommentCount(seed.commentCount);
-    const relayV = String(seed.relayV || "");
-    const relayT = String(seed.relayT || "");
-    const navigationNonce = String(seed.navigationNonce || "");
-    const destination = seed.destinationUrl
-      ? exactDestinationUrl(seed.destinationUrl, siteType)
-      : null;
-    if (
-      !/^\d{1,24}$/.test(dealId) ||
-      !title ||
-      !ALLOWED_ALGUMON_SITE_TYPES.has(siteType) ||
-      !/^[0-9a-f]{32}$/.test(relayV) ||
-      !/^\d{13}$/.test(relayT) ||
-      Math.abs(now - Number(relayT)) > SEED_MAX_AGE_MS ||
-      (navigationNonce && !/^hdf-[0-9a-z]{28}$/.test(navigationNonce)) ||
-      (requireNavigationProof === true &&
-        !/^hdf-[0-9a-z]{28}$/.test(navigationNonce))
-    ) {
-      return null;
-    }
-    return Object.freeze({
-      v: SEED_VERSION,
-      siteType,
-      dealId,
-      title,
-      commentCount,
-      ts: seed.ts,
-      relayV,
-      relayT,
-      navigationNonce: navigationNonce || null,
-      destinationUrl: destination?.href || null,
-    });
-  }
-
-  function encodeSeedCarrier(browserRoot, seed) {
-    const serialized = JSON.stringify(seed);
-    if (utf8ByteLength(serialized) > SEED_MAX_BYTES || typeof browserRoot.btoa !== "function") {
-      return null;
-    }
-    try {
-      const binary = unescape(encodeURIComponent(serialized));
-      return browserRoot.btoa(binary)
-        .replace(/\+/g, "-")
-        .replace(/\//g, "_")
-        .replace(/=+$/g, "");
-    } catch (_error) {
-      return null;
-    }
-  }
-
-  function decodeSeedCarrier(browserRoot, encoded) {
-    if (!/^[A-Za-z0-9_-]+$/.test(encoded) || typeof browserRoot.atob !== "function") {
-      return null;
-    }
-    try {
-      const padding = "=".repeat((4 - (encoded.length % 4)) % 4);
-      const binary = browserRoot.atob(
-        encoded.replace(/-/g, "+").replace(/_/g, "/") + padding
-      );
-      const serialized = decodeURIComponent(escape(binary));
-      if (utf8ByteLength(serialized) > SEED_MAX_BYTES) {
-        return null;
-      }
-      return validateSeed(JSON.parse(serialized), Date.now(), true);
-    } catch (_error) {
-      return null;
-    }
-  }
-
-  function readAndClearSeed(browserRoot) {
-    let navigationName = "";
-    try {
-      navigationName = String(browserRoot.name || "");
-      if (!navigationName.startsWith(SEED_WINDOW_NAME_PREFIX)) {
-        return null;
-      }
-      browserRoot.name = "";
-    } catch (_error) {
-      return null;
-    }
-    const carrierSeed = decodeSeedCarrier(
-      browserRoot,
-      navigationName.slice(SEED_WINDOW_NAME_PREFIX.length),
-    );
-    if (
-      !carrierSeed ||
-      !isAlgumonReferrer(browserRoot.document.referrer) ||
-      !carrierSeed.navigationNonce
-    ) {
-      return null;
-    }
-    return carrierSeed;
-  }
-
-  function clearPublicSeedFragment(browserRoot) {
-    let location;
-    try {
-      location = browserRoot.location;
-    } catch (_error) {
-      return false;
-    }
-    const rawHash = String(location?.hash || "");
-    if (!rawHash) return false;
-    const retainedParts = rawHash.slice(1).split("&").filter(function keepNonSeedPart(part) {
-      return !/^hdf-seed(?:=|$)/u.test(part);
-    });
-    if (retainedParts.length === rawHash.slice(1).split("&").length) {
-      return false;
-    }
-    const history = browserRoot === RUNTIME_GLOBAL
-      ? NATIVE.history
-      : browserRoot.history;
-    const replaceState = browserRoot === RUNTIME_GLOBAL
-      ? NATIVE.historyReplaceState
-      : history?.replaceState;
-    if (!history || typeof replaceState !== "function") return false;
-    try {
-      const replacement = `${location.pathname}${location.search}` +
-        (retainedParts.length ? `#${retainedParts.join("&")}` : "");
-      NATIVE.reflectApply(replaceState, history, [null, "", replacement]);
-      return true;
-    } catch (_error) {
-      return false;
-    }
-  }
-
-  function exactSignedAlgumonDealUrl(urlLike, expectedDealId) {
-    let url;
-    try {
-      url = new URL(urlLike);
-    } catch (_error) {
-      return null;
-    }
-    const dealMatch = url.pathname.match(/^\/l\/d\/(\d{1,24})$/u);
-    const queryKeys = Array.from(url.searchParams.keys());
-    if (
-      url.protocol !== "https:" ||
-      url.hostname.toLocaleLowerCase() !== "www.algumon.com" ||
-      url.username ||
-      url.password ||
-      url.port ||
-      url.hash ||
-      !dealMatch ||
-      (expectedDealId && dealMatch[1] !== String(expectedDealId)) ||
-      queryKeys.length !== 2 ||
-      queryKeys[0] !== "v" ||
-      queryKeys[1] !== "t" ||
-      url.searchParams.getAll("v").length !== 1 ||
-      url.searchParams.getAll("t").length !== 1 ||
-      !/^[0-9a-f]{32}$/u.test(url.searchParams.get("v") || "") ||
-      !/^\d{13}$/u.test(url.searchParams.get("t") || "")
-    ) {
-      return null;
-    }
-    return url;
-  }
-
-  function exactDestinationUrl(urlLike, siteType) {
-    let url;
-    try {
-      url = new URL(urlLike);
-    } catch (_error) {
-      return null;
-    }
-    const domain = ALGUMON_DESTINATION_DOMAINS[siteType];
-    if (
-      !domain ||
-      url.protocol !== "https:" ||
-      url.username ||
-      url.password ||
-      url.port ||
-      url.hash ||
-      !hostnameMatches(url.hostname, domain) ||
-      !articleIdentity(url.href, siteType)
-    ) {
-      return null;
-    }
-    return url;
-  }
-
-  function exactAlgumonSiteType(card) {
-    const rawDataType =
-      card.getAttribute("data-site-type") ||
-      card.getAttribute("data-site") ||
-      card.querySelector("[data-site-type]")?.getAttribute("data-site-type") ||
-      card.querySelector("[data-site]")?.getAttribute("data-site") ||
-      "";
-    const dataType = normalizeSiteType(rawDataType);
-    const exactDataType = ALLOWED_ALGUMON_SITE_TYPES.has(dataType) ? dataType : null;
-    if (rawDataType && !exactDataType) {
-      return null;
-    }
-    const iconTypes = new Set();
-    let invalidSiteIcon = false;
-    card.querySelectorAll("img[src]").forEach(function inspectSiteIcon(image) {
-      try {
-        const iconUrl = new URL(image.src, card.ownerDocument.location.href);
-        const match = iconUrl.pathname.match(/^\/site-icon\/([a-z0-9_-]+)\.png$/);
-        if (!iconUrl.pathname.includes("/site-icon/")) {
-          return;
-        }
-        if (
-          iconUrl.protocol === "https:" &&
-          iconUrl.hostname.toLocaleLowerCase() === "cdn.algumon.com" &&
-          !iconUrl.username &&
-          !iconUrl.password &&
-          !iconUrl.port &&
-          match &&
-          ALGUMON_SITE_ICON_TYPES[match[1]]
-        ) {
-          iconTypes.add(ALGUMON_SITE_ICON_TYPES[match[1]]);
-        } else {
-          invalidSiteIcon = true;
-        }
-      } catch (_error) {
-        if (String(image.getAttribute("src") || "").includes("/site-icon/")) {
-          invalidSiteIcon = true;
-        }
-      }
-    });
-    if (invalidSiteIcon || iconTypes.size > 1) {
-      return null;
-    }
-    const iconType = iconTypes.size === 1 ? [...iconTypes][0] : null;
-    if (exactDataType && iconType && exactDataType !== iconType) {
-      return null;
-    }
-    return exactDataType || iconType;
-  }
-
-  function extractAlgumonSeed(anchor) {
-    let url;
-    try {
-      const rawHref = anchor.getAttribute("href") || "";
-      url = exactSignedAlgumonDealUrl(
-        new URL(rawHref, anchor.ownerDocument.location.href).href,
-      );
-    } catch (_error) {
-      return null;
-    }
-    if (!url) {
-      return null;
-    }
-    const dealMatch = url.pathname.match(/^\/l\/d\/(\d{1,24})$/u);
-    const card = anchor.closest(
-      ".deal-feed-card, [data-site-type], [data-site], article, li, tr, .deal, .item, .card"
-    ) || anchor;
-    const titleNode = card.querySelector(
-      "[data-title], h1, h2, h3, h4, .title, [class*='title']"
-    );
-    const title = truncateText(
-      (titleNode && (titleNode.getAttribute("data-title") || titleNode.textContent)) ||
-        anchor.getAttribute("data-title") ||
-        anchor.textContent,
-      240
-    );
-    if (!title) {
-      return null;
-    }
-    const sourceCountNode = card.querySelector(
-      "[data-source-comment-count], [data-origin-comment-count]"
-    );
-    const explicitCount =
-      card.getAttribute("data-source-comment-count") ||
-      card.getAttribute("data-origin-comment-count") ||
-      (sourceCountNode && (
-        sourceCountNode.getAttribute("data-source-comment-count") ||
-        sourceCountNode.getAttribute("data-origin-comment-count")
-      ));
-    const siteType = exactAlgumonSiteType(card);
-    if (!siteType) {
-      return null;
-    }
-    return validateSeed(
-      {
-        v: SEED_VERSION,
-        siteType,
-        dealId: dealMatch[1],
-        title,
-        commentCount: normalizeCommentCount(explicitCount),
-        ts: Date.now(),
-        relayV: url.searchParams.get("v"),
-        relayT: url.searchParams.get("t"),
-      },
-      Date.now(),
-      false
-    );
-  }
-
-  function installAlgumonSeedCapture(browserRoot) {
-    const document = browserRoot.document;
-    function dealHref(anchor) {
-      return anchor.getAttribute("href") || "";
-    }
-    function isExactSignedDealNavigation(anchor) {
-      try {
-        return Boolean(exactSignedAlgumonDealUrl(
-          new URL(dealHref(anchor), anchor.ownerDocument.location.href).href,
-        ));
-      } catch (_error) {
-        return false;
-      }
-    }
-    function staysInCurrentBrowsingContext(event, anchor) {
-      if (
-        event.type === "auxclick" ||
-        event.button !== 0 ||
-        event.ctrlKey ||
-        event.metaKey ||
-        event.shiftKey ||
-        event.altKey
-      ) {
-        return false;
-      }
-      const target = String(anchor.getAttribute("target") || "")
-        .trim()
-        .toLocaleLowerCase();
-      return target === "" || target === "_self";
-    }
-    function captureDealNavigation(event) {
-      const isKeyboardActivation = event.type === "keydown" && event.key === "Enter";
-      const isPrimaryActivation = event.type === "click" && event.button === 0;
-      if (
-        event.isTrusted !== true ||
-        event.defaultPrevented ||
-        (!isKeyboardActivation && !isPrimaryActivation)
-      ) {
-        return;
-      }
-      const element = event.target && event.target.nodeType === 1
-        ? event.target
-        : event.target && event.target.parentElement;
-      const anchor = element && element.closest("a[href]");
-      if (!anchor) {
-        return;
-      }
-      if (!isExactSignedDealNavigation(anchor) ||
-          !staysInCurrentBrowsingContext(event, anchor)) {
-        return;
-      }
-      const seed = extractAlgumonSeed(anchor);
-      if (!seed) {
-        return;
-      }
-      const navigationNonce = createRunNonce(browserRoot);
-      if (!/^hdf-[0-9a-z]{28}$/.test(String(navigationNonce || ""))) {
-        return;
-      }
-      const navigationSeed = validateSeed(
-        { ...seed, navigationNonce },
-        Date.now(),
-        true,
-      );
-      const carrier = navigationSeed
-        ? encodeSeedCarrier(browserRoot, navigationSeed)
-        : null;
-      if (!carrier) {
-        return;
-      }
-      try {
-        browserRoot.name = `${SEED_WINDOW_NAME_PREFIX}${carrier}`;
-      } catch (_error) {
-        // The normal user navigation proceeds without a provenance carrier.
-      }
-    }
-    document.addEventListener("click", captureDealNavigation, true);
-    document.addEventListener("auxclick", captureDealNavigation, true);
-    document.addEventListener("keydown", captureDealNavigation, true);
   }
 
   function createRunNonce(browserRoot) {
@@ -5361,6 +4941,44 @@
     );
   }
 
+  function projectionHasPublisherPaintRiskWithPublisherStyles(state) {
+    const projectionInvariantFails = function projectionInvariantFails(role, excludedRoots) {
+      const root = state.roles[role];
+      return Boolean(root) && (
+        containsUnprovenShadowBoundary(root, Array.from(excludedRoots || [])) ||
+        containsPublisherPaintRisk(root, Array.from(excludedRoots || []))
+      );
+    };
+    return shallowTitleSurfaceHasRisk(
+      state.roles.title,
+      state.resolvedTitle,
+      containsUnprovenShadowBoundary,
+    ) || shallowTitleSurfaceHasRisk(
+      state.roles.title,
+      state.resolvedTitle,
+      containsPublisherPaintRisk,
+    ) || projectionInvariantFails("body", state.bodyIgnoredRoots) ||
+      projectionInvariantFails("product", state.productIgnoredRoots) ||
+      commentProjectionHasRisk(
+        state.roles.comments,
+        Array.from(state.commentItemRoots),
+        Array.from(state.commentControlRoots),
+        Array.from(state.commentIgnoredRoots),
+        state.projectionPolicy.allowEmptyComments === true &&
+          state.projectionPolicy.provenCommentCount === 0,
+      );
+  }
+
+  function projectionHasPublisherPaintRisk(document, state) {
+    return withPublisherVisibilityMeasurement(
+      document,
+      function verifyMeasuredPublisherPaintRisk() {
+        return projectionHasPublisherPaintRiskWithPublisherStyles(state);
+      },
+      function rejectUnsafePublisherPaintMeasurement() { return true; },
+    );
+  }
+
   function verifyOwnedStateWithPublisherStyles(document, state) {
     if (
       !state.titleMarked ||
@@ -5419,35 +5037,7 @@
     ) {
       return false;
     }
-    const projectionInvariantFails = function projectionInvariantFails(role, excludedRoots) {
-      const root = state.roles[role];
-      return Boolean(root) && (
-        containsUnprovenShadowBoundary(root, Array.from(excludedRoots || [])) ||
-        containsPublisherPaintRisk(root, Array.from(excludedRoots || []))
-      );
-    };
-    if (
-      shallowTitleSurfaceHasRisk(
-        state.roles.title,
-        state.resolvedTitle,
-        containsUnprovenShadowBoundary,
-      ) ||
-      shallowTitleSurfaceHasRisk(
-        state.roles.title,
-        state.resolvedTitle,
-        containsPublisherPaintRisk,
-      ) ||
-      projectionInvariantFails("body", state.bodyIgnoredRoots) ||
-      projectionInvariantFails("product", state.productIgnoredRoots) ||
-      commentProjectionHasRisk(
-        state.roles.comments,
-        Array.from(state.commentItemRoots),
-        Array.from(state.commentControlRoots),
-        Array.from(state.commentIgnoredRoots),
-        state.projectionPolicy.allowEmptyComments === true &&
-          state.projectionPolicy.provenCommentCount === 0,
-      )
-    ) {
+    if (projectionHasPublisherPaintRiskWithPublisherStyles(state)) {
       return false;
     }
     const sameRootSet = function sameRootSet(current, expectedSet) {
@@ -6408,6 +5998,31 @@
     };
   }
 
+  function resolveDocumentFromSeedCandidates(document, layouts, candidates) {
+    const resolutions = candidates.map(function resolveCandidate(seed) {
+      return Object.freeze({ seed, resolution: resolveDocument(document, layouts, seed) });
+    });
+    const approved = resolutions.filter(function approvedCandidate(candidate) {
+      return candidate.resolution.ok;
+    });
+    if (approved.length === 1) {
+      return Object.freeze({ ok: true, seed: approved[0].seed, resolution: approved[0].resolution });
+    }
+    if (approved.length > 1) {
+      return Object.freeze({
+        ok: false,
+        reason: "ambiguous-seed-candidate",
+        resolution: Object.freeze({ ok: false, role: "seed", reason: "ambiguous-candidate" }),
+      });
+    }
+    return Object.freeze({
+      ok: false,
+      reason: "no-seed-candidate-match",
+      resolution: resolutions[0]?.resolution ||
+        Object.freeze({ ok: false, role: "seed", reason: "no-candidate" }),
+    });
+  }
+
   function matchesIncludingRoot(rootNode, selectors) {
     const matches = [];
     if (rootNode.nodeType !== 1) {
@@ -6881,7 +6496,7 @@
         runtime.enterTerminal("runtime-style-tamper-release");
         return false;
       }
-      if (runtime.projectionState && !verifyOwnedState(document, runtime.projectionState)) {
+      if (runtime.projectionState && projectionHasPublisherPaintRisk(document, runtime.projectionState)) {
         runtime.enterTerminal("projection-publisher-invariant");
         return false;
       }
@@ -6909,7 +6524,7 @@
         runtime.enterTerminal("runtime-style-tamper-unlock");
         return false;
       }
-      if (runtime.projectionState && !verifyOwnedState(document, runtime.projectionState)) {
+      if (runtime.projectionState && projectionHasPublisherPaintRisk(document, runtime.projectionState)) {
         runtime.enterTerminal("projection-publisher-invariant");
         return false;
       }
@@ -6951,7 +6566,7 @@
       if (
         projectionCascadeChanged &&
         runtime.projectionState &&
-        !verifyOwnedState(document, runtime.projectionState)
+        projectionHasPublisherPaintRisk(document, runtime.projectionState)
       ) {
         runtime.enterTerminal("projection-publisher-invariant");
         return false;
@@ -6977,28 +6592,6 @@
         if (containsMeasurementMutation) {
           MEASUREMENT_HTML_RESTORES.delete(document.documentElement);
         }
-        return;
-      }
-      if (runtime.releasePhase === "released" && runtime.authorizedReady) {
-        const styleFailure = runtimeGateStyleFailure(styleElement, runtime);
-        if (styleFailure) {
-          runtime.enterTerminal(`runtime-style-tamper-post-ready-${styleFailure}`);
-          return;
-        }
-        const stylesheetMutation = mutations.some(function touchesPublisherStyles(mutation) {
-          return mutation.target?.tagName === "STYLE" ||
-            mutation.target?.tagName === "LINK" ||
-            Array.from(mutation.addedNodes || []).some(function addsPublisherStyles(node) {
-              return node.nodeType === 1 && (
-                node.tagName === "STYLE" ||
-                node.tagName === "LINK" ||
-                node.querySelector("style, link[rel~='stylesheet' i]")
-              );
-            });
-        });
-        runtime.relockForReprojection(
-          stylesheetMutation ? "post-ready-stylesheet" : "post-ready-dom",
-        );
         return;
       }
       let stylesheetChanged = false;
@@ -7068,10 +6661,6 @@
           runtime.enterTerminal("runtime-style-tamper-cssom");
           return;
         }
-        if (runtime.releasePhase === "released" && runtime.authorizedReady) {
-          runtime.relockForReprojection("post-ready-cssom");
-          return;
-        }
         fullScanRequired = true;
       },
     );
@@ -7079,10 +6668,6 @@
       browserRoot,
       function adoptedStyleSheetsObserved() {
         if (runtime.terminallyBlocked) return;
-        if (runtime.releasePhase === "released" && runtime.authorizedReady) {
-          runtime.relockForReprojection("post-ready-adopted-stylesheet");
-          return;
-        }
         fullScanRequired = true;
       },
     );
@@ -7100,10 +6685,6 @@
             return;
           }
           runtime.enterTerminal("runtime-style-tamper-sheet-state");
-          return;
-        }
-        if (runtime.releasePhase === "released" && runtime.authorizedReady) {
-          runtime.relockForReprojection("post-ready-stylesheet-state");
           return;
         }
         fullScanRequired = true;
@@ -7802,10 +7383,10 @@
   }
 
   function createReaderRuntime(
-    browserRoot,
-    contract,
-    layouts,
-    seed,
+      browserRoot,
+      contract,
+      layouts,
+    seedCandidates,
     styleElement,
     bootstrapLock,
     targetReason,
@@ -7830,7 +7411,6 @@
       authorizedReady: false,
       releasePhase: "discovering",
       releasePending: false,
-      reprojectionReason: null,
       releaseProofFrameId: 0,
       releaseProbe: null,
       expectedStyleText: styleElement.textContent,
@@ -7840,7 +7420,6 @@
       beginDiscovery: null,
       stop: null,
       enterTerminal: null,
-      relockForReprojection: null,
       discardCascadeRecords: null,
       prepareCascadeRelease: null,
       verifyCascadeRelease: null,
@@ -7946,49 +7525,6 @@
       });
     };
 
-    runtime.relockForReprojection = function relockForReprojection(reason) {
-      if (runtime.terminallyBlocked || runtime.releasePhase !== "released") {
-        return false;
-      }
-      runtime.releasePhase = "relocking";
-      runtime.authorizedReady = false;
-      runtime.releasePending = false;
-      runtime.reprojectionReason = reason || "reprojection";
-      if (runtime.integrityObserver) {
-        runtime.integrityObserver.disconnect();
-        runtime.integrityObserver = null;
-      }
-      if (runtime.unsubscribeShadow) runtime.unsubscribeShadow();
-      if (runtime.unsubscribeProjectionEvents) runtime.unsubscribeProjectionEvents();
-      document.documentElement.classList.add(CLASS.lock);
-      document.documentElement.setAttribute(ATTR.lock, "1");
-      writeRuntimeGateStyle(styleElement, null, runtime);
-      (document.head || document.documentElement).appendChild(styleElement);
-      clearProtocolState(document);
-      document.documentElement.classList.add(CLASS.lock);
-      document.documentElement.setAttribute(ATTR.lock, "1");
-      document.documentElement.setAttribute(ATTR.state, "locked");
-      document.documentElement.setAttribute(
-        ATTR.status,
-        `locked-${reason || "reprojection"}`.slice(0, 96),
-      );
-      runtime.activeNonce = null;
-      runtime.projectionState = null;
-      runtime.readyDiagnostics = null;
-      runtime.standaloneCascadeProof = null;
-      runtime.bootstrapLock = claimBootstrapLock(document, false);
-      if (!runtime.bootstrapLock) {
-        runtime.enterTerminal("bootstrap-relock-unavailable");
-        return false;
-      }
-      publishDiagnostics(browserRoot, {
-        state: "locked",
-        targetReason: reason || "reprojection",
-      });
-      runtime.beginDiscovery();
-      return true;
-    };
-
     function attemptResolution() {
       runtime.attemptScheduled = false;
       if (runtime.releasePending || runtime.authorizedReady || runtime.terminallyBlocked) {
@@ -7997,12 +7533,17 @@
       if (!document.body) {
         return false;
       }
-      const resolution = resolveDocument(document, layouts, seed);
-      if (!resolution.ok) {
-        if (runtime.reprojectionReason) {
-          runtime.enterTerminal("projection-publisher-invariant");
+        const candidateResolution = resolveDocumentFromSeedCandidates(
+          document,
+          layouts,
+          seedCandidates,
+        );
+        if (candidateResolution.reason === "ambiguous-seed-candidate") {
+          runtime.enterTerminal("ambiguous-algumon-seed");
           return false;
         }
+        const resolution = candidateResolution.resolution;
+      if (!resolution.ok) {
         document.documentElement.setAttribute(ATTR.state, "blocked");
         document.documentElement.setAttribute(
           ATTR.status,
@@ -8037,10 +7578,6 @@
       runtime.projectionState = state;
       writeRuntimeGateStyle(styleElement, nonce, runtime);
       if (!verifyOwnedState(document, state)) {
-        if (runtime.reprojectionReason) {
-          runtime.enterTerminal("projection-publisher-invariant");
-          return false;
-        }
         runtime.activeNonce = null;
         runtime.projectionState = null;
         writeRuntimeGateStyle(styleElement, null, runtime);
@@ -8104,7 +7641,7 @@
           if (!runtime.verifyUnlockedCascadeRelease()) return;
           installIntegrityObserver(browserRoot, runtime, state, styleElement);
           runtime.discardCascadeRecords?.();
-          if (typeof onReady === "function") onReady(resolution);
+          if (typeof onReady === "function") onReady(resolution, candidateResolution.seed);
         },
       );
     }
@@ -8244,15 +7781,10 @@
     if (!browserRoot || !browserRoot.document || !browserRoot.location) {
       return { mode: "library" };
     }
-    if (isAlgumonHostname(browserRoot.location.hostname)) {
-      installAlgumonSeedCapture(browserRoot);
-      return { mode: "algumon-seed-capture" };
-    }
     const contract = findSiteContract(browserRoot.location.hostname);
     if (!contract) {
       return { mode: "out-of-scope" };
     }
-    clearPublicSeedFragment(browserRoot);
     const document = browserRoot.document;
     lockWhenHtmlExists(document, function configureTarget(html, initialBootstrapLock) {
       if (!initialBootstrapLock) {
@@ -8263,11 +7795,16 @@
         html.style.setProperty("display", "none", "important");
         return;
       }
-      const initialSeed = readAndClearSeed(browserRoot);
-      let authorizedSeed = initialSeed;
+      const referrerSeed = referrerProjectionSeed(browserRoot, contract.id);
+      function configureTargetWithReferrer() {
+      const canonicalSeeds = referrerSeed ? Object.freeze([referrerSeed]) : Object.freeze([]);
+      const initialSeedCandidates = Object.freeze(canonicalSeeds.filter(function matchesTargetSite(seed) {
+        return seed.siteType === contract.id;
+      }));
+      let authorizedSeed = null;
       let authorizedArticleIdentity = null;
       let pendingArticleIdentity =
-        initialSeed && initialSeed.siteType === contract.id
+        initialSeedCandidates.length > 0
           ? articleIdentity(browserRoot.location, contract.id)
           : null;
       let activeRuntime = null;
@@ -8347,8 +7884,6 @@
             currentArticleIdentity !== expectedArticleIdentity
           ) {
             terminalNavigationBlock("navigation-identity");
-          } else if (activeRuntime) {
-            activeRuntime.relockForReprojection("same-article-navigation");
           }
           return;
         }
@@ -8375,22 +7910,21 @@
           }
         }
 
-        const seed = isInitialActivation
-          ? initialSeed
+        const seedCandidates = isInitialActivation
+          ? initialSeedCandidates
           : authorizedArticleIdentity &&
               currentArticleIdentity === authorizedArticleIdentity
-            ? authorizedSeed
+            ? [authorizedSeed]
             : pendingArticleIdentity &&
                 currentArticleIdentity === pendingArticleIdentity
-              ? authorizedSeed
-              : null;
-        const seedMatchesSite = Boolean(seed) && seed.siteType === contract.id;
-        if (!seedMatchesSite || !currentArticleIdentity) {
+              ? [authorizedSeed]
+              : [];
+        if (seedCandidates.length === 0 || !currentArticleIdentity) {
           initialActivation = false;
           terminalNavigationBlock(
-            seed && seed.siteType !== contract.id
+            canonicalSeeds.length > 0 && initialSeedCandidates.length === 0
               ? "algumon-site-mismatch"
-              : !seed
+              : seedCandidates.length === 0
                 ? "algumon-seed-required"
                 : "article-identity-required"
           );
@@ -8402,7 +7936,7 @@
           return;
         }
         const evaluationLayouts = layouts;
-        const targetReason = "algumon-seed-known-route";
+        const targetReason = "algumon-referrer-known-route";
         initialActivation = false;
         try {
           activeStyle = installRuntimeGateStyle(document);
@@ -8420,12 +7954,12 @@
           browserRoot,
           contract,
           evaluationLayouts,
-          seed,
+          seedCandidates,
           activeStyle,
           activeBootstrapLock,
           targetReason,
-          function authorizeResolvedArticle() {
-            authorizedSeed = seed;
+          function authorizeResolvedArticle(_resolution, resolvedSeed) {
+            authorizedSeed = resolvedSeed;
             authorizedArticleIdentity = currentArticleIdentity;
             pendingArticleIdentity = null;
           }
@@ -8437,6 +7971,8 @@
       if (!installNavigationRevalidation(browserRoot, activateCurrentLocation)) {
         terminalNavigationBlock("navigation-guard-unavailable");
       }
+      }
+      configureTargetWithReferrer();
     });
     return { mode: "reader-gate", site: contract.id };
   }
@@ -8455,7 +7991,6 @@
     pathPatternMatches,
     articleIdentity,
     sameArticleNavigation,
-    validateSeed,
     scoreBodyFeatures,
     scoreCommentFeatures,
     decideCandidate,

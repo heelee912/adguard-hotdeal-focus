@@ -291,7 +291,10 @@ def validate_userscript_release_metadata(content: bytes) -> None:
         if values != [expected]:
             raise ConfigError(f"userscript @{key} must be exactly {expected}")
     grants = re.findall(r"^//\s*@grant\s+(.+?)\s*$", source, re.MULTILINE)
-    if grants != ["GM_addElement", "window.onurlchange"]:
+    if grants != [
+        "GM_addElement",
+        "window.onurlchange",
+    ]:
         raise ConfigError("userscript grants must be the exact standalone contract")
     for forbidden_key in ("connect", "require", "resource"):
         if re.search(rf"^//\s*@{forbidden_key}\s+", source, re.MULTILINE):
