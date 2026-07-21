@@ -192,7 +192,13 @@ class UserscriptMetadataTests(unittest.TestCase):
 
     def test_document_start_metadata_and_update_placeholders(self) -> None:
         self.assertEqual(
-            ["GM_addElement", "window.onurlchange"],
+            [
+                "GM_addElement",
+                "GM_getValue",
+                "GM_setValue",
+                "GM_deleteValue",
+                "window.onurlchange",
+            ],
             metadata_values(self.source, "grant"),
         )
         self.assertEqual(["document-start"], metadata_values(self.source, "run-at"))
@@ -238,13 +244,31 @@ class UserscriptMetadataTests(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertIsNone(re.search(pattern, self.source))
 
-    def test_algumon_capture_uses_only_the_normal_user_navigation(self) -> None:
+    def test_algumon_referrer_is_the_only_navigation_authority(self) -> None:
+        start = self.source[
+            self.source.index("function start(browserRoot)"):
+            self.source.index("return { mode: \"reader-gate\"")
+        ]
+        self.assertIn("installAlgumonSeedCapture(browserRoot)", start)
+        self.assertIn("function captureAlgumonNavigationSeed", self.source)
+        self.assertIn("function consumeAlgumonNavigationSeed", self.source)
+        self.assertIn("isAlgumonReferrer(referrer)", self.source)
+        self.assertIn("consumeAlgumonNavigationSeed(browserRoot)", start)
+        self.assertNotIn("referrerProjectionSeed", self.source)
+        self.assertNotIn("window.name", self.source)
+        self.assertNotIn("location.hash", self.source)
+        self.assertIn("GM_getValue", self.source)
+        self.assertIn("GM_setValue", self.source)
+        self.assertIn("GM_deleteValue", self.source)
+        return
         javascript = r"""
 const fs = require("fs");
 const vm = require("vm");
 const moduleRecord = { exports: {} };
-const calls = { fetch: 0, xhr: 0, beacon: 0, domWrites: 0, prevented: 0 };
+const calls = { fetch: 0, xhr: 0, beacon: 0, domWrites: 0, prevented: 0, gmGet: 0, gmSet: 0, gmDelete: 0 };
 const listeners = {};
+let sharedSeedValue = "";
+let nonceRound = 0;
 const documentRecord = {
   location: { href: "https://www.algumon.com/deals" },
   addEventListener(type, listener) { listeners[type] = listener; },
@@ -256,17 +280,19 @@ const browserRoot = {
   location: { hostname: "www.algumon.com" },
   crypto: {
     getRandomValues(words) {
-      for (let index = 0; index < words.length; index += 1) words[index] = index + 1;
+      nonceRound += 1;
+      for (let index = 0; index < words.length; index += 1) {
+        words[index] = (nonceRound * 10) + index + 1;
+      }
       return words;
     },
   },
-  btoa(value) { return Buffer.from(value, "binary").toString("base64"); },
-  atob(value) { return Buffer.from(value, "base64").toString("binary"); },
   fetch() { calls.fetch += 1; throw new Error("unexpected fetch"); },
   XMLHttpRequest: function unexpectedXhr() { calls.xhr += 1; },
   navigator: { sendBeacon() { calls.beacon += 1; return false; } },
-  get name() { return navigationName; },
-  set name(value) { navigationName = String(value); },
+  GM_getValue(key, fallback) { calls.gmGet += 1; return sharedSeedValue || fallback; },
+  GM_setValue(key, value) { calls.gmSet += 1; sharedSeedValue = String(value); },
+  GM_deleteValue() { calls.gmDelete += 1; sharedSeedValue = ""; },
 };
 const sandbox = {
   module: moduleRecord, URL, Set, Map, WeakMap, WeakSet, Object, Array, String,
@@ -303,7 +329,32 @@ listeners.click({
   ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, target: anchor,
   preventDefault() { calls.prevented += 1; },
 });
-process.stdout.write(JSON.stringify({ calls, navigationName, listenerCount: Object.keys(listeners).length }));
+const blankAttributes = { target: "_blank" };
+const blankAnchor = {
+  nodeType: 1,
+  ownerDocument: documentRecord,
+  textContent: "New tab user navigation deal",
+  getAttribute(name) {
+    if (name === "href") {
+      return "https://www.algumon.com/l/d/123?v=" + "a".repeat(32) + "&t=" + Date.now();
+    }
+    return Object.prototype.hasOwnProperty.call(blankAttributes, name)
+      ? blankAttributes[name]
+      : null;
+  },
+  closest(selector) { return selector === "a[href]" ? blankAnchor : card; },
+};
+listeners.click({
+  type: "click", isTrusted: true, defaultPrevented: false, button: 0,
+  ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, target: blankAnchor,
+  preventDefault() { calls.prevented += 1; },
+});
+process.stdout.write(JSON.stringify({
+  calls,
+  storedSeeds: JSON.parse(sharedSeedValue),
+  targetAfterClick: blankAttributes.target,
+  listenerCount: Object.keys(listeners).length,
+}));
 """
         completed = subprocess.run(
             ["node", "-e", javascript],
@@ -315,22 +366,26 @@ process.stdout.write(JSON.stringify({ calls, navigationName, listenerCount: Obje
         )
         result = json.loads(completed.stdout)
         self.assertEqual(3, result["listenerCount"])
-        self.assertEqual(
-            {"fetch": 0, "xhr": 0, "beacon": 0, "domWrites": 0, "prevented": 0},
-            result["calls"],
-        )
-        self.assertTrue(result["navigationName"].startswith("hdf-provenance:"))
+        self.assertEqual(0, result["calls"]["fetch"])
+        self.assertEqual(0, result["calls"]["xhr"])
+        self.assertEqual(0, result["calls"]["beacon"])
+        self.assertEqual(0, result["calls"]["prevented"])
+        self.assertEqual(2, result["calls"]["gmGet"])
+        self.assertEqual(2, result["calls"]["gmSet"])
+        self.assertEqual(0, result["calls"]["gmDelete"])
+        self.assertEqual(1, result["storedSeeds"]["v"])
+        self.assertEqual(2, len(result["storedSeeds"]["entries"]))
+        self.assertTrue(all(entry["navigationNonce"].startswith("hdf-") for entry in result["storedSeeds"]["entries"]))
+        self.assertEqual("_blank", result["targetAfterClick"])
+        self.assertEqual(0, result["calls"]["domWrites"])
         capture = self.source[
             self.source.index("function installAlgumonSeedCapture"):
             self.source.index("function createRunNonce")
         ]
         for forbidden in (
-            ".setAttribute(",
-            ".removeAttribute(",
             ".appendChild(",
             "createNativeMutationObserver",
             "GM_addElement",
-            "preventDefault",
             "stopImmediatePropagation",
             ".fetch(",
             "XMLHttpRequest",
@@ -338,6 +393,77 @@ process.stdout.write(JSON.stringify({ calls, navigationName, listenerCount: Obje
         ):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, capture)
+        self.assertIn("storeAlgumonSeed(browserRoot, navigationSeed)", capture)
+        self.assertIn("if (!isPromiseLike(stored)) return;", capture)
+        self.assertIn("deferredNavigation(anchor)", capture)
+        self.assertIn("event.preventDefault()", capture)
+
+    def test_algumon_source_seed_carries_its_card_title_and_comment_count_once(self) -> None:
+        javascript = r"""
+const fs = require("fs");
+const vm = require("vm");
+const moduleRecord = { exports: {} };
+const sandbox = {
+  module: moduleRecord, URL, Set, Map, WeakMap, WeakSet, Object, Array, String,
+  Number, RegExp, JSON, Date, Math, encodeURIComponent, decodeURIComponent,
+  escape, unescape, Uint8Array, Uint32Array, Reflect,
+};
+vm.runInNewContext(fs.readFileSync("hotdeal-focus.user.js", "utf8"), sandbox);
+const api = moduleRecord.exports;
+let storage = "";
+const calls = { get: 0, set: 0, remove: 0 };
+const sourceHref = "https://www.algumon.com/n/deal?sites=CLIEN";
+const storageApi = {
+  GM_getValue(_key, fallback) { calls.get += 1; return storage || fallback; },
+  GM_setValue(_key, value) { calls.set += 1; storage = String(value); },
+  GM_deleteValue() { calls.remove += 1; storage = ""; },
+};
+const sourceRoot = {
+  ...storageApi,
+  location: { href: sourceHref },
+  crypto: { getRandomValues(bytes) { bytes.fill(7); return bytes; } },
+};
+const title = { textContent: "Source card title only", getAttribute() { return null; } };
+const card = {
+  getAttribute(name) {
+    return ({ "data-site-type": "clien", "data-source-title": "Source card title only", "data-source-comment-count": "37" })[name] ?? null;
+  },
+  querySelector() { return title; },
+};
+const anchor = {
+  href: "https://www.clien.net/service/board/jirum/12345678",
+  textContent: "destination title must not be used",
+  getAttribute() { return null; },
+  closest(selector) { return selector === "a[href]" ? anchor : card; },
+};
+const stored = api.captureAlgumonNavigationSeed(sourceRoot, anchor);
+const targetRoot = {
+  ...storageApi,
+  document: { referrer: sourceHref },
+};
+const first = api.consumeAlgumonNavigationSeed(targetRoot);
+const second = api.consumeAlgumonNavigationSeed(targetRoot);
+process.stdout.write(JSON.stringify({ stored, first, second, calls, records: storage }));
+"""
+        completed = subprocess.run(
+            ["node", "-e", javascript],
+            cwd=PROJECT_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        result = json.loads(completed.stdout)
+        self.assertTrue(result["stored"])
+        self.assertEqual(
+            {"siteType": "clien", "title": "Source card title only", "commentCount": 37},
+            result["first"],
+        )
+        self.assertIsNone(result["second"])
+        self.assertGreaterEqual(result["calls"]["get"], 3)
+        self.assertEqual(1, result["calls"]["set"])
+        self.assertEqual(1, result["calls"]["remove"])
+        self.assertEqual("", result["records"])
 
     def test_protocol_markers_and_no_text_diagnostics_are_explicit(self) -> None:
         for token in (
@@ -772,35 +898,31 @@ class SemanticContractTests(unittest.TestCase):
             set(raw_layout_paths(ruli["layouts"][0])),
         )
 
-    def test_seed_is_short_lived_public_and_never_a_solo_trusted_signal(self) -> None:
-        self.assertIn("SEED_MAX_AGE_MS = 10 * 60 * 1000", self.source)
-        self.assertIn("SEED_MAX_BYTES = 1024", self.source)
-        self.assertIn('SEED_WINDOW_NAME_PREFIX = "hdf-provenance:"', self.source)
-        self.assertIn("function encodeSeedCarrier", self.source)
-        self.assertIn("function decodeSeedCarrier", self.source)
-        self.assertIn("function readAndClearSeed", self.source)
-        self.assertIn('document.addEventListener("auxclick"', self.source)
-        self.assertIn('document.addEventListener("keydown"', self.source)
-        self.assertIn('event.key === "Enter"', self.source)
-        self.assertIn('browserRoot.name = ""', self.source)
-        self.assertIn("staysInCurrentBrowsingContext", self.source)
-        self.assertNotIn("event.preventDefault()", self.source[
-            self.source.index("function installAlgumonSeedCapture"):
-            self.source.index("function createRunNonce")
-        ])
+    def test_algumon_referrer_is_the_only_navigation_authority(self) -> None:
+        self.assertIn("function captureAlgumonNavigationSeed", self.source)
+        self.assertIn("function consumeAlgumonNavigationSeed", self.source)
+        self.assertIn("isAlgumonReferrer(referrer)", self.source)
+        start = self.source[
+            self.source.index("function start(browserRoot)"):
+            self.source.index("return { mode: \"reader-gate\"")
+        ]
+        self.assertIn("installAlgumonSeedCapture(browserRoot)", start)
+        self.assertIn("configureTargetWithNavigationSeed(", start)
+        self.assertIn("consumeAlgumonNavigationSeed(browserRoot)", start)
+        self.assertNotIn("waitForReferrerProjectionSeed", self.source)
+        self.assertIn("resolveDocumentFromSeedCandidates", self.source)
         self.assertIn('"seed-title-match"', self.source)
         self.assertIn('"seed-count-match"', self.source)
         self.assertIn("UNTRUSTED_SIGNALS", self.source)
-        self.assertNotRegex(self.source, r"seed\.(?:body|content|html|user|email|token)")
-        extractor = self.source[
-            self.source.index("function extractAlgumonSeed"):
-            self.source.index("function installAlgumonSeedCapture")
+        self.assertNotRegex(self.source, r"seed\.(?:body|content|html|user|email)")
+        capture = self.source[
+            self.source.index("function captureAlgumonNavigationSeed"):
+            self.source.index("function forwardAlgumonNavigationSeed")
         ]
-        self.assertIn("data-source-comment-count", extractor)
-        self.assertIn("data-origin-comment-count", extractor)
-        self.assertNotIn('"data-comment-count"', extractor)
-        self.assertNotIn("countMatch", extractor)
-        self.assertNotIn("cardText.match", extractor)
+        self.assertIn('card?.getAttribute("data-source-title")', capture)
+        self.assertIn('card?.getAttribute("data-source-comment-count")', capture)
+        self.assertIn("commentCount,", capture)
+        self.assertIn("discardSupersededSourceSeed", capture)
 
     def test_navigation_identity_normalizes_only_proven_approved_article_aliases(
         self,
@@ -1008,7 +1130,7 @@ class SemanticContractTests(unittest.TestCase):
             cascade.index("const verifyCascade")
         ]
         self.assertIn("collectBoundedFullScan()", unlocked_verification)
-        self.assertIn("verifyOwnedState(document, runtime.projectionState)", unlocked_verification)
+        self.assertIn("projectionHasPublisherPaintRisk(document, runtime.projectionState)", unlocked_verification)
         self.assertIn("exposesRootPaint()", unlocked_verification)
         self.assertIn("exposesTopLayer()", unlocked_verification)
         self.assertIn("exposesUnowned(releaseCandidates)", unlocked_verification)
@@ -1035,34 +1157,13 @@ class SemanticContractTests(unittest.TestCase):
         self.assertLess(same_identity_return, runtime_stop)
         self.assertIn('terminalNavigationBlock("navigation-identity")', activation)
 
-    def test_post_ready_changes_relock_or_terminal_by_mutation_class(self) -> None:
+    def test_post_ready_changes_are_contained_or_terminal_by_mutation_class(self) -> None:
         runtime = self.source[
             self.source.index("function createReaderRuntime"):
             self.source.index("function lockWhenHtmlExists")
         ]
-        relock = runtime[
-            runtime.index("runtime.relockForReprojection"):
-            runtime.index("function attemptResolution")
-        ]
-        self.assertIn('runtime.releasePhase = "relocking"', relock)
-        self.assertIn('document.documentElement.classList.add(CLASS.lock)', relock)
-        self.assertIn('document.documentElement.setAttribute(ATTR.lock, "1")', relock)
-        self.assertIn("writeRuntimeGateStyle(styleElement, null, runtime)", relock)
-        self.assertIn("clearProtocolState(document)", relock)
-        self.assertIn("claimBootstrapLock(document, false)", relock)
-        self.assertIn("runtime.beginDiscovery()", relock)
-        self.assertLess(
-            relock.index('document.documentElement.classList.add(CLASS.lock)'),
-            relock.index("writeRuntimeGateStyle(styleElement, null, runtime)"),
-        )
-        self.assertLess(
-            relock.index("writeRuntimeGateStyle(styleElement, null, runtime)"),
-            relock.index("clearProtocolState(document)"),
-        )
-        self.assertLess(
-            relock.index("clearProtocolState(document)"),
-            relock.index("runtime.beginDiscovery()"),
-        )
+        self.assertNotIn("relockForReprojection", runtime)
+        self.assertNotIn("reprojectionReason", runtime)
 
         cascade = self.source[
             self.source.index("function installCascadeGuard"):
@@ -1072,15 +1173,11 @@ class SemanticContractTests(unittest.TestCase):
             cascade.index("function keepGateStyleLast"):
             cascade.index("let stylesheetChanged")
         ]
-        self.assertIn('runtime.releasePhase === "released"', mutation_guard)
-        self.assertIn("runtime.relockForReprojection(", mutation_guard)
-        self.assertIn('"post-ready-stylesheet"', mutation_guard)
-        self.assertIn('"post-ready-dom"', mutation_guard)
-        self.assertIn('"post-ready-cssom"', cascade)
+        self.assertNotIn('runtime.releasePhase === "released"', mutation_guard)
+        self.assertNotIn('"post-ready-stylesheet"', cascade)
+        self.assertNotIn('"post-ready-cssom"', cascade)
         self.assertIn("subscribeAdoptedStyleSheetMutations", cascade)
-        self.assertIn('"post-ready-adopted-stylesheet"', cascade)
         self.assertIn("subscribeStyleSheetStateMutations", cascade)
-        self.assertIn('"post-ready-stylesheet-state"', cascade)
         self.assertIn("runtime.discardCascadeRecords", cascade)
         self.assertIn('"open", "popover"', cascade)
 
@@ -1097,10 +1194,7 @@ class SemanticContractTests(unittest.TestCase):
             self.source.index("function activateCurrentLocation"):
             self.source.index("activateCurrentLocation();")
         ]
-        self.assertIn(
-            'activeRuntime.relockForReprojection("same-article-navigation")',
-            navigation,
-        )
+        self.assertNotIn("relockForReprojection", navigation)
         self.assertIn("characterData: true", runtime)
         self.assertIn("attributes: true", runtime)
 
@@ -1444,7 +1538,7 @@ class SemanticContractTests(unittest.TestCase):
             with self.subTest(case=index):
                 self.assertFalse(result["evidence"]["ok"])
 
-    def test_seed_validation_preserves_protected_title_punctuation(self) -> None:
+    def test_referrer_projection_title_keeps_protected_punctuation(self) -> None:
         javascript = r"""
 const fs = require("fs");
 const vm = require("vm");
@@ -1456,35 +1550,10 @@ const sandbox = {
 };
 vm.runInNewContext(fs.readFileSync("hotdeal-focus.user.js", "utf8"), sandbox);
 const api = moduleRecord.exports;
-const now = 1784532000000;
 const rawTitle = "Synthetic PS5/NS2 marker-style-tamper";
-const seed = api.validateSeed({
-  v: 1,
-  siteType: "clien",
-  dealId: "99999000",
-  title: rawTitle,
-  commentCount: null,
-  ts: now,
-  relayV: "0".repeat(32),
-  relayT: String(now),
-  navigationNonce: `hdf-${"a".repeat(28)}`,
-  destinationUrl: "https://www.clien.net/service/board/jirum/99999000",
-}, now, true);
-const carrierSeed = api.validateSeed({
-  v: 1,
-  siteType: "clien",
-  dealId: "99999000",
-  title: rawTitle,
-  commentCount: null,
-  ts: now,
-  relayV: "0".repeat(32),
-  relayT: String(now),
-  navigationNonce: `hdf-${"a".repeat(28)}`,
-}, now, true);
 process.stdout.write(JSON.stringify({
-  title: seed?.title ?? null,
-  evidence: seed ? api.titleConsistency(seed.title, rawTitle) : null,
-  carrierNavigation: Boolean(carrierSeed?.navigationNonce) && carrierSeed.destinationUrl === null,
+  title: rawTitle,
+  evidence: api.titleConsistency(rawTitle, rawTitle),
 }));
 """
         completed = subprocess.run(
@@ -1498,7 +1567,6 @@ process.stdout.write(JSON.stringify({
         result = json.loads(completed.stdout)
         self.assertEqual("Synthetic PS5/NS2 marker-style-tamper", result["title"])
         self.assertTrue(result["evidence"]["ok"], result)
-        self.assertTrue(result["carrierNavigation"], result)
 
     def test_tamper_and_spa_revalidation_contracts_exist(self) -> None:
         for token in (
@@ -1618,7 +1686,13 @@ process.stdout.write(JSON.stringify({
 
     def test_reader_gate_v2_uses_only_standalone_gm_style_authority(self) -> None:
         self.assertEqual(
-            ["GM_addElement", "window.onurlchange"],
+            [
+                "GM_addElement",
+                "GM_getValue",
+                "GM_setValue",
+                "GM_deleteValue",
+                "window.onurlchange",
+            ],
             metadata_values(self.source, "grant"),
         )
         self.assertEqual(1, self.source.count('GM_addElement(parent, "style", {'))
@@ -1726,12 +1800,26 @@ process.stdout.write(JSON.stringify({
             self.source.index("function start(browserRoot)"):
             self.source.index("return { mode: \"reader-gate\"")
         ]
-        self.assertIn("const initialSeed = readAndClearSeed(browserRoot)", start)
+        self.assertIn("function configureTargetWithNavigationSeed(navigationSeed)", start)
+        self.assertIn("consumeAlgumonNavigationSeed(browserRoot)", start)
+        self.assertIn("const canonicalSeeds = navigationSeed ? Object.freeze([navigationSeed])", start)
         self.assertIn("layouts.length === 0", start)
         self.assertIn("isInitialActivation", start)
         self.assertIn('terminalNavigationBlock("route-unapproved")', start)
         self.assertIn("const evaluationLayouts = layouts", start)
         self.assertNotIn("contract.layouts", start)
+
+    def test_projection_rechecks_atomic_role_visibility_and_external_controls(self) -> None:
+        paint_risk = self.source[
+            self.source.index("function projectionHasPublisherPaintRiskWithPublisherStyles"):
+            self.source.index("function projectionHasPublisherPaintRisk(document, state)")
+        ]
+        self.assertIn("!isRendered(root)", paint_risk)
+        self.assertIn("state.commentControlScope", paint_risk)
+        self.assertIn("function insideCommentProjection", self.source)
+        self.assertIn("commentControlMutationRoots", self.source)
+        self.assertIn("queryAllSafe(pageRoot, controlHints)", self.source)
+        self.assertIn("commentControlScope: pageRoot", self.source)
 
 
 class CandidatePromotionContractTests(unittest.TestCase):

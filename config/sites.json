@@ -3,7 +3,7 @@
   "metadata": {
     "title": "AdGuard Hotdeal Focus",
     "description": "Shows only the hot-deal title, purchase information, article body, and comments.",
-    "version": "0.6.4",
+    "version": "0.6.26",
     "expires_hours": 12,
     "license": "MIT",
     "rollback_of": null
@@ -168,7 +168,10 @@
             ],
             "controls": [
               "#comment_list_area .comment_more",
-              "#comment_list_area .pagination"
+              "#comment_list_area .pagination",
+              "#quote > .cmt-more-btn-pc",
+              "#quote > #comment_total_btn_area",
+              "#quote > #comment_paging_area"
             ],
             "ignored": [],
             "allow_empty": true

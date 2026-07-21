@@ -55,7 +55,13 @@ GATE_LOCK_RULE_COUNT = 91
 READER_GATE_NAME = "AdGuard Hotdeal Focus Reader Gate"
 MARKER_GATE_NAME = "AdGuard Hotdeal Focus Marker Gate"
 READER_GATE_PROTOCOL_VERSION = 2
-READER_GATE_GRANTS = ("GM_addElement", "window.onurlchange")
+READER_GATE_GRANTS = (
+    "GM_addElement",
+    "GM_getValue",
+    "GM_setValue",
+    "GM_deleteValue",
+    "window.onurlchange",
+)
 READER_GATE_REQUIRED_HOSTS = (
     "algumon.com", "clien.net", "ppomppu.co.kr", "ruliweb.com",
     "quasarzone.com", "eomisae.co.kr", "zod.kr", "arca.live",
@@ -783,7 +789,7 @@ def _reader_gate_v2_contract(script_bytes: bytes) -> int:
     if grants != list(READER_GATE_GRANTS):
         raise IntegrityFailure(
             "Reader Gate v2 must declare the exact ordered grants "
-            "GM_addElement and window.onurlchange"
+            "GM_addElement, GM_getValue, GM_setValue, GM_deleteValue, and window.onurlchange"
         )
     if download_urls != [RELEASE_USERSCRIPT_URL] or update_urls != [
         RELEASE_USERSCRIPT_URL

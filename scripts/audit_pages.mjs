@@ -115,6 +115,7 @@ const DEFAULT_ALGUMON_REQUEST_START_BUDGET =
   1 + REQUIRED_SITE_IDS.length * (1 + ALGUMON_SITE_LINK_SCAN_LIMIT);
 const REQUIRED_ROLE_NAMES = Object.freeze(["title", "body", "comments"]);
 const READER_GATE_PROTOCOL_VERSION = 2;
+const PREAUTHORIZED_ADGUARD_CONTROL_SCHEMA_VERSION = 3;
 const READER_GATE_INSTALL_URL =
   "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js";
 const FIRST_PAINT_PROBE_SCHEMA_VERSION = 1;
@@ -214,9 +215,62 @@ const FIRST_PAINT_PROBE_SOURCE = String.raw`
 })();
 `;
 
+const PREAUTHORIZED_AUDIT_NAVIGATION_STORAGE_SOURCE = String.raw`(() => {
+  "use strict";
+  const storageKey = "hdf-v2.algumon-navigation-seeds";
+  let storedValue = "";
+  const encoded = new URLSearchParams(location.hash.slice(1)).get("hdf-audit-seed");
+  if (encoded && /^[A-Za-z0-9_-]+$/.test(encoded)) {
+    try {
+      const padded = encoded.replace(/-/g, "+").replace(/_/g, "/") +
+        "=".repeat((4 - (encoded.length % 4)) % 4);
+      const seed = JSON.parse(decodeURIComponent(Array.prototype.map.call(
+        atob(padded),
+        (character) => "%" + character.charCodeAt(0).toString(16).padStart(2, "0"),
+      ).join("")));
+      if (
+        typeof seed?.siteType === "string" && typeof seed?.title === "string" &&
+        (seed.commentCount === null || Number.isSafeInteger(seed.commentCount))
+      ) {
+        const sourceUrl = new URL(document.referrer);
+        if (sourceUrl.protocol !== "https:" ||
+            !/(^|\.)algumon\.com$/i.test(sourceUrl.hostname) ||
+            sourceUrl.username || sourceUrl.password || sourceUrl.port) {
+          throw new Error("audit seed requires an actual Algumon referrer");
+        }
+        sourceUrl.hash = "";
+        storedValue = JSON.stringify({
+          records: [{
+            token: "a".repeat(48),
+            sourceReferrer: sourceUrl.href,
+            siteType: seed.siteType,
+            title: seed.title,
+            commentCount: seed.commentCount,
+            expiresAt: Date.now() + 120000,
+          }],
+        });
+      }
+      history.replaceState(null, "", location.pathname + location.search);
+    } catch (_error) {
+      storedValue = "";
+    }
+  }
+  Object.defineProperties(globalThis, {
+    GM_getValue: { configurable: false, value: (key, fallback) =>
+      key === storageKey && storedValue ? storedValue : fallback },
+    GM_setValue: { configurable: false, value: (key, value) => {
+      if (key === storageKey) storedValue = String(value);
+    } },
+    GM_deleteValue: { configurable: false, value: (key) => {
+      if (key === storageKey) storedValue = "";
+    } },
+  });
+})();`;
+
 function userscriptAuditInitSource(userscriptContent) {
   return `${FIRST_PAINT_PROBE_SOURCE}\n` +
-    `${PREAUTHORIZED_ADGUARD_CONTROL_SOURCE}\n${userscriptContent}`;
+    `${PREAUTHORIZED_ADGUARD_CONTROL_SOURCE}\n` +
+    `${PREAUTHORIZED_AUDIT_NAVIGATION_STORAGE_SOURCE}\n${userscriptContent}`;
 }
 
 function parseArguments(argv) {
@@ -2193,8 +2247,11 @@ async function buildIntegrityManifest(
   const userscriptContractCovered =
     !userscript?.missing &&
     /^\/\/\s*@grant\s+GM_addElement\s*$/mu.test(userscript.content) &&
+    /^\/\/\s*@grant\s+GM_getValue\s*$/mu.test(userscript.content) &&
+    /^\/\/\s*@grant\s+GM_setValue\s*$/mu.test(userscript.content) &&
+    /^\/\/\s*@grant\s+GM_deleteValue\s*$/mu.test(userscript.content) &&
     /^\/\/\s*@grant\s+window\.onurlchange\s*$/mu.test(userscript.content) &&
-    (userscript.content.match(/^\/\/\s*@grant\s+/gmu) ?? []).length === 2 &&
+    (userscript.content.match(/^\/\/\s*@grant\s+/gmu) ?? []).length === 5 &&
     userscript.content.includes('const PROTOCOL_VERSION = "2"') &&
     userscript.content.includes('GM_addElement(parent, "style", {') &&
     userscript.content.includes("function proveStandaloneCascadeRelease") &&
@@ -2639,15 +2696,6 @@ async function navigate(page, targetUrl, timeoutMs, externalResponseObserver = n
   const navigationProof = seededNavigationProof(targetUrl);
   try {
     try {
-      if (navigationProof) {
-        await page.goto("about:blank", {
-          waitUntil: "commit",
-          timeout: timeoutMs,
-        });
-        await page.evaluate((name) => {
-          window.name = name;
-        }, `hdf-provenance:${navigationProof.encoded}`);
-      }
       response = await page.goto(targetUrl, {
         waitUntil: "domcontentloaded",
         timeout: timeoutMs,
@@ -3544,7 +3592,7 @@ function seededNavigationUrl(url, siteType, title, dealId, signedRelayUrl = null
   };
   const encoded = Buffer.from(JSON.stringify(seed), "utf8").toString("base64url");
   const parsed = new URL(url);
-  parsed.hash = `hdf-seed=${encoded}`;
+  parsed.hash = `hdf-audit-seed=${encoded}`;
   return parsed.href;
 }
 
@@ -3555,12 +3603,12 @@ function seededNavigationProof(url) {
   } catch {
     return null;
   }
-  const encoded = new URLSearchParams(parsed.hash.replace(/^#/u, "")).get("hdf-seed");
+  const encoded = new URLSearchParams(parsed.hash.replace(/^#/u, "")).get("hdf-audit-seed");
   if (!encoded || !/^[A-Za-z0-9_-]+$/u.test(encoded)) return null;
   try {
     const seed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
     return /^hdf-[0-9a-z]{28}$/u.test(String(seed?.navigationNonce ?? ""))
-      ? { encoded, navigationNonce: seed.navigationNonce }
+      ? { encoded, navigationNonce: seed.navigationNonce, seed }
       : null;
   } catch {
     return null;
@@ -4067,11 +4115,17 @@ async function countExistingApprovedLayoutMatches(
       const layouts = (projectionLayouts ?? site?.layouts ?? []).filter((candidate) =>
         (candidate.paths ?? [candidate.path]).some((configuredPath) =>
           api.pathPatternMatches(pathAndQuery, configuredPath)));
-      const validatedSeed = api.validateSeed(oracleSeed, Date.now(), false);
+      const projectionSeed = oracleSeed?.siteType === site?.id
+        ? Object.freeze({
+          siteType: oracleSeed.siteType,
+          title: oracleSeed.title,
+          commentCount: oracleSeed.commentCount ?? null,
+        })
+        : null;
       const projection = api.resolveProjectionClasses(
         document,
         layouts,
-        validatedSeed?.siteType === site?.id ? validatedSeed : null,
+        projectionSeed,
       );
       return {
         semanticProjectionCount: projection.projectionClasses.length,
@@ -4961,7 +5015,7 @@ async function auditUserscriptGate(
 ) {
   await page
     .waitForFunction(
-      ({ expectation, protocolVersion }) => {
+      ({ expectation, protocolVersion, preauthorizedControlSchemaVersion }) => {
         const html = document.documentElement;
         const state = html.getAttribute("data-hotdeal-focus-state");
         const status = html.getAttribute("data-hotdeal-focus-status");
@@ -4992,7 +5046,7 @@ async function auditUserscriptGate(
           diagnostics?.standaloneCascadeProof?.nonceBound === true &&
           diagnostics?.standaloneCascadeProof?.unownedHidden === true &&
           preauthorized?.kind === "preauthorized-userscript-style-control" &&
-          preauthorized?.schemaVersion === protocolVersion &&
+          preauthorized?.schemaVersion === preauthorizedControlSchemaVersion &&
           preauthorized?.gmAddElementCalls === 1 &&
           document.querySelectorAll(
             'style[data-hotdeal-focus-runtime-style="2"]',
@@ -5001,6 +5055,8 @@ async function auditUserscriptGate(
       {
         expectation: runtimeExpectation,
         protocolVersion: READER_GATE_PROTOCOL_VERSION,
+        preauthorizedControlSchemaVersion:
+          PREAUTHORIZED_ADGUARD_CONTROL_SCHEMA_VERSION,
       },
       { timeout: timeoutMs },
     )
@@ -5348,7 +5404,7 @@ function userscriptGateFailures(gate, requiredRoles) {
   }
   if (
     gate.testOnlyAdguardControl?.kind !== "preauthorized-userscript-style-control" ||
-    gate.testOnlyAdguardControl?.schemaVersion !== READER_GATE_PROTOCOL_VERSION ||
+    gate.testOnlyAdguardControl?.schemaVersion !== PREAUTHORIZED_ADGUARD_CONTROL_SCHEMA_VERSION ||
     gate.testOnlyAdguardControl?.gmAddElementCalls !== 1
   ) {
     failures.push("userscript-manager style control did not provide exactly one GM style");
@@ -6481,10 +6537,16 @@ async function auditSyntheticNoFlashFixture(
         status: 200,
         contentType: "text/html; charset=utf-8",
         body: `<!doctype html>
-<html lang="ko"><head><meta charset="utf-8"><title>${fixtureTitle}</title>
-<meta property="og:title" content="${fixtureTitle}"></head>
+<html lang="ko"><head><meta charset="utf-8"></head>
 <body><header id="noise-before-core">navigation noise</header><main id="fixture-root"></main>
 <script>
+window.setTimeout(() => {
+  document.title = '${fixtureTitle}';
+  const metadata = document.createElement('meta');
+  metadata.setAttribute('property', 'og:title');
+  metadata.setAttribute('content', '${fixtureTitle}');
+  document.head.append(metadata);
+}, 50);
 window.setTimeout(() => {
   document.querySelector('#fixture-root').innerHTML =
     '<section class="content_view"><h1 class="post_subject">검증용 핫딜 제목</h1>' +
@@ -6609,6 +6671,11 @@ async function auditSyntheticAlgumonRelayFixtures(
     const entryUrl = signedUrl(dealId, query);
     const finalUrl = destinationUrl(articleId);
     const fixture = { id, failures: [] };
+    const seededFinalUrl = seededNavigationUrl(finalUrl, "clien", title, dealId, entryUrl);
+    const targetProof = seededNavigationProof(seededFinalUrl);
+    if (!targetProof?.seed) {
+      throw new Error("synthetic relay target seed could not be constructed");
+    }
     const context = await browser.newContext({
       ...contextOptions("desktop"),
       serviceWorkers: "block",
@@ -6630,7 +6697,7 @@ async function auditSyntheticAlgumonRelayFixtures(
           status: response?.status ?? 200,
           contentType: response?.contentType ?? "text/html; charset=utf-8",
           headers: response?.headers,
-          body: response?.body ?? relayHtml(finalUrl),
+          body: response?.body ?? relayHtml(seededFinalUrl),
         });
         return;
       }
@@ -6684,13 +6751,12 @@ async function auditSyntheticAlgumonRelayFixtures(
           document.documentElement.getAttribute("data-hotdeal-focus-ready") === "1",
         null, { timeout: timeoutMs });
         const security = await page.evaluate(() => ({
-          name: window.name,
           fragment: location.hash,
           state: document.documentElement.getAttribute("data-hotdeal-focus-state"),
         }));
         fixture.security = security;
         if (
-          security.name !== "" || security.fragment !== "" || security.state !== "ready" ||
+          security.fragment !== "" || security.state !== "ready" ||
           !page.url().startsWith(finalUrl)
         ) {
           fixture.failures.push("valid same-tab relay lost seed cleanup or reader readiness");
@@ -6710,7 +6776,6 @@ async function auditSyntheticAlgumonRelayFixtures(
         fixture.failureState = await observedPopup.evaluate(() => ({
           url: location.href,
           referrer: document.referrer,
-          name: window.name,
           hash: location.hash,
           state: document.documentElement.getAttribute("data-hotdeal-focus-state"),
           status: document.documentElement.getAttribute("data-hotdeal-focus-status"),
@@ -7345,15 +7410,6 @@ async function auditSyntheticEdgeFixtures(
         : seededNavigationUrl(fixtureUrl, "clien", title, 99999000 + index);
       if (fixture.lockedPixelProbe) {
         const navigationProof = seededNavigationProof(fixtureNavigationUrl);
-        if (navigationProof) {
-          await session.page.goto("about:blank", {
-            waitUntil: "commit",
-            timeout: timeoutMs,
-          });
-          await session.page.evaluate((name) => {
-            window.name = name;
-          }, `hdf-provenance:${navigationProof.encoded}`);
-        }
         await session.page.goto(fixtureNavigationUrl, {
           waitUntil: "domcontentloaded",
           timeout: timeoutMs,
@@ -7716,10 +7772,6 @@ async function auditSyntheticEdgeFixtures(
           `</body></html>`,
       }));
       if (fixture.forgedDirectNavigation) {
-        const proof = seededNavigationProof(navigationUrl);
-        await session.page.evaluate((name) => {
-          window.name = name;
-        }, `hdf-provenance:${proof.navigationNonce}`);
         await session.page.goto(navigationUrl, {
           waitUntil: "domcontentloaded",
           timeout: timeoutMs,
@@ -7778,7 +7830,7 @@ async function auditSyntheticEdgeFixtures(
               (node) => node.hasAttribute("data-hotdeal-focus-keep"),
             ),
           },
-          fragmentCleared: !location.hash.includes("hdf-seed="),
+          fragmentCleared: !location.hash.includes("hdf-audit-seed="),
           paintFlashCount:
             window.__HOTDEAL_FOCUS_PAINT_PROBE__?.flashFrameCount ?? 1,
         };
@@ -7818,8 +7870,8 @@ async function auditSyntheticEdgeFixtures(
           );
         }
       }
-      if (!state.fragmentCleared) {
-        fixtureResult.failures.push("public Algumon seed fragment was not cleared");
+      if (!fixture.forgedDirectNavigation && !state.fragmentCleared) {
+        fixtureResult.failures.push("preauthorized audit seed fragment was not cleared");
       }
       if (state.paintFlashCount !== 0) {
         fixtureResult.failures.push(

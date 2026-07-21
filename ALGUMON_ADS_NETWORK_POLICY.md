@@ -30,6 +30,12 @@ hotdeal-focus.user.js의 설치 수나 권한을 늘리지 않으며, 핫딜 대
 algumon.com 또는 하위 도메인이 아닌 한 AdGuard의 일반 차단 규칙이
 계속 적용됩니다.
 
+PC에서 AdGuard의 **로컬 DNS 필터링**도 켜져 있으면 그 DNS 차단이
+NextDNS Allowlist와 웹 요청 예외보다 먼저 적용됩니다. 이 경우에는
+로컬 DNS 필터링만 끄고 NextDNS는 그대로 유지합니다. Android에서
+AdGuard의 DNS 모듈 자체가 NextDNS 연결 수단인 경우에는 그 모듈을
+끄지 말고, 웹/HTTPS 필터링 계층을 유지합니다.
+
 NextDNS에 넣을 호스트는 다음과 같습니다.
 
     safeframe.googlesyndication.com
@@ -90,6 +96,12 @@ article/comment projection.
 Every exception in that list uses $domain=algumon.com. DNS can therefore
 resolve the required delivery host, while ordinary AdGuard request rules still
 block the same host when the initiator is not Algumon.
+
+If AdGuard for Windows also has its local DNS filtering enabled, that local
+DNS block happens before either the NextDNS Allowlist or the scoped web
+exception. Disable only that local DNS module and keep NextDNS active. Do not
+do this on Android when that AdGuard DNS module itself is the NextDNS transport;
+keep the web/HTTPS filtering layer there instead.
 
     safeframe.googlesyndication.com
     pagead2.googlesyndication.com

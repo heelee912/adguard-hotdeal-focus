@@ -10,6 +10,7 @@
     "clien-jirum-spoofed-public-marker": { "allowed_node_ids": ["shell", "title", "body", "comments"] },
     "ppomppu-pc-june": { "allowed_node_ids": ["shell", "title", "product", "body", "comments"] },
     "ppomppu-pc-july": { "allowed_node_ids": ["shell", "title", "product", "body", "comments"] },
+    "ppomppu-pc-empty-comments-composer": { "allowed_node_ids": ["shell", "title", "product", "body"] },
     "ppomppu-mobile-june": { "allowed_node_ids": ["shell", "title", "product", "body", "comments"] },
     "ppomppu-mobile-july": { "allowed_node_ids": ["shell", "title", "product", "body", "comments"] },
     "ruliweb-hotdeal-june": { "allowed_node_ids": ["shell", "title", "body", "comments"] },

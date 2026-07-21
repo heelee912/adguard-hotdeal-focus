@@ -53,6 +53,15 @@
       "body_html": "<main class=\"wrapper container\" data-fixture-node-id=\"shell\"><section id=\"topTitle\"><h1 data-fixture-node-id=\"title\">DOM regression fixture</h1><dl class=\"subject_preface topTitle-link\" data-fixture-node-id=\"product\"><dt>Product price</dt><dd>USD 10 <a href=\"https://shop.invalid/product\">buy product</a></dd></dl></section><article class=\"board-contents\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></article><div id=\"comment_list_area\" role=\"feed\" data-fixture-node-id=\"comments\"><div id=\"iC_201\" class=\"comment_wrapper comment_template_depth1\">first comment</div><div id=\"iC_202\" class=\"comment_wrapper comment_template_depth2 alternate\"><span>reply content</span></div></div></main>"
     },
     {
+      "id": "ppomppu-pc-empty-comments-composer",
+      "site_id": "ppomppu",
+      "layout_id": "pc",
+      "vintage": "current-empty-comments",
+      "profile": "desktop",
+      "url": "https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu&no=99000003",
+      "body_html": "<main class=\"wrapper container\" data-fixture-node-id=\"shell\"><section id=\"topTitle\"><h1 data-fixture-node-id=\"title\">DOM regression fixture</h1><dl class=\"subject_preface topTitle-link\" data-fixture-node-id=\"product\"><dt>Product price</dt><dd>USD 10 <a href=\"https://shop.invalid/product\">buy product</a></dd></dl></section><article class=\"board-contents\" data-fixture-node-id=\"body\"><p>This synthetic hot deal article body is deliberately longer than one hundred characters so semantic scoring recognizes a complete article without retaining any real post text or personal data.</p><p>Second content paragraph.</p></article><div id=\"newbbs\"><div id=\"quote\"><div class=\"cmt-more-btn-pc prev-cmt-btn-pc\">Previous comments</div><div id=\"comment_list_area\" data-fixture-node-id=\"comments\"></div><div class=\"cmt-more-btn-pc next-cmt-btn-pc\">Next comments</div><div class=\"cmt-more-btn-pc new-cmt-btn-pc\">New comments</div><div id=\"comment_total_btn_area\"></div><div id=\"comment_paging_area\"></div><div id=\"comment_write_warning\">Comment writer notice</div><table id=\"comment_write_form\"><tbody><tr><td><textarea>Comment composer</textarea></td></tr></tbody></table></div></div></main>"
+    },
+    {
       "id": "ppomppu-mobile-june",
       "site_id": "ppomppu",
       "layout_id": "mobile",

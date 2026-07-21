@@ -1,8 +1,8 @@
 /**
  * Test/audit-only control for the userscript-manager style API contract.
  *
- * Browser fixtures use this source only to provide the GM_addElement API that
- * an installed userscript receives. It does not inject filter CSS, mutate the
+ * Browser fixtures use this source only to provide the GM style API that the
+ * installed userscript receives. It does not inject filter CSS, mutate the
  * release probe, or participate in the reader-gate release decision.
  */
 export const PREAUTHORIZED_ADGUARD_CONTROL_SOURCE = String.raw`
@@ -13,10 +13,10 @@ export const PREAUTHORIZED_ADGUARD_CONTROL_SOURCE = String.raw`
   if (existing?.kind === CONTROL_KIND &&
       globalThis.GM_addElement === existing.gmAddElement) return;
   if (typeof globalThis.GM_addElement !== "undefined") {
-    throw new Error("preauthorized control refuses an existing GM_addElement");
+    throw new Error("preauthorized control refuses existing GM APIs");
   }
   const control = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     kind: CONTROL_KIND,
     gmAddElementCalls: 0,
     gmAddElement: null,

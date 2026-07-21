@@ -1327,7 +1327,9 @@ try {
         growth.style.height = "1000px";
         document.body.append(growth);
       });
+      window.__hdfInfiniteScrollFixtureReady = true;
     </script></body>`);
+  await page.waitForFunction(() => window.__hdfInfiniteScrollFixtureReady === true);
   let unboundedScrollRejected = false;
   try {
     await settlePage(page, 1_000);

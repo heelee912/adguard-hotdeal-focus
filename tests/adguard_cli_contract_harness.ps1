@@ -20,7 +20,9 @@ foreach ($statement in $ast.EndBlock.Statements) {
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
 $script:MaximumSourceBytes = 8MB
 $script:ReaderGateProtocolVersion = 2
-$script:ReaderGateGrants = @('GM_addElement', 'window.onurlchange')
+$script:ReaderGateGrants = @(
+    'GM_addElement', 'GM_getValue', 'GM_setValue', 'GM_deleteValue', 'window.onurlchange'
+)
 $script:ReleaseUserscriptUrl = ('https://heelee912.github.io/' +
     'adguard-hotdeal-focus/hotdeal-focus.user.js')
 $script:MarkerGateArtifactVersion = '2.0.2'
@@ -291,8 +293,9 @@ Assert-Contract ($exclusive.ScopeKind -ceq 'exclusive-target') 'exclusive scope 
 Assert-Contract ($mixed.ScopeKind -ceq 'mixed-target') 'mixed scope misclassified'
 Assert-Contract ($global.ScopeKind -ceq 'global') 'global scope misclassified'
 
-# An already-custom userscript keeps the in-place UpdateCode -> SetStatus
-# transaction. The independent GM value-store remains byte-exact.
+# AdGuard 7.22 downgrades a changed local/manual executable script when its
+# code is updated in place, so every changed executable entry is replaced.
+# The independent GM value-store remains byte-exact across that replacement.
 $beforeUserscript = New-UserscriptSnapshot -Version '1.0.0' -Enabled $false `
     -Code 'before-code' -GmProperties '{"saved":"before"}' -Custom $true
 $userscriptPlan = [pscustomobject]@{
@@ -302,7 +305,7 @@ $userscriptPlan = [pscustomobject]@{
         gm_properties_sha256 = Get-CanonicalTextSha256 -Text '{"saved":"before"}'
         fresh_install_gm_properties_sha256 = Get-CanonicalTextSha256 -Text '{}'
         enabled = $true; is_custom = $true; is_style = $false
-        replacement_required = $false
+        replacement_required = $true
     }
 }
 Assert-Contract (-not (Assert-UserscriptRestorePreconditions -Current $beforeUserscript `
@@ -310,7 +313,7 @@ Assert-Contract (-not (Assert-UserscriptRestorePreconditions -Current $beforeUse
     'exact userscript before-state was not idempotent'
 $userscriptPrefixes = @(
     (New-UserscriptSnapshot -Version '2.0.0' -Enabled $false -Code 'after-code' `
-        -GmProperties '{"saved":"before"}' -Custom $true),
+        -GmProperties '{}' -Custom $true),
     (New-UserscriptSnapshot -Version '2.0.0' -Enabled $true -Code 'after-code' `
         -GmProperties '{"saved":"before"}' -Custom $true)
 )
@@ -325,11 +328,21 @@ Assert-ThrowsLike -Action {
     [void] (Assert-UserscriptRestorePreconditions -Current $invalidUserscript `
             -BackupSnapshot $beforeUserscript -TransactionPlan $userscriptPlan)
 } -Pattern '*not an enumerated mutation-prefix*'
-Assert-ThrowsLike -Action {
-    [void] (Assert-UserscriptRestorePreconditions -Current ([pscustomobject]@{
-                Exists = $false; Info = $null; Code = $null; GmProperties = $null
-            }) -BackupSnapshot $beforeUserscript -TransactionPlan $userscriptPlan)
-} -Pattern '*existence is not an authorized transaction prefix*'
+Assert-Contract (Assert-UserscriptRestorePreconditions -Current ([pscustomobject]@{
+            Exists = $false; Info = $null; Code = $null; GmProperties = $null
+        }) -BackupSnapshot $beforeUserscript -TransactionPlan $userscriptPlan) `
+    'remove-before-executable-code replacement prefix was rejected'
+$executableRollbackPrefixes = @(
+    (New-UserscriptSnapshot -Version '1.0.0' -Enabled $false -Code 'before-code' `
+        -GmProperties '{}' -Custom $true),
+    (New-UserscriptSnapshot -Version '1.0.0' -Enabled $true -Code 'before-code' `
+        -GmProperties '{"saved":"before"}' -Custom $true)
+)
+foreach ($prefix in $executableRollbackPrefixes) {
+    Assert-Contract (Assert-UserscriptRestorePreconditions -Current $prefix `
+            -BackupSnapshot $beforeUserscript -TransactionPlan $userscriptPlan) `
+        'authorized executable-code rollback prefix was rejected'
+}
 
 # A source-owned IsCustom=false entry is replaced, not updated in place. Every
 # forward crash prefix and every resumable rollback-reinstall prefix is exact.
@@ -689,6 +702,73 @@ $state.Userscripts = @()
 $state.UserscriptCode = ''
 $state.UserscriptGmProperties = ''
 
+# A changed executable custom script uses remove -> install, never the broken
+# UpdateUserscriptCode path. Both the forward update and rollback preserve
+# the saved GM values and executable classification.
+$executableUpdateSnapshot = New-UserscriptSnapshot -Version '1.0.0' `
+    -Enabled $false -Code 'before-code' -GmProperties '{"saved":"before"}' -Custom $true
+$state.Userscripts = @($executableUpdateSnapshot.Info)
+$state.UserscriptCode = $executableUpdateSnapshot.Code
+$state.UserscriptGmProperties = $executableUpdateSnapshot.GmProperties
+$state.UserscriptWrites = @()
+$executableForwardJournal = Join-Path ([System.IO.Path]::GetTempPath()) (
+    'hdf-executable-forward-' + [Guid]::NewGuid().ToString('N'))
+[void] [System.IO.Directory]::CreateDirectory($executableForwardJournal)
+$state.IntentDirectory = $executableForwardJournal
+$state.ExpectedWriteIntents = @(
+    [pscustomobject]@{ Write = 'remove'; Event = 'intent-userscript-replacement-remove' },
+    [pscustomobject]@{ Write = 'install'; Event = 'intent-userscript-install' },
+    [pscustomobject]@{ Write = 'update-gm'; Event = 'intent-userscript-replacement-restore-gm' },
+    [pscustomobject]@{ Write = 'set-status'; Event = 'intent-userscript-enable' }
+)
+try {
+    [void] (Invoke-UserscriptMutation -Client $client `
+            -Snapshot $executableUpdateSnapshot -Desired $desiredUserscript `
+            -JournalDirectory $executableForwardJournal)
+}
+finally {
+    $state.IntentDirectory = $null
+    $state.ExpectedWriteIntents = @()
+    [System.IO.Directory]::Delete($executableForwardJournal, $true)
+}
+Assert-Contract ([bool] $state.Userscripts[0].IsCustom) `
+    'changed executable userscript lost IsCustom during replacement'
+Assert-Contract ([string] $state.UserscriptGmProperties -ceq '{"saved":"before"}') `
+    'changed executable userscript did not preserve GM values'
+Assert-Contract (Test-ExactStringSequence -Left $state.UserscriptWrites `
+        -Right @('remove', 'install', 'update-gm', 'set-status')) `
+    'changed executable userscript did not use replacement order'
+
+$state.UserscriptWrites = @()
+$executableRollbackJournal = Join-Path ([System.IO.Path]::GetTempPath()) (
+    'hdf-executable-rollback-' + [Guid]::NewGuid().ToString('N'))
+[void] [System.IO.Directory]::CreateDirectory($executableRollbackJournal)
+$state.IntentDirectory = $executableRollbackJournal
+$state.ExpectedWriteIntents = @(
+    [pscustomobject]@{ Write = 'remove'; Event = 'intent-rollback-userscript-replacement-remove' },
+    [pscustomobject]@{ Write = 'install'; Event = 'intent-rollback-userscript-replacement-install' },
+    [pscustomobject]@{ Write = 'update-gm'; Event = 'intent-rollback-userscript-gm' },
+    [pscustomobject]@{ Write = 'set-status'; Event = 'intent-rollback-userscript-status' }
+)
+try {
+    Restore-UserscriptSnapshot -Client $client -Snapshot $executableUpdateSnapshot `
+        -JournalDirectory $executableRollbackJournal
+}
+finally {
+    $state.IntentDirectory = $null
+    $state.ExpectedWriteIntents = @()
+    [System.IO.Directory]::Delete($executableRollbackJournal, $true)
+}
+$restoredExecutable = Get-UserscriptSnapshot -Client $client
+Assert-Contract (Test-UserscriptSnapshotExact -Left $restoredExecutable `
+        -Right $executableUpdateSnapshot) `
+    'changed executable userscript rollback was not exact'
+
+$state.Userscripts = @()
+$state.UserscriptCode = ''
+$state.UserscriptGmProperties = ''
+$state.UserscriptWrites = @()
+
 # A source-owned false classification is transactionally replaced and retains
 # its independent GM values. Rollback reinstalls the exact original class.
 $reclassificationSnapshot = New-UserscriptSnapshot -Version '1.0.0' `
@@ -702,10 +782,10 @@ $forwardJournal = Join-Path ([System.IO.Path]::GetTempPath()) (
 [void] [System.IO.Directory]::CreateDirectory($forwardJournal)
 $state.IntentDirectory = $forwardJournal
 $state.ExpectedWriteIntents = @(
-    [pscustomobject]@{ Write = 'remove'; Event = 'intent-userscript-reclassification-remove' },
+    [pscustomobject]@{ Write = 'remove'; Event = 'intent-userscript-replacement-remove' },
     [pscustomobject]@{ Write = 'install'; Event = 'intent-userscript-install' },
     [pscustomobject]@{
-        Write = 'update-gm'; Event = 'intent-userscript-reclassification-restore-gm'
+        Write = 'update-gm'; Event = 'intent-userscript-replacement-restore-gm'
     },
     [pscustomobject]@{ Write = 'set-status'; Event = 'intent-userscript-enable' }
 )
@@ -734,10 +814,10 @@ $rollbackJournal = Join-Path ([System.IO.Path]::GetTempPath()) (
 $state.IntentDirectory = $rollbackJournal
 $state.ExpectedWriteIntents = @(
     [pscustomobject]@{
-        Write = 'remove'; Event = 'intent-rollback-userscript-reclassification-remove'
+        Write = 'remove'; Event = 'intent-rollback-userscript-replacement-remove'
     },
     [pscustomobject]@{
-        Write = 'install'; Event = 'intent-rollback-userscript-reclassification-install'
+        Write = 'install'; Event = 'intent-rollback-userscript-replacement-install'
     },
     [pscustomobject]@{ Write = 'update-gm'; Event = 'intent-rollback-userscript-gm' },
     [pscustomobject]@{ Write = 'set-status'; Event = 'intent-rollback-userscript-status' }
@@ -901,7 +981,9 @@ try {
     $builtUserscript = Get-UserscriptSource -Source (
         (Join-Path $PSScriptRoot '..\hotdeal-focus.user.js'))
     Assert-Contract (Test-ExactStringSequence -Left $builtUserscript.Grants `
-            -Right @('GM_addElement', 'window.onurlchange')) `
+            -Right @(
+                'GM_addElement', 'GM_getValue', 'GM_setValue', 'GM_deleteValue', 'window.onurlchange'
+            )) `
         'actual release Userscript grants are not exact'
     Assert-Contract ($builtUserscript.InstallUrl -ceq $script:ReleaseUserscriptUrl) `
         'actual release Userscript install URL is not exact'
