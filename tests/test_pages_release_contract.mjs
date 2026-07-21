@@ -9,7 +9,7 @@ import {
   compareVersions,
   fetchBytes,
   highWaterDocument,
-  LEGACY_V1_MIGRATION,
+  LEGACY_V1_MIGRATION_PREDECESSORS,
   preflight,
   readBundle,
   releaseHighWaterRecord,
@@ -114,13 +114,22 @@ function writeBundle(root, manifestBytes, source) {
 }
 
 const base = fixture();
-assert.deepEqual(LEGACY_V1_MIGRATION, {
-  releaseVersion: "0.5.5",
-  bytes: 313912,
-  sha256: "87ab45918f70ce536a6c23f0afa2290ce54e19e5ad8f4ef409f59c837338578c",
-  canonicalTextSha256:
-    "933e3ae50531bdcf2b5db52749ebfb633f5e4a196a1c62cdc4ba1d222dd0eb14",
-});
+assert.deepEqual(LEGACY_V1_MIGRATION_PREDECESSORS, [
+  {
+    releaseVersion: "0.3.6",
+    bytes: 161161,
+    sha256: "760c223c16108c421476d2832ab17060c81ca3dc034236986622d07c1532df5a",
+    canonicalTextSha256:
+      "991c1553ba27f7c8a0052f7af146443fd7fef20a983ca268bc756712d558af49",
+  },
+  {
+    releaseVersion: "0.5.5",
+    bytes: 313912,
+    sha256: "87ab45918f70ce536a6c23f0afa2290ce54e19e5ad8f4ef409f59c837338578c",
+    canonicalTextSha256:
+      "933e3ae50531bdcf2b5db52749ebfb633f5e4a196a1c62cdc4ba1d222dd0eb14",
+  },
+]);
 assert.equal(base.proof.sha256, digest(base.source));
 assert.equal(
   verifyHighWaterSource(base.highWaterBytes, base.proof).currentRecord.bundleSha256,

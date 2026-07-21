@@ -44,13 +44,24 @@ const MANIFEST_KEYS = Object.freeze([
   "sourceIntegrity",
   "status",
 ]);
-const LEGACY_V1_MIGRATION = Object.freeze({
-  releaseVersion: "0.5.5",
-  bytes: 313912,
-  sha256: "87ab45918f70ce536a6c23f0afa2290ce54e19e5ad8f4ef409f59c837338578c",
-  canonicalTextSha256:
-    "933e3ae50531bdcf2b5db52749ebfb633f5e4a196a1c62cdc4ba1d222dd0eb14",
-});
+const LEGACY_V1_MIGRATION_PREDECESSORS = Object.freeze([
+  Object.freeze({
+    // The bytes currently served by Pages before this one-time protocol-v2 release.
+    releaseVersion: "0.3.6",
+    bytes: 161161,
+    sha256: "760c223c16108c421476d2832ab17060c81ca3dc034236986622d07c1532df5a",
+    canonicalTextSha256:
+      "991c1553ba27f7c8a0052f7af146443fd7fef20a983ca268bc756712d558af49",
+  }),
+  Object.freeze({
+    // The exact schema-v1 source predecessor recorded on the default branch.
+    releaseVersion: "0.5.5",
+    bytes: 313912,
+    sha256: "87ab45918f70ce536a6c23f0afa2290ce54e19e5ad8f4ef409f59c837338578c",
+    canonicalTextSha256:
+      "933e3ae50531bdcf2b5db52749ebfb633f5e4a196a1c62cdc4ba1d222dd0eb14",
+  }),
+]);
 
 function fail(message) {
   throw new Error(message);
@@ -493,18 +504,21 @@ function verifyHighWaterSource(highWaterBytes, proof, previousHighWaterBytes = n
 function verifyLegacyV1Migration(manifestBytes, userscriptBytes) {
   const manifest = decodeJson(manifestBytes, "published legacy manifest");
   const entry = manifest?.artifacts?.[USERSCRIPT_NAME];
-  if (
-    manifest?.schemaVersion !== 1 ||
-    manifest?.status !== "release-ready" ||
-    manifest?.releaseVersion !== LEGACY_V1_MIGRATION.releaseVersion ||
-    !entry ||
-    entry.bytes !== LEGACY_V1_MIGRATION.bytes ||
-    entry.sha256 !== LEGACY_V1_MIGRATION.sha256 ||
-    entry.canonicalTextSha256 !== LEGACY_V1_MIGRATION.canonicalTextSha256 ||
-    userscriptBytes.length !== LEGACY_V1_MIGRATION.bytes ||
-    sha256(userscriptBytes) !== LEGACY_V1_MIGRATION.sha256 ||
-    sha256(canonicalText(userscriptBytes)) !== LEGACY_V1_MIGRATION.canonicalTextSha256
-  ) fail("published schema-v1 release is not the one exact migration predecessor");
+  const predecessor = LEGACY_V1_MIGRATION_PREDECESSORS.find((candidate) =>
+    manifest?.schemaVersion === 1 &&
+    manifest?.status === "release-ready" &&
+    manifest?.releaseVersion === candidate.releaseVersion &&
+    entry &&
+    entry.bytes === candidate.bytes &&
+    entry.sha256 === candidate.sha256 &&
+    entry.canonicalTextSha256 === candidate.canonicalTextSha256 &&
+    userscriptBytes.length === candidate.bytes &&
+    sha256(userscriptBytes) === candidate.sha256 &&
+    sha256(canonicalText(userscriptBytes)) === candidate.canonicalTextSha256,
+  );
+  if (!predecessor) {
+    fail("published schema-v1 release is not an exact migration predecessor");
+  }
   return {
     manifest,
     artifact: entry,
@@ -779,7 +793,7 @@ export {
   compareVersions,
   fetchBytes,
   highWaterDocument,
-  LEGACY_V1_MIGRATION,
+  LEGACY_V1_MIGRATION_PREDECESSORS,
   parseHighWater,
   preflight,
   publicBundleSha256,
