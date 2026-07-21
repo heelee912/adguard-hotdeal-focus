@@ -16,12 +16,12 @@ PREFIX = "candidate-result-99-"
 RELEASE_REQUIRED_FILES = (
     "config/sites.json",
     "filter-static.txt",
-    "filter.txt",
     "hotdeal-focus.user.js",
     "package-lock.json",
     "package.json",
     "release-manifest.json",
     "state/approved-variants.json",
+    "state/release-high-water.json",
 )
 
 
@@ -133,10 +133,23 @@ class CandidateQueueWorkflowTests(unittest.TestCase):
             for relative in RELEASE_REQUIRED_FILES:
                 destination = result_root / "release" / relative
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_text(
-                    f"release:{fingerprint}:{relative}\n",
-                    encoding="utf-8",
-                )
+                if relative == "release-manifest.json":
+                    self._write_json(
+                        destination,
+                        {
+                            "schemaVersion": 2,
+                            "artifacts": {
+                                "hotdeal-focus.user.js": {
+                                    "sha256": "0" * 64,
+                                }
+                            },
+                        },
+                    )
+                else:
+                    destination.write_text(
+                        f"release:{fingerprint}:{relative}\n",
+                        encoding="utf-8",
+                    )
             queue_document = json.loads((queue / "queue.json").read_text("utf-8"))
             candidate = queue_document["candidates"][index]
             draft_path = queue / candidate["draftFile"]
@@ -212,7 +225,21 @@ class CandidateQueueWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(fingerprints, [item["fingerprint"] for item in document["candidates"]])
             self.assertEqual([0, 1], [item["index"] for item in document["candidates"]])
-            self.assertEqual(queue_sha, manifest["signedQueueSha256"])
+            self.assertEqual(2, document["schemaVersion"])
+            self.assertEqual(2, manifest["schemaVersion"])
+            self.assertEqual(queue_sha, manifest["sealedQueueSha256"])
+            self.assertEqual("queue.json", manifest["sealedQueueFile"])
+            self.assertEqual(
+                {
+                    "kind": "digest-bound",
+                    "algorithm": "sha256",
+                    "payloadSha256": manifest["seal"]["payloadSha256"],
+                },
+                manifest["seal"],
+            )
+            self.assertNotIn("signature", manifest)
+            self.assertNotIn("signedQueueFile", manifest)
+            self.assertNotIn("signedQueueSha256", manifest)
             self.assertEqual(BASE_SHA, manifest["baseSha"])
             self.assertEqual(
                 fingerprints,
@@ -256,9 +283,9 @@ class CandidateQueueWorkflowTests(unittest.TestCase):
             manifest_path = queue / "queue-manifest.json"
             original_manifest = manifest_path.read_bytes()
             tampered_manifest = json.loads(original_manifest.decode("utf-8"))
-            tampered_manifest["signature"]["payloadSha256"] = "0" * 64
+            tampered_manifest["seal"]["payloadSha256"] = "0" * 64
             self._write_json(manifest_path, tampered_manifest)
-            signature_rejected = self._run(
+            seal_rejected = self._run(
                 "prepare-candidate",
                 "--queue-root",
                 queue,
@@ -271,11 +298,40 @@ class CandidateQueueWorkflowTests(unittest.TestCase):
                 "--expected-index",
                 0,
                 "--output-dir",
-                root / "work-tampered-signature",
+                root / "work-tampered-seal",
                 check=False,
             )
-            self.assertNotEqual(0, signature_rejected.returncode)
-            self.assertIn("signature manifest mismatch", signature_rejected.stderr)
+            self.assertNotEqual(0, seal_rejected.returncode)
+            self.assertIn("digest-bound seal mismatch", seal_rejected.stderr)
+            manifest_path.write_bytes(original_manifest)
+
+            legacy_manifest = json.loads(original_manifest.decode("utf-8"))
+            legacy_manifest["signature"] = legacy_manifest.pop("seal")
+            legacy_manifest["signedQueueFile"] = legacy_manifest.pop(
+                "sealedQueueFile"
+            )
+            legacy_manifest["signedQueueSha256"] = legacy_manifest.pop(
+                "sealedQueueSha256"
+            )
+            self._write_json(manifest_path, legacy_manifest)
+            legacy_rejected = self._run(
+                "prepare-candidate",
+                "--queue-root",
+                queue,
+                "--expected-base-sha",
+                BASE_SHA,
+                "--expected-queue-sha256",
+                queue_sha,
+                "--fingerprint",
+                fingerprints[0],
+                "--expected-index",
+                0,
+                "--output-dir",
+                root / "work-legacy-manifest",
+                check=False,
+            )
+            self.assertNotEqual(0, legacy_rejected.returncode)
+            self.assertIn("manifest keys are not exact", legacy_rejected.stderr)
             manifest_path.write_bytes(original_manifest)
 
             (queue / "drafts" / f"{fingerprints[0]}.json").write_text(
@@ -514,6 +570,22 @@ class CandidateQueueWorkflowTests(unittest.TestCase):
                     if expected_index is None:
                         self.assertFalse((root / "promotion").exists())
                     else:
+                        selected_result_root = (
+                            root
+                            / "results"
+                            / f"{PREFIX}{expected_fingerprint}"
+                        )
+                        result_manifest = json.loads(
+                            (selected_result_root / "result-manifest.json").read_text(
+                                "utf-8"
+                            )
+                        )
+                        self.assertEqual(2, result_manifest["schemaVersion"])
+                        self.assertEqual("digest-bound", result_manifest["seal"]["kind"])
+                        self.assertNotIn("signature", result_manifest)
+                        self.assertFalse(
+                            (selected_result_root / "release" / "filter.txt").exists()
+                        )
                         selection = json.loads(
                             (
                                 root
@@ -526,6 +598,21 @@ class CandidateQueueWorkflowTests(unittest.TestCase):
                         self.assertEqual(
                             expected_fingerprint,
                             selection["selectedFingerprint"],
+                        )
+                        promotion_manifest = json.loads(
+                            (
+                                root
+                                / "promotion"
+                                / "promotion-manifest.json"
+                            ).read_text("utf-8")
+                        )
+                        self.assertEqual(2, promotion_manifest["schemaVersion"])
+                        self.assertEqual(
+                            "digest-bound", promotion_manifest["seal"]["kind"]
+                        )
+                        self.assertNotIn("signature", promotion_manifest)
+                        self.assertFalse(
+                            (root / "promotion" / "release" / "filter.txt").exists()
                         )
                         self._run(
                             "verify-promotion",

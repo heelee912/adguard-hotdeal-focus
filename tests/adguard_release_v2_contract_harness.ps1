@@ -21,13 +21,11 @@ foreach ($statement in $ast.EndBlock.Statements) {
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
 $script:MaximumSourceBytes = 8MB
 $script:ReaderGateProtocolVersion = 2
-$script:ReaderGateGrant = 'GM_addElement'
+$script:ReaderGateGrants = @('GM_addElement', 'window.onurlchange')
+$script:ReleaseUserscriptUrl = ('https://heelee912.github.io/' +
+    'adguard-hotdeal-focus/hotdeal-focus.user.js')
 $script:FreshInstallGmProperties = '{}'
-$script:MarkerGateArtifactVersion = '2.0.2'
-$script:MarkerGateSubscriptionUrl = ('https://github.com/heelee912/' +
-    'adguard-hotdeal-focus/releases/download/gate-v2.0.2/filter.txt')
 $UserscriptName = 'AdGuard Hotdeal Focus Reader Gate'
-$FilterName = 'AdGuard Hotdeal Focus Marker Gate'
 $ExpectedUserscriptSha256 = $null
 $ExpectedFilterSha256 = $null
 $ExpectedInstalledFilterRulesSha256 = $null
@@ -70,6 +68,9 @@ try {
 // @match        https://*.arca.live/*
 // @run-at       document-start
 // @grant        GM_addElement
+// @grant        window.onurlchange
+// @downloadURL  https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
+// @updateURL    https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 // @noframes
 // ==/UserScript==
 const PROTOCOL_VERSION = "2";
@@ -98,21 +99,35 @@ GM_addElement(document.documentElement, "style", {
         $validUserscriptPath, $validUserscriptText, $script:Utf8NoBom)
     $userscript = Get-UserscriptSource -Source $validUserscriptPath
     Assert-Contract ($userscript.ProtocolVersion -eq 2) 'Reader protocol was not parsed as 2'
-    Assert-Contract ($userscript.Grant -ceq 'GM_addElement') 'Reader grant was not exact'
+    Assert-Contract (Test-ExactStringSequence -Left $userscript.Grants `
+            -Right @('GM_addElement', 'window.onurlchange')) 'Reader grants were not exact'
+    Assert-Contract ($userscript.InstallUrl -ceq $script:ReleaseUserscriptUrl) `
+        'Reader install URL was not exact'
 
     foreach ($invalidCase in @(
             [pscustomobject]@{
                 Name = 'grant-none'
                 Text = $validUserscriptText.Replace(
                     '// @grant        GM_addElement', '// @grant        none')
-                Pattern = '*exactly one @grant GM_addElement*'
+                Pattern = '*exact ordered grants*'
             },
             [pscustomobject]@{
-                Name = 'extra-grant'
+                Name = 'grant-order'
                 Text = $validUserscriptText.Replace(
                     '// @grant        GM_addElement',
-                    "// @grant        GM_addElement`n// @grant        none")
-                Pattern = '*exactly one @grant GM_addElement*'
+                    '// @grant        __FIRST__').Replace(
+                    '// @grant        window.onurlchange',
+                    '// @grant        GM_addElement').Replace(
+                    '// @grant        __FIRST__',
+                    '// @grant        window.onurlchange')
+                Pattern = '*exact ordered grants*'
+            },
+            [pscustomobject]@{
+                Name = 'mutable-update-url'
+                Text = $validUserscriptText.Replace(
+                    '// @updateURL    https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js',
+                    '// @updateURL    https://example.com/mutable.user.js')
+                Pattern = '*exact release Userscript URL*'
             },
             [pscustomobject]@{
                 Name = 'protocol-v1'
@@ -120,13 +135,6 @@ GM_addElement(document.documentElement, "style", {
                     'const PROTOCOL_VERSION = "2";',
                     'const PROTOCOL_VERSION = "1";')
                 Pattern = '*exact protocol version 2*'
-            },
-            [pscustomobject]@{
-                Name = 'diagnostics-v1'
-                Text = $validUserscriptText.Replace(
-                    'protocolVersion: Number(PROTOCOL_VERSION)',
-                    'protocolVersion: 1')
-                Pattern = '*diagnostics/runtime contract*'
             }
         )) {
         $path = Join-Path $temporary ($invalidCase.Name + '.user.js')
@@ -135,74 +143,64 @@ GM_addElement(document.documentElement, "style", {
             -Pattern $invalidCase.Pattern
     }
 
-    $filterText = @'
-! Title: AdGuard Hotdeal Focus Marker Gate
-! Version: 2.0.2
-! Hotdeal-Focus-Protocol: 2
-example.com##html.hdf-v2-lock:not(.hdf-v2-ready[data-hotdeal-focus-ready="1"][data-hotdeal-focus-protocol="2"][data-hotdeal-focus-state="ready"][data-hotdeal-focus-status="ready"]) .hdf-v2-keep
-example.com##[data-hotdeal-focus-keep][data-hotdeal-focus-shell][data-hotdeal-focus-deep][data-hotdeal-focus-role="body"].hdf-v2-shell.hdf-v2-deep.hdf-v2-role-body
-'@
-    $filterBytes = $script:Utf8NoBom.GetBytes($filterText)
-    $filter = ConvertFrom-FilterSourceBytes -Bytes $filterBytes `
-        -Url $script:MarkerGateSubscriptionUrl
-    Assert-Contract ($filter.ProtocolVersion -eq 2) 'Filter protocol was not parsed as 2'
-
     $manifestPath = Join-Path $temporary 'release-manifest.json'
     $manifest = [ordered]@{
-        schemaVersion = 1
+        schemaVersion = 2
         status = 'release-ready'
         releaseVersion = $userscript.Version
         protocolVersion = 2
-        gateArtifactVersion = '2.0.2'
-        filterSubscriptionUrl = $script:MarkerGateSubscriptionUrl
+        installUrl = $script:ReleaseUserscriptUrl
+        generatorVersion = $userscript.Version
+        rollback_of = $null
+        configSha256 = ('a' * 64)
+        coverage = [ordered]@{}
+        promotion = $null
         artifacts = [ordered]@{
-            'filter.txt' = [ordered]@{
-                version = '2.0.2'
-                sha256 = $filter.RawSha256
-                installedRulesSha256 = $filter.SourceRulesSha256
-            }
             'hotdeal-focus.user.js' = [ordered]@{
                 version = $userscript.Version
+                bytes = [long] $userscript.Bytes.Length
                 sha256 = $userscript.RawSha256
                 canonicalTextSha256 = $userscript.Sha256
             }
         }
+        sourceIntegrity = [ordered]@{}
     }
     [System.IO.File]::WriteAllText(
         $manifestPath, ($manifest | ConvertTo-Json -Depth 8), $script:Utf8NoBom)
     $manifestContract = Get-ReleaseManifestContract -Source $manifestPath
     $ExpectedUserscriptSha256 = $userscript.Sha256
-    $ExpectedFilterSha256 = $filter.RawSha256
-    $ExpectedInstalledFilterRulesSha256 = $filter.SourceRulesSha256
     Assert-ReleaseInputsMatchManifest -ManifestContract $manifestContract `
-        -DesiredUserscript $userscript -DesiredFilter $filter
+        -DesiredUserscript $userscript -DesiredFilter $null
 
-    $manifest.protocolVersion = 1
+    $manifest.installUrl = 'https://example.com/mutable.user.js'
     [System.IO.File]::WriteAllText(
         $manifestPath, ($manifest | ConvertTo-Json -Depth 8), $script:Utf8NoBom)
     Assert-ThrowsLike -Action {
         [void] (Get-ReleaseManifestContract -Source $manifestPath)
-    } -Pattern '*exact protocol-2 gate contract*'
-    $manifest.protocolVersion = 2
+    } -Pattern '*standalone protocol-2 contract*'
+    $manifest.installUrl = $script:ReleaseUserscriptUrl
+
+    $manifest.artifacts['filter.txt'] = [ordered]@{ sha256 = ('b' * 64) }
+    [System.IO.File]::WriteAllText(
+        $manifestPath, ($manifest | ConvertTo-Json -Depth 8), $script:Utf8NoBom)
+    Assert-ThrowsLike -Action {
+        [void] (Get-ReleaseManifestContract -Source $manifestPath)
+    } -Pattern '*property set is not exact*'
+    $manifest.artifacts.Remove('filter.txt')
 
     $userscript.ProtocolVersion = 1
     Assert-ThrowsLike -Action {
         Assert-ReleaseInputsMatchManifest -ManifestContract $manifestContract `
-            -DesiredUserscript $userscript -DesiredFilter $filter
+            -DesiredUserscript $userscript -DesiredFilter $null
     } -Pattern '*Userscript source*'
-    $userscript.ProtocolVersion = 2
-    $filter.ProtocolVersion = 1
-    Assert-ThrowsLike -Action {
-        Assert-ReleaseInputsMatchManifest -ManifestContract $manifestContract `
-            -DesiredUserscript $userscript -DesiredFilter $filter
-    } -Pattern '*Filter source*'
 
     [pscustomobject]@{
         ok = $true
         protocol = 2
-        grant = $userscript.Grant
+        grants = @($script:ReaderGateGrants)
+        public_artifacts = @('hotdeal-focus.user.js')
         cross_version_rejected = $true
-    } | ConvertTo-Json
+    } | ConvertTo-Json -Depth 4
 }
 finally {
     if (Test-Path -LiteralPath $temporary -PathType Container) {

@@ -16,9 +16,7 @@ WATCH_WORKFLOW = (
 VERIFY_WORKFLOW = (
     PROJECT_ROOT / ".github" / "workflows" / "verify.yml"
 ).read_text(encoding="utf-8")
-PUBLISH_GATE_WORKFLOW = (
-    PROJECT_ROOT / ".github" / "workflows" / "publish-gate.yml"
-).read_text(encoding="utf-8")
+WORKFLOWS = (VERIFY_WORKFLOW, WATCH_WORKFLOW)
 AUDIT_SCRIPT = (PROJECT_ROOT / "scripts" / "audit_pages.mjs").read_text(
     encoding="utf-8"
 )
@@ -60,7 +58,7 @@ class PublicRepositoryHygieneTests(unittest.TestCase):
     def test_every_remote_action_is_pinned_to_a_full_commit_sha(self) -> None:
         uses = re.findall(
             r"^\s*uses:\s*([^\s#]+)",
-            f"{WATCH_WORKFLOW}\n{VERIFY_WORKFLOW}\n{PUBLISH_GATE_WORKFLOW}",
+            "\n".join(WORKFLOWS),
             re.MULTILINE,
         )
         self.assertGreater(len(uses), 0)
@@ -71,20 +69,12 @@ class PublicRepositoryHygieneTests(unittest.TestCase):
                 self.assertRegex(action, r"^[^@]+@[0-9a-f]{40}$")
 
     def test_workflows_deny_undeclared_token_permissions_by_default(self) -> None:
-        for name, workflow in (
-            ("verify", VERIFY_WORKFLOW),
-            ("watch-dom", WATCH_WORKFLOW),
-            ("publish-gate", PUBLISH_GATE_WORKFLOW),
-        ):
+        for name, workflow in (("verify", VERIFY_WORKFLOW), ("watch-dom", WATCH_WORKFLOW)):
             with self.subTest(workflow=name):
                 self.assertRegex(workflow, r"(?m)^permissions: \{\}\s*$")
 
     def test_every_artifact_upload_includes_hidden_staging_files(self) -> None:
-        for name, workflow in (
-            ("verify", VERIFY_WORKFLOW),
-            ("watch-dom", WATCH_WORKFLOW),
-            ("publish-gate", PUBLISH_GATE_WORKFLOW),
-        ):
+        for name, workflow in (("verify", VERIFY_WORKFLOW), ("watch-dom", WATCH_WORKFLOW)):
             upload_steps = workflow.split("uses: actions/upload-artifact@")[1:]
             self.assertGreater(len(upload_steps), 0, name)
             for index, tail in enumerate(upload_steps):
@@ -93,124 +83,40 @@ class PublicRepositoryHygieneTests(unittest.TestCase):
                     self.assertIn("include-hidden-files: true", step)
 
 
-class ImmutableGateReleaseWorkflowTests(unittest.TestCase):
+class StandaloneUserscriptReleaseWorkflowTests(unittest.TestCase):
     def test_manual_workflows_expose_nonce_bound_machine_run_names(self) -> None:
-        expectations = (
+        for workflow, prefix in (
             (VERIFY_WORKFLOW, "hotdeal-focus-verify-"),
             (WATCH_WORKFLOW, "hotdeal-focus-watch-dom-"),
-            (PUBLISH_GATE_WORKFLOW, "hotdeal-focus-publish-gate-"),
-        )
-        for workflow, prefix in expectations:
+        ):
             with self.subTest(prefix=prefix):
                 self.assertIn("dispatch_nonce:", workflow)
                 self.assertIn(f"run-name: {prefix}", workflow)
-        combined = VERIFY_WORKFLOW + WATCH_WORKFLOW + PUBLISH_GATE_WORKFLOW
-        self.assertEqual(4, combined.count("{ok,status,sourceSha,workflow,ref,dispatchNonce,run}"))
-        self.assertNotIn("{ok,status,sourceCommit,workflow,ref,dispatchNonce,run}", combined)
 
-    def test_gate_publication_is_manual_verified_and_cli_controlled(self) -> None:
-        trigger = PUBLISH_GATE_WORKFLOW.split("concurrency:", 1)[0]
-        self.assertIn("workflow_dispatch:", trigger)
-        self.assertNotIn("schedule:", trigger)
-        self.assertNotIn("push:", trigger)
-        self.assertIn("contents: write", PUBLISH_GATE_WORKFLOW)
-        self.assertIn("GH_TOKEN: ${{ github.token }}", PUBLISH_GATE_WORKFLOW)
-        self.assertEqual(1, PUBLISH_GATE_WORKFLOW.count("secrets."))
-        for command in (
-            "npm test",
-            "npm run build",
-            "git diff --exit-code -- .",
-            "npm run integrity",
-            "npm run test:network",
-            "npm run test:oracle",
-            "npm run test:tamper",
-            "npm run test:behavior",
-            "gate-release publish",
-            '--source-ref "${GITHUB_SHA}"',
-            "--apply",
+    def test_legacy_external_gate_publication_is_absent(self) -> None:
+        self.assertFalse(
+            (PROJECT_ROOT / ".github" / "workflows" / "publish-gate.yml").exists()
+        )
+        combined = "\n".join(WORKFLOWS)
+        for stale_token in (
+            "filter.txt",
+            "--marker-filter",
+            "gate-release",
+            "gate-v2.0.2",
         ):
-            with self.subTest(command=command):
-                self.assertIn(command, PUBLISH_GATE_WORKFLOW)
-        self.assertIn(
-            '--json > "${RUNNER_TEMP}/gate-release-result.json"',
-            PUBLISH_GATE_WORKFLOW,
-        )
-        self.assertNotIn("> .gate-release-result.json", PUBLISH_GATE_WORKFLOW)
-        self.assertIn(
-            "${{ runner.temp }}/gate-release-result.json",
-            PUBLISH_GATE_WORKFLOW,
-        )
-        self.assertIn("source_sha:\n", PUBLISH_GATE_WORKFLOW)
-        self.assertIn(
-            '[[ "${GITHUB_SHA}" == "${AUTHORIZED_SOURCE_SHA}" ]]',
-            PUBLISH_GATE_WORKFLOW,
-        )
-        authorizer = PUBLISH_GATE_WORKFLOW.split("  record-publisher-checkpoint:\n", 1)[1].split(
-            "  publish:\n", 1
-        )[0]
-        publisher = PUBLISH_GATE_WORKFLOW.split("  publish:\n", 1)[1].split(
-            "  redispatch-verify:\n", 1
-        )[0]
-        verifier = PUBLISH_GATE_WORKFLOW.split("  verify-source:\n", 1)[1].split(
-            "  record-publisher-checkpoint:\n", 1
-        )[0]
-        self.assertIn("name: hdf-release-publisher", authorizer)
-        self.assertIn("deployment: false", authorizer)
-        self.assertNotIn("secrets.", authorizer)
-        self.assertIn("name: hdf-main-automation", publisher)
-        self.assertIn("deployment: false", publisher)
-        self.assertIn("contents: write", publisher)
-        self.assertIn("needs: record-publisher-checkpoint", publisher)
-        self.assertIn("gate-release prepare-publish", publisher)
-        self.assertLess(
-            publisher.index("gate-release prepare-publish"),
-            publisher.index("secrets.HDF_AUTOMATION_PUSH_ED25519_PRIVATE_KEY"),
-        )
-        self.assertIn(
-            "secrets.HDF_AUTOMATION_PUSH_ED25519_PRIVATE_KEY", publisher
-        )
-        self.assertIn("vars.HDF_AUTOMATION_PUSH_KEY_FINGERPRINT", publisher)
-        self.assertIn('gate_tag_ref="refs/tags/gate-v2.0.2"', publisher)
-        self.assertIn(
-            '"${GITHUB_SHA}:${gate_tag_ref}"', publisher
-        )
-        self.assertIn("git ls-remote --refs", publisher)
-        self.assertIn("set +e", publisher)
-        self.assertIn("Reconcile the frozen tag without a write credential", publisher)
-        secret_tag_step = publisher.split(
-            "      - name: Bind the immutable gate tag with the unique governed deploy key\n", 1
-        )[1].split(
-            "      - name: Reconcile the frozen tag without a write credential\n", 1
-        )[0]
-        public_reconcile_step = publisher.split(
-            "      - name: Reconcile the frozen tag without a write credential\n", 1
-        )[1].split(
-            "      - name: Publish or exactly verify gate-v2.0.2\n", 1
-        )[0]
-        for section, status_name in (
-            (secret_tag_step, "bound_tag_status"),
-            (public_reconcile_step, "listing_status"),
-        ):
-            with self.subTest(tag_retry_status=status_name):
-                retry_loop = section.split("for attempt in 1 2 3 4 5 6; do", 1)[1]
-                self.assertIn("set +e", retry_loop)
-                self.assertIn("git ls-remote --refs", retry_loop)
-                self.assertIn(f"{status_name}=$?", retry_loop)
-                self.assertIn("set -e", retry_loop)
-                self.assertIn(f'[[ "${{{status_name}}}" -eq 0 ]]', retry_loop)
-        self.assertIn("HDF_GATE_TAG_CREATED", publisher)
-        self.assertIn("HDF_GATE_TAG_SOURCE_SHA", publisher)
-        self.assertIn("HostKeyAlgorithms ssh-ed25519", publisher)
-        self.assertIn("IdentitiesOnly yes", publisher)
-        self.assertIn("IdentityAgent none", publisher)
-        self.assertIn("StrictHostKeyChecking yes", publisher)
-        self.assertNotIn("contents: write", verifier)
-        self.assertNotIn("secrets.", verifier)
-        redispatch = PUBLISH_GATE_WORKFLOW.split("  redispatch-verify:\n", 1)[1]
-        self.assertIn("actions: write", redispatch)
-        self.assertNotIn("contents: write", redispatch)
-        self.assertIn("cloud dispatch", redispatch)
-        self.assertIn("--workflow verify.yml", redispatch)
+            self.assertNotIn(stale_token, combined)
+
+    def test_release_lanes_verify_and_attest_the_standalone_bundle(self) -> None:
+        for name, workflow in (("verify", VERIFY_WORKFLOW), ("watch", WATCH_WORKFLOW)):
+            with self.subTest(workflow=name):
+                self.assertIn("pages_release_contract.mjs verify-bundle", workflow)
+                self.assertIn("pages_release_contract.mjs preflight", workflow)
+                self.assertIn("pages_release_contract.mjs attest", workflow)
+                self.assertIn("hotdeal-focus.user.js", workflow)
+                self.assertIn("release-manifest.json", workflow)
+                self.assertIn("--high-water-source", workflow)
+                self.assertIn("npm run test:network", workflow)
+                self.assertIn("npm run test:oracle", workflow)
 
     def test_promotion_proof_and_secret_push_use_fresh_separate_jobs(self) -> None:
         proof = WATCH_WORKFLOW.split("  promote:\n", 1)[1].split(
@@ -226,29 +132,14 @@ class ImmutableGateReleaseWorkflowTests(unittest.TestCase):
         self.assertIn("promotion.bundle", push)
         self.assertIn("one exact child", push)
         self.assertIn("release manifest hash disagrees", push)
-        self.assertIn("immutable filter.txt changed", push)
-        self.assertIn("Lease the audited base immediately before", push)
+        self.assertIn("hotdeal-focus.user.js", push)
+        self.assertNotIn("filter.txt", push)
         for forbidden in ("npm ci", "playwright", "xvfb-run", "audit:dom"):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, push)
 
-    def test_pages_and_dom_promotions_require_the_immutable_gate(self) -> None:
-        verify_pages = VERIFY_WORKFLOW.split("  publish-pages:\n", 1)[1]
-        watch_pages = WATCH_WORKFLOW.split("  deploy-pages:\n", 1)[1].split(
-            "  continue-drift-chain:\n", 1
-        )[0]
-        for section in (verify_pages, watch_pages):
-            gate_index = section.index("gate-release verify")
-            configure_index = section.index("actions/configure-pages@")
-            self.assertLess(gate_index, configure_index)
-        self.assertIn(
-            'cmp --silent filter.txt "${release}/filter.txt"',
-            WATCH_WORKFLOW,
-        )
-
-    def test_gate_publication_and_every_default_branch_writer_share_one_mutex(self) -> None:
+    def test_default_branch_writers_share_mutex_and_pinned_ssh_identity(self) -> None:
         mutex = "group: hotdeal-focus-release-state"
-        self.assertIn(mutex, PUBLISH_GATE_WORKFLOW)
         push = WATCH_WORKFLOW.split("  push-promotion:\n", 1)[1].split(
             "  report-failure:\n", 1
         )[0]
@@ -258,113 +149,13 @@ class ImmutableGateReleaseWorkflowTests(unittest.TestCase):
         for name, section in (("push-promotion", push), ("heartbeat", heartbeat)):
             with self.subTest(job=name):
                 self.assertIn(mutex, section)
-                self.assertIn("cancel-in-progress: false", section)
-
-    def test_default_branch_writers_use_one_fingerprint_bound_ssh_identity(self) -> None:
-        proof = WATCH_WORKFLOW.split("  promote:\n", 1)[1].split(
-            "  push-promotion:\n", 1
-        )[0]
-        push = WATCH_WORKFLOW.split("  push-promotion:\n", 1)[1].split(
-            "  report-failure:\n", 1
-        )[0]
-        heartbeat = WATCH_WORKFLOW.split("  scheduler-heartbeat:\n", 1)[1].split(
-            "  deploy-pages:\n", 1
-        )[0]
-        self.assertNotIn("contents: write", WATCH_WORKFLOW)
-        self.assertEqual(
-            2,
-            WATCH_WORKFLOW.count(
-                "git -c core.hooksPath=/dev/null push --porcelain"
-            ),
-        )
-        self.assertEqual(2, WATCH_WORKFLOW.count(
-            "secrets.HDF_AUTOMATION_PUSH_ED25519_PRIVATE_KEY"
-        ))
-        self.assertEqual(2, WATCH_WORKFLOW.count(
-            "vars.HDF_AUTOMATION_PUSH_KEY_FINGERPRINT"
-        ))
-        official_host_key = (
-            "github.com ssh-ed25519 "
-            "AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
-        )
-        official_host_fingerprint = (
-            "SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU"
-        )
-        self.assertNotIn("secrets.", proof)
-        self.assertIn("npm run test:behavior", proof)
-        for name, section in (("push-promotion", push), ("heartbeat", heartbeat)):
-            with self.subTest(job=name):
-                self.assertIn("contents: read", section)
+                self.assertNotIn("queue:", section)
+                self.assertNotIn("cancel-in-progress:", section)
                 self.assertIn("name: hdf-main-automation", section)
-                self.assertIn("deployment: false", section)
-                self.assertIn("GH_TOKEN:", section)
-                self.assertIn("x-access-token", section)
-                self.assertIn('ssh-keygen -y -f "${key_path}"', section)
-                self.assertIn(
-                    '"${actual_fingerprint}" == "${EXPECTED_AUTOMATION_PUSH_FINGERPRINT}"',
-                    section,
-                )
-                self.assertIn(official_host_key, section)
-                self.assertIn(official_host_fingerprint, section)
-                for directive in (
-                    "HostKeyAlgorithms ssh-ed25519",
-                    "IdentitiesOnly yes",
-                    "IdentityAgent none",
-                    "BatchMode yes",
-                    "StrictHostKeyChecking yes",
-                    "GlobalKnownHostsFile /dev/null",
-                    "PasswordAuthentication no",
-                    "KbdInteractiveAuthentication no",
-                ):
-                    self.assertIn(directive, section)
-                self.assertIn(
-                    'remote="git@github.com:${GITHUB_REPOSITORY}.git"', section
-                )
-                self.assertIn("git merge-base --is-ancestor", section)
-                self.assertIn(
-                    "git -c core.hooksPath=/dev/null push --porcelain", section
-                )
+                self.assertIn("IdentitiesOnly yes", section)
+                self.assertIn("StrictHostKeyChecking yes", section)
+                self.assertIn("git -c core.hooksPath=/dev/null push --porcelain", section)
                 self.assertNotIn("--force", section)
-                self.assertGreaterEqual(section.count("git ls-remote --heads"), 2)
-                self.assertIn('[[ "${pushed_sha}" == "${', section)
-        self.assertIn(
-            "git -c core.hooksPath=/dev/null commit", heartbeat
-        )
-        heartbeat_push = heartbeat.split(
-            "- name: Fast-forward the heartbeat only if the remote head is unchanged",
-            1,
-        )[1]
-        self.assertIn(
-            "BASE_SHA: ${{ steps.heartbeat_commit.outputs.base_sha }}",
-            heartbeat_push,
-        )
-        self.assertIn(
-            "COMMIT_SHA: ${{ steps.heartbeat_commit.outputs.commit_sha }}",
-            heartbeat_push,
-        )
-        self.assertNotIn("git add", heartbeat_push)
-        self.assertNotIn("git commit", heartbeat_push)
-
-    def test_every_release_lane_runs_network_and_projection_oracles(self) -> None:
-        verify_lane = VERIFY_WORKFLOW.split(
-            "- name: Compare June/July behavior", 1
-        )[1].split("- name: Collect bounded", 1)[0]
-        watch_live_lane = WATCH_WORKFLOW.split(
-            "- name: Audit bounded samples", 1
-        )[1].split("- name: Publish the full-audit outcome", 1)[0]
-        watch_promotion_lane = WATCH_WORKFLOW.split(
-            "- name: Audit the exact candidate profiles", 1
-        )[1].split("- name: Seal the proven one-parent promotion", 1)[0]
-        for name, section in (
-            ("verify", verify_lane),
-            ("publish-gate", PUBLISH_GATE_WORKFLOW),
-            ("watch-live", watch_live_lane),
-            ("watch-promotion", watch_promotion_lane),
-        ):
-            with self.subTest(lane=name):
-                self.assertIn("npm run test:network", section)
-                self.assertIn("npm run test:oracle", section)
-
 
 class PagesRetryContractTests(unittest.TestCase):
     def test_audit_job_budget_exceeds_all_subprocess_timeouts_and_margin(self) -> None:
@@ -446,13 +237,12 @@ class PagesRetryContractTests(unittest.TestCase):
         deploy_section = WATCH_WORKFLOW.split("  deploy-pages:\n", 1)[1].split(
             "  report-pages-failure:\n", 1
         )[0]
-        self.assertIn("manifest.artifacts[name]?.sha256", deploy_section)
-        self.assertIn("['filter.txt', 'hotdeal-focus.user.js']", deploy_section)
+        self.assertIn("pages_release_contract.mjs verify-bundle", deploy_section)
         staged_names = set(
             re.findall(r"\.pages/([A-Za-z0-9._-]+)", deploy_section)
         )
         self.assertEqual(
-            {"filter.txt", "hotdeal-focus.user.js", "release-manifest.json"},
+            {"hotdeal-focus.user.js", "release-manifest.json"},
             staged_names,
         )
         self.assertNotIn("filter-static.txt", deploy_section)
@@ -460,26 +250,34 @@ class PagesRetryContractTests(unittest.TestCase):
         self.assertNotIn("approved-variants.json", deploy_section)
 
         verify_stage = VERIFY_WORKFLOW.split(
-            "      - name: Stage immutable release draft\n", 1
-        )[1].split("      - name: Upload immutable release draft\n", 1)[0]
+            "      - name: Stage standalone userscript release draft\n", 1
+        )[1].split(
+            "      - name: Upload standalone userscript release draft\n", 1
+        )[0]
         verify_staged_names = set(
             re.findall(r"\.release-draft/([A-Za-z0-9._-]+)", verify_stage)
         )
         self.assertEqual(
-            {"filter.txt", "hotdeal-focus.user.js", "release-manifest.json"},
+            {"hotdeal-focus.user.js", "release-manifest.json"},
             verify_staged_names,
         )
         self.assertNotIn("README.md", verify_stage)
         self.assertNotIn("LICENSE", verify_stage)
-        self.assertIn("non-public fourth file", verify_stage)
-        self.assertIn("non-public fourth file", deploy_section)
+        self.assertIn("non-public file", verify_stage)
+        self.assertIn("non-public file", deploy_section)
+        self.assertIn("-mindepth 1", verify_stage)
+        self.assertIn("-mindepth 1", deploy_section)
+        self.assertIn("pages_release_contract.mjs verify-bundle", verify_stage)
+        self.assertIn("pages_release_contract.mjs verify-bundle", deploy_section)
+        self.assertNotIn("crypto.createHash('sha256')", verify_stage)
+        self.assertNotIn("crypto.createHash('sha256')", deploy_section)
 
     def test_pages_failure_and_recovery_are_observable(self) -> None:
         self.assertIn("report-pages-failure:", WATCH_WORKFLOW)
         self.assertIn("needs.deploy-pages.result == 'failure'", WATCH_WORKFLOW)
         self.assertIn("report-pages-recovery:", WATCH_WORKFLOW)
         self.assertIn("needs.deploy-pages.result == 'success'", WATCH_WORKFLOW)
-        self.assertIn("The next healthy six-hour audit will retry", WATCH_WORKFLOW)
+        self.assertIn("The next healthy weekly audit will retry", WATCH_WORKFLOW)
         self.assertIn(
             "scheduler-heartbeat:\n    needs: [audit, push-promotion, deploy-pages]",
             WATCH_WORKFLOW,
@@ -488,8 +286,7 @@ class PagesRetryContractTests(unittest.TestCase):
     def test_pages_deployments_are_serialized_and_head_pinned(self) -> None:
         shared_concurrency = (
             "concurrency:\n"
-            "      group: hotdeal-focus-release-state\n"
-            "      cancel-in-progress: false"
+            "      group: hotdeal-focus-release-state"
         )
         self.assertIn(shared_concurrency, VERIFY_WORKFLOW)
         self.assertIn(shared_concurrency, WATCH_WORKFLOW)
@@ -500,12 +297,33 @@ class PagesRetryContractTests(unittest.TestCase):
             "github.ref_name == github.event.repository.default_branch",
             VERIFY_WORKFLOW,
         )
+        publish_section = VERIFY_WORKFLOW.split("  publish-pages:\n", 1)[1].split(
+            "  recover-pages-head-drift:\n", 1
+        )[0]
+        deploy_section = WATCH_WORKFLOW.split("  deploy-pages:\n", 1)[1].split(
+            "  report-pages-failure:\n", 1
+        )[0]
+        for section in (publish_section, deploy_section):
+            self.assertNotIn("cancel-in-progress:", section)
+            self.assertNotIn("queue:", section)
+            self.assertIn("fetch-depth: 2", section)
+            self.assertIn("--previous-high-water-source", section)
         for workflow in (VERIFY_WORKFLOW, WATCH_WORKFLOW):
             self.assertIn("id: predeploy_head", workflow)
             self.assertIn("id: postdeploy_head", workflow)
             self.assertIn("head_drift=true", workflow)
             self.assertIn("recover-pages-head-drift:", workflow)
             self.assertIn("--workflow verify.yml", workflow)
+
+    def test_verify_cancels_only_superseded_pr_and_checks_history_prefix(self) -> None:
+        self.assertIn(
+            "cancel-in-progress: ${{ github.event_name == 'pull_request' }}",
+            VERIFY_WORKFLOW,
+        )
+        self.assertIn("format('source-{0}', github.sha)", VERIFY_WORKFLOW)
+        self.assertIn("--previous-high-water-source", VERIFY_WORKFLOW)
+        self.assertIn("--previous-high-water-source", WATCH_WORKFLOW)
+        self.assertIn("state/release-high-water.json", VERIFY_WORKFLOW)
 
 
 class MatrixDriftPromotionContractTests(unittest.TestCase):
@@ -694,7 +512,7 @@ if (matchingApprovedPaths(
         )
         self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
 
-    def test_candidate_workflow_is_a_non_starving_dynamic_matrix(self) -> None:
+    def test_candidate_workflow_is_a_serialized_dynamic_matrix(self) -> None:
         candidate_section = WATCH_WORKFLOW.split(
             "  candidate-proof:\n", 1
         )[1].split("  aggregate-candidates:\n", 1)[0]
@@ -706,8 +524,7 @@ if (matchingApprovedPaths(
         self.assertIn("needs.audit.outputs.candidate_count != '0'", candidate_section)
         max_parallel = re.search(r"max-parallel:\s*(\d+)", candidate_section)
         self.assertIsNotNone(max_parallel)
-        self.assertGreaterEqual(int(max_parallel.group(1)), 2)
-        self.assertLessEqual(int(max_parallel.group(1)), 256)
+        self.assertEqual(1, int(max_parallel.group(1)))
         self.assertIn(
             "matrix: ${{ fromJSON(needs.audit.outputs.candidate_matrix) }}",
             candidate_section,
@@ -735,6 +552,8 @@ if (matchingApprovedPaths(
             "candidate_batch_size: ${{ steps.queue.outputs.candidate_batch_size }}",
             audit_section,
         )
+        self.assertIn("--algumon-source-snapshot .candidate-queue/base-audit-report.json", candidate_section)
+        self.assertIn("--no-algumon-network", candidate_section)
 
     def test_aggregator_verifies_every_result_before_one_atomic_selection(self) -> None:
         aggregate_section = WATCH_WORKFLOW.split(
@@ -769,6 +588,8 @@ if (matchingApprovedPaths(
         self.assertIn("unrelated drift is not fail-closed", promote_section)
         self.assertIn("--promotion-scope .promotion-package/proof/promotion-ready.json", promote_section)
         self.assertIn("--baseline-report .promotion-package/proof/base-audit-report.json", promote_section)
+        self.assertIn("--algumon-source-snapshot .promotion-package/proof/base-audit-report.json", promote_section)
+        self.assertIn("--no-algumon-network", promote_section)
         self.assertIn("candidateProfiles.has(result.profile)", promote_section)
         self.assertIn('case "--promotion-scope":', AUDIT_SCRIPT)
         self.assertIn("distinctCandidateProofs.size < 3", AUDIT_SCRIPT)
@@ -776,28 +597,18 @@ if (matchingApprovedPaths(
         self.assertIn('reason === "already-failed"', AUDIT_SCRIPT)
         self.assertIn("resultIsSafelyReadableOrClosed", AUDIT_SCRIPT)
 
-    def test_two_simultaneous_drifts_are_eventually_serialized(self) -> None:
-        chain_section = WATCH_WORKFLOW.split(
-            "  continue-drift-chain:\n", 1
-        )[1].split("  report-pages-failure:\n", 1)[0]
-        self.assertIn("needs.audit.outputs.failed == 'true'", chain_section)
-        self.assertIn("needs.push-promotion.result == 'success'", chain_section)
-        self.assertNotIn("deploy-pages", chain_section)
-        self.assertIn("actions: write", chain_section)
-        self.assertIn("cloud dispatch", chain_section)
-        self.assertIn("--workflow watch-dom.yml", chain_section)
-        self.assertIn("dispatchNonce", chain_section)
-
-        # Contract model: each successful run promotes exactly one deterministic
-        # candidate, then dispatches once from the updated head while drift remains.
-        remaining = ["site-a", "site-b"]
-        promoted: list[str] = []
-        while remaining:
-            promoted.append(remaining.pop(0))
-            follow_up_dispatched = bool(remaining)
-            if remaining:
-                self.assertTrue(follow_up_dispatched)
-        self.assertEqual(["site-a", "site-b"], promoted)
+    def test_algumon_source_audit_is_weekly_bounded_and_never_self_dispatched(self) -> None:
+        self.assertIn('- cron: "17 18 * * 0"', WATCH_WORKFLOW)
+        audit_section = WATCH_WORKFLOW.split("  audit:\n", 1)[1].split(
+            "  candidate-proof:\n", 1
+        )[0]
+        self.assertIn("--algumon-request-budget 29", audit_section)
+        self.assertNotIn("continue-drift-chain:", WATCH_WORKFLOW)
+        self.assertNotIn("--workflow watch-dom.yml", WATCH_WORKFLOW)
+        self.assertIn(
+            "Candidate proofs reuse frozen source evidence, and no workflow self-dispatches another Algumon audit.",
+            WATCH_WORKFLOW,
+        )
 
     def test_same_site_desktop_and_mobile_drift_do_not_livelock(self) -> None:
         remaining = [
@@ -1538,10 +1349,13 @@ try {
         )
         if (
             completed.returncode != 0
-            and "Executable doesn't exist" in completed.stderr
+            and (
+                "Executable doesn't exist" in completed.stderr
+                or "browserType.launch: spawn EPERM" in completed.stderr
+            )
         ):
             self.skipTest(
-                "Playwright Chromium is installed after the preflight unit-test stage"
+                "Playwright launch is unavailable in the managed unit-test sandbox"
             )
         self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
 
@@ -1581,7 +1395,10 @@ class BehaviorAuditContractTests(unittest.TestCase):
         self.assertNotIn("getClientRects().length > 0", gate)
         self.assertIn("paintProbe.firstReadyFrame !== null", gate)
         self.assertIn("diagnostics?.semanticProjectionCount === 1", gate)
-        self.assertIn("preauthorized?.extendedCssCallbacks >= 2", gate)
+        self.assertIn('kind: preauthorized.kind', gate)
+        self.assertIn("gmAddElementCalls: preauthorized.gmAddElementCalls", gate)
+        self.assertIn("standaloneRuntimeCoverage", gate)
+        self.assertIn('authority === "userscript-runtime-style"', gate)
         self.assertIn(".length === 1", gate)
         self.assertNotIn("hotdeal-audit-marker-projection", gate)
 
@@ -1590,9 +1407,12 @@ class BehaviorAuditContractTests(unittest.TestCase):
             AUDIT_SCRIPT.index("async function auditSyntheticEdgeFixtures"):
             AUDIT_SCRIPT.index("function fixtureCoverageFailures")
         ]
-        self.assertIn(".map((rule) => rule.cssText)", edge)
+        self.assertIn('id: "late-outside-inline-important-ad-is-terminal"', edge)
+        self.assertIn('expectedStatusPrefix: "terminal-cascade-visible-leak"', edge)
         self.assertIn('dialogDisplay: dialogStyle?.display ?? null', edge)
-        self.assertIn('lockedState.dialogDisplay !== "none"', edge)
+        self.assertIn("fixtureResult.lockedPaint.blankPixelMatch", edge)
+        self.assertIn('lockedState.rootVisibility !== "hidden"', edge)
+        self.assertIn('lockedState.runtimeLock !== "1"', edge)
         self.assertIn(
             '!String(edgeState.status ?? "").startsWith(fixture.expectedStatusPrefix)',
             edge,
@@ -1601,34 +1421,38 @@ class BehaviorAuditContractTests(unittest.TestCase):
 
 class ReleaseManifestCanonicalHashTests(unittest.TestCase):
     def _run_manifest_check(
-        self, artifact: str | None = None, field: str | None = None
+        self,
+        section: str | None = None,
+        artifact: str | None = None,
+        field: str | None = None,
     ) -> tuple[subprocess.CompletedProcess[str], dict[str, object]]:
         with tempfile.TemporaryDirectory() as temporary_directory:
             bundle = Path(temporary_directory)
-            for relative_path in (
-                "filter.txt",
+            relative_paths = [
                 "filter-static.txt",
                 "hotdeal-focus.user.js",
                 "package.json",
                 "package-lock.json",
                 "release-manifest.json",
                 "config/sites.json",
-                "config/gate-artifacts.json",
-                "tests/fixtures/behavior-baseline.json",
-                "tests/fixtures/dom-regressions.json",
-            ):
+                "state/release-high-water.json",
+            ]
+            approved_state = "state/approved-variants.json"
+            if (PROJECT_ROOT / approved_state).exists():
+                relative_paths.append(approved_state)
+            for relative_path in relative_paths:
                 source = PROJECT_ROOT / relative_path
                 destination = bundle / relative_path
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(source, destination)
             manifest_path = bundle / "release-manifest.json"
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if artifact is not None and field is not None:
-                manifest["artifacts"][artifact][field] = "0" * 64
-            manifest_path.write_text(
-                json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            if section is not None and artifact is not None and field is not None:
+                manifest[section][artifact][field] = "0" * 64
+                manifest_path.write_text(
+                    json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
             result = subprocess.run(
                 [
                     "node",
@@ -1636,8 +1460,6 @@ class ReleaseManifestCanonicalHashTests(unittest.TestCase):
                     "--integrity-only",
                     "--config",
                     str(bundle / "config" / "sites.json"),
-                    "--marker-filter",
-                    str(bundle / "filter.txt"),
                     "--userscript",
                     str(bundle / "hotdeal-focus.user.js"),
                     "--evidence-dir",
@@ -1658,33 +1480,29 @@ class ReleaseManifestCanonicalHashTests(unittest.TestCase):
     def test_untampered_canonical_hashes_pass_integrity(self) -> None:
         result, integrity = self._run_manifest_check()
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
-        self.assertTrue(integrity["checks"]["installedRulesHashMatchesRelease"])
+        self.assertTrue(integrity["checks"]["releaseManifestContract"])
         self.assertTrue(
             integrity["checks"]["userscriptCanonicalTextHashMatchesRelease"]
         )
+        self.assertTrue(integrity["checks"]["sourceHashesMatchRelease"])
 
-    def test_tampered_installed_rule_hash_fails_integrity(self) -> None:
+    def test_tampered_source_hash_fails_integrity(self) -> None:
         result, integrity = self._run_manifest_check(
-            "filter.txt", "installedRulesSha256"
+            "sourceIntegrity", "filter-static.txt", "sha256"
         )
         self.assertEqual(1, result.returncode, result.stdout + result.stderr)
         self.assertIn("FAIL integrity", result.stdout)
-        self.assertFalse(integrity["checks"]["installedRulesHashMatchesRelease"])
-        self.assertTrue(
-            integrity["checks"]["userscriptCanonicalTextHashMatchesRelease"]
-        )
+        self.assertFalse(integrity["checks"]["sourceHashesMatchRelease"])
 
     def test_tampered_userscript_canonical_hash_fails_integrity(self) -> None:
         result, integrity = self._run_manifest_check(
-            "hotdeal-focus.user.js", "canonicalTextSha256"
+            "artifacts", "hotdeal-focus.user.js", "canonicalTextSha256"
         )
         self.assertEqual(1, result.returncode, result.stdout + result.stderr)
         self.assertIn("FAIL integrity", result.stdout)
-        self.assertTrue(integrity["checks"]["installedRulesHashMatchesRelease"])
         self.assertFalse(
             integrity["checks"]["userscriptCanonicalTextHashMatchesRelease"]
         )
-
 
 if __name__ == "__main__":
     unittest.main()

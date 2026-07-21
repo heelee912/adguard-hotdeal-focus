@@ -1,0 +1,19 @@
+{
+  "bundleFormat": "hdf-public-bundle-v1",
+  "records": [
+    {
+      "bundleSha256": "22885b100a8e0b3bf1b0340c0480177bbcebf7f3b033027186431a5e6a9705f1",
+      "manifest": {
+        "bytes": 6273,
+        "sha256": "e7b5f9985f07ed358f4878ba51d989ad119572f93104f582d3d45814c12e3e8d"
+      },
+      "releaseVersion": "0.6.4",
+      "userscript": {
+        "bytes": 324903,
+        "canonicalTextSha256": "862003b0c18e72b8abb83ecee5ca322ed7c90c59306a8ba67972807e972d9852",
+        "sha256": "ef380842e91161a0dc051b9f15d7e64763a74a293ba518f7d5ba2b0db2c55fd9"
+      }
+    }
+  ],
+  "schemaVersion": 1
+}

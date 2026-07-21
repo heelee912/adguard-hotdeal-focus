@@ -23,16 +23,31 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
         self.assertIn("Assert-LegacyMigrationPlanCurrent", self.source)
         self.assertIn("Assert-LegacyMigrationPostState", self.source)
         self.assertIn("Restore-LegacyMigration", self.source)
+        invoke = self.source[
+            self.source.index("function Invoke-LegacyMigration") :
+            self.source.index("function Assert-Sha256Value")
+        ]
+        userscript = invoke.index("Assert-UserscriptInstalled")
+        current_plan = invoke.index("Assert-LegacyMigrationPlanCurrent")
+        first_write = invoke.index("DisableFilterRules")
+        self.assertLess(userscript, current_plan)
+        self.assertLess(current_plan, first_write)
+        self.assertIn("[Parameter(Mandatory = $true)] $DesiredUserscript", invoke)
 
-    def test_deploy_order_is_backup_userscript_migration_filter(self) -> None:
+    def test_deploy_order_is_backup_userscript_then_filter_inventory_proof(self) -> None:
         deploy = self.source[self.source.index("        'deploy' {") :]
         backup = deploy.index("New-StateBackup")
         userscript = deploy.index("Invoke-UserscriptMutation")
-        migration = deploy.index("Invoke-LegacyMigration")
-        marker_filter = deploy.index("Invoke-FilterMutation")
+        protected_postcondition = deploy.index(
+            "Assert-DeploymentVerified", userscript
+        )
         self.assertLess(backup, userscript)
-        self.assertLess(userscript, migration)
-        self.assertLess(migration, marker_filter)
+        self.assertLess(userscript, protected_postcondition)
+        for forbidden in (
+            "Invoke-LegacyMigration", "Invoke-FilterMutation",
+            "Assert-FilterInstalled", "Assert-NoLegacyHotdealConflict",
+        ):
+            self.assertNotIn(forbidden, deploy)
 
     def test_user_filter_migration_is_disable_only_and_transactional(self) -> None:
         forbidden = (
@@ -71,12 +86,36 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
         self.assertIn("[switch] $ApproveExclusiveTargetMigration", self.source)
         self.assertIn("function Assert-ExclusiveTargetMigrationAuthorized", self.source)
         self.assertIn("scope alone does not prove", self.source)
-        deploy = self.source[self.source.index("        'deploy' {") :]
-        migrate = self.source[self.source.index("        'migrate-legacy' {") :]
-        self.assertIn("Assert-ExclusiveTargetMigrationAuthorized -Plan $migrationPlan", deploy)
+        migrate = self.source[
+            self.source.index("        'migrate-legacy' {") :
+            self.source.index("        'install-filter' {")
+        ]
         self.assertIn("Assert-ExclusiveTargetMigrationAuthorized -Plan $migrationPlan", migrate)
-        self.assertIn("migration_approval_required", deploy)
         self.assertIn("approval_required", migrate)
+        initial_userscript_check = migrate.index("Assert-UserscriptInstalled")
+        backup = migrate.index("New-StateBackup")
+        backup_userscript_check = migrate.index(
+            "Assert-BackupUserscriptMatchesDesired"
+        )
+        prewrite_state_check = migrate.index("Assert-CurrentStateEqualsBackup")
+        mutation = migrate.index("Invoke-LegacyMigration")
+        userscript_postcondition = migrate.index(
+            "Assert-LegacyMigrationUserscriptUnchanged"
+        )
+        transaction_complete = migrate.index("-Event 'transaction-complete'")
+        what_if_plan = migrate.index("Get-LegacyMigrationPlan -Client $client")
+        final_what_if_userscript_check = migrate.rindex("Assert-UserscriptInstalled")
+        self.assertLess(initial_userscript_check, backup)
+        self.assertLess(initial_userscript_check, what_if_plan)
+        self.assertLess(backup, backup_userscript_check)
+        self.assertLess(backup_userscript_check, prewrite_state_check)
+        self.assertLess(prewrite_state_check, mutation)
+        self.assertLess(mutation, userscript_postcondition)
+        self.assertLess(userscript_postcondition, transaction_complete)
+        self.assertLess(what_if_plan, final_what_if_userscript_check)
+        self.assertIn("-DesiredUserscript $desiredUserscript", migrate)
+        deploy = self.source[self.source.index("        'deploy' {") :]
+        self.assertNotIn("ApproveExclusiveTargetMigration", deploy)
 
     def test_restore_backup_is_versioned_preconditioned_and_idempotent(self) -> None:
         for token in (
@@ -92,36 +131,41 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, self.source)
 
-    def test_filter_mutations_require_both_remote_and_installed_hashes(self) -> None:
+    def test_normal_deployment_rejects_every_filter_install_input(self) -> None:
         preflight = self.source[
-            self.source.index("if ($Command -in @('install-userscript', 'install-filter'") :
+            self.source.index("if ($requiresAuthenticatedStandaloneUserscript -and") :
             self.source.index("    if ($UserscriptSource)")
         ]
-        self.assertIn("requires -ExpectedFilterSha256", preflight)
-        self.assertIn("requires -ExpectedInstalledFilterRulesSha256", preflight)
-        self.assertIn("'verify'", preflight)
-
-    def test_release_contract_consumes_both_raw_and_canonical_manifest_hashes(self) -> None:
         for token in (
+            "'FilterUrl'", "'ExpectedFilterSha256'",
+            "'ExpectedInstalledFilterRulesSha256'",
+            "'ApproveExclusiveTargetMigration'",
+            'is Userscript-only and rejects',
+        ):
+            self.assertIn(token, preflight)
+
+    def test_release_contract_is_schema_v2_userscript_only(self) -> None:
+        for token in (
+            "schema-v2",
+            "ReleaseUserscriptUrl",
+            "InstallUrl",
             "canonicalTextSha256",
-            "installedRulesSha256",
             "UserscriptRawSha256",
             "UserscriptCanonicalTextSha256",
-            "FilterInstalledRulesSha256",
+            "ReaderGateGrants",
             "Assert-ReleaseInputsMatchManifest",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, self.source)
 
     def test_mutation_flow_uses_completed_backup_as_unique_before_state(self) -> None:
-        for command in ("install-userscript", "install-filter", "deploy"):
+        for command in ("install-userscript", "deploy"):
             section = self.source[self.source.index(f"        '{command}' {{") :]
             backup = section.index("New-StateBackup")
             validated = section.index("Get-ValidatedBackup", backup)
             prewrite = section.index("Assert-CurrentStateEqualsBackup", validated)
             mutation_name = {
                 "install-userscript": "Invoke-UserscriptMutation",
-                "install-filter": "Invoke-FilterMutation",
                 "deploy": "Invoke-UserscriptMutation",
             }[command]
             mutation = section.index(mutation_name, prewrite)
@@ -151,14 +195,15 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
         self.assertIn("if ($replacementRequired)", forward)
         self.assertNotIn("intent-userscript-update-gm", forward)
 
-    def test_filter_and_userscript_verification_expose_all_state_hashes(self) -> None:
+    def test_userscript_verification_exposes_protected_filter_state_hashes(self) -> None:
         for token in (
             "InstalledCodeSha256",
             "InstalledGmPropertiesSha256",
             "VisibilityObservationCount",
-            "DisabledRuleCount",
-            "DisabledRulesSha256",
-            'throw "Installed custom filter contains disabled rules"',
+            "UserFilterSha256",
+            "SubscriptionInventorySha256",
+            "Assert-ProtectedFilterStateEqualsBackup",
+            "subscription_inventory_unchanged",
         ):
             with self.subTest(token=token):
                 self.assertIn(token, self.source)
@@ -336,10 +381,15 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
             with self.subTest(intent=intent):
                 self.assertLess(restore.index(intent), restore.index(write))
 
-    def test_mixed_target_rules_block_verified_deployment(self) -> None:
-        self.assertIn("has_enabled_conflict = $enabledTargetAll.Count -gt 0", self.source)
-        self.assertIn("migration_blocked_by_mixed_scope = $enabledMixedAll.Count -gt 0", self.source)
-        self.assertIn("Enabled mixed-target User filter rules are preserved", self.source)
+    def test_mixed_or_legacy_user_rules_do_not_block_or_change_normal_deployment(self) -> None:
+        deploy = self.source[self.source.index("        'deploy' {") :]
+        for forbidden in (
+            "Get-LegacyMigrationPlan", "Enabled mixed-target User filter rules",
+            "Invoke-LegacyMigration", "DisableFilterRules",
+        ):
+            self.assertNotIn(forbidden, deploy)
+        self.assertIn("user_filter_will_change = $false", deploy)
+        self.assertIn("subscription_inventory_will_change = $false", deploy)
 
     def test_mutation_failures_emit_recovery_coordinates(self) -> None:
         self.assertIn("$failure.backup_path = $script:RecoveryBackupPath", self.source)
@@ -369,13 +419,11 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("powershell.exe"), "Windows PowerShell is unavailable")
     def test_verify_preflight_rejects_each_missing_release_input_before_ipc(self) -> None:
         userscript = str(ROOT / "hotdeal-focus.user.js")
-        filter_url = "https://heelee912.github.io/adguard-hotdeal-focus/filter.txt"
         digest = "a" * 64
         cases = (
             (["verify"], "requires -UserscriptSource"),
-            (["verify", "-UserscriptSource", userscript], "requires -FilterUrl"),
             (
-                ["verify", "-UserscriptSource", userscript, "-FilterUrl", filter_url],
+                ["verify", "-UserscriptSource", userscript],
                 "requires -ExpectedUserscriptSha256",
             ),
             (
@@ -383,26 +431,12 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
                     "verify",
                     "-UserscriptSource",
                     userscript,
-                    "-FilterUrl",
-                    filter_url,
                     "-ExpectedUserscriptSha256",
                     digest,
-                ],
-                "requires -ExpectedFilterSha256",
-            ),
-            (
-                [
-                    "verify",
-                    "-UserscriptSource",
-                    userscript,
                     "-FilterUrl",
-                    filter_url,
-                    "-ExpectedUserscriptSha256",
-                    digest,
-                    "-ExpectedFilterSha256",
-                    digest,
+                    "https://example.com/filter.txt",
                 ],
-                "requires -ExpectedInstalledFilterRulesSha256",
+                "is Userscript-only and rejects -FilterUrl",
             ),
         )
         for arguments, expected in cases:
@@ -426,11 +460,93 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
                 self.assertNotEqual(completed.returncode, 0)
                 self.assertIn(expected, output)
 
-    def test_actual_filter_title_matches_cli_default_ascii_contract(self) -> None:
-        filter_text = (ROOT / "filter.txt").read_text(encoding="utf-8")
-        title = re.search(r"(?m)^!\s*Title:\s*(.+?)\s*$", filter_text)
+    @unittest.skipUnless(shutil.which("powershell.exe"), "Windows PowerShell is unavailable")
+    def test_migration_preflight_requires_authenticated_userscript_release_inputs(self) -> None:
+        userscript = str(ROOT / "hotdeal-focus.user.js")
+        manifest = str(ROOT / "release-manifest.json")
+        digest = "a" * 64
+        required = [
+            "migrate-legacy",
+            "-UserscriptSource",
+            userscript,
+            "-ExpectedUserscriptSha256",
+            digest,
+            "-ReleaseManifestSource",
+            manifest,
+            "-WhatIf",
+        ]
+        cases = (
+            (["migrate-legacy", "-WhatIf"], "requires -UserscriptSource"),
+            (
+                ["migrate-legacy", "-UserscriptSource", userscript, "-WhatIf"],
+                "requires -ExpectedUserscriptSha256",
+            ),
+            (
+                [
+                    "migrate-legacy",
+                    "-UserscriptSource",
+                    userscript,
+                    "-ExpectedUserscriptSha256",
+                    digest,
+                    "-WhatIf",
+                ],
+                "requires -ReleaseManifestSource",
+            ),
+            (
+                required[:-1]
+                + ["-FilterUrl", "https://example.com/filter.txt", "-WhatIf"],
+                "rejects filter input: -FilterUrl",
+            ),
+            (
+                required[:-1]
+                + ["-FilterName", "Not the standalone gate", "-WhatIf"],
+                "rejects filter input: -FilterName",
+            ),
+            (
+                required[:-1]
+                + ["-ExpectedFilterSha256", digest, "-WhatIf"],
+                "rejects filter input: -ExpectedFilterSha256",
+            ),
+            (
+                required[:-1]
+                + ["-ExpectedInstalledFilterRulesSha256", digest, "-WhatIf"],
+                "rejects filter input: -ExpectedInstalledFilterRulesSha256",
+            ),
+        )
+        for arguments, expected in cases:
+            with self.subTest(expected=expected):
+                completed = subprocess.run(
+                    [
+                        "powershell.exe",
+                        "-NoProfile",
+                        "-ExecutionPolicy",
+                        "Bypass",
+                        "-File",
+                        str(CLI_PATH),
+                        *arguments,
+                    ],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                output = completed.stdout + completed.stderr
+                self.assertNotEqual(completed.returncode, 0)
+                self.assertIn(expected, output)
+
+    def test_standalone_userscript_title_matches_cli_default_contract(self) -> None:
+        userscript_text = (ROOT / "hotdeal-focus.user.js").read_text(
+            encoding="utf-8"
+        )
+        title = re.search(r"(?m)^//\s+@name\s+(.+?)\s*$", userscript_text)
         self.assertIsNotNone(title)
-        self.assertEqual(title.group(1), "AdGuard Hotdeal Focus Marker Gate")
+        self.assertEqual(title.group(1), "AdGuard Hotdeal Focus Reader Gate")
+        deployment_verifier = self.source[
+            self.source.index("function Assert-DeploymentVerified") :
+            self.source.index("function Invoke-Rollback")
+        ]
+        self.assertNotIn("Assert-FilterInstalled", deployment_verifier)
+        self.assertIn("userscript_only = $true", deployment_verifier)
         self.assertRegex(self.source, r"\$script:ToolVersion = '\d+\.\d+\.\d+'")
 
     def test_userscript_placeholder_check_does_not_reject_runtime_globals(self) -> None:

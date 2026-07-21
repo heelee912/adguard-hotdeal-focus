@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.5.6
+// @version      0.6.4
 // @description  Fail-closed semantic reader gate for Algumon hot-deal destinations.
 // @match        https://www.algumon.com/*
 // @match        https://*.clien.net/*
@@ -13,6 +13,7 @@
 // @match        https://*.arca.live/*
 // @run-at       document-start
 // @grant        GM_addElement
+// @grant        window.onurlchange
 // @noframes
 // @downloadURL  https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 // @updateURL    https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
@@ -36,7 +37,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.5.6";
+  const GENERATOR_VERSION = "0.6.4";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -63,6 +64,15 @@
   });
   const HDF_ATTRIBUTE_PREFIX = "data-hotdeal-focus-";
   const HDF_CLASS_PATTERN = /^hdf-v\d+-/u;
+  const COMMENT_CONTROL_STATE_ATTRIBUTES = new Set([
+    "class",
+    "hidden",
+    "aria-expanded",
+    "aria-pressed",
+    "aria-selected",
+    "aria-hidden",
+    "style",
+  ]);
   const BOOTSTRAP_INLINE_LOCK = Object.freeze({
     animation: "none",
     caretColor: "transparent",
@@ -74,8 +84,10 @@
     visibility: "hidden",
   });
   const BOOTSTRAP_PUBLISHER_INLINE = new WeakMap();
-  const RELEASE_PROOF_FRAMES = 2;
-  const SEED_FRAGMENT_KEY = "hdf-seed";
+  const MEASUREMENT_HTML_RESTORES = new WeakMap();
+  let measurementStyleSheetMutationDepth = 0;
+  const CASCADE_PROOF_FRAMES = 2;
+  const SEED_WINDOW_NAME_PREFIX = "hdf-provenance:";
   const SEED_VERSION = 1;
   const SEED_MAX_AGE_MS = 10 * 60 * 1000;
   const SEED_MAX_BYTES = 1024;
@@ -114,6 +126,8 @@
     )),
   });
   const CSSOM_MUTATION_LISTENERS = new WeakMap();
+  const ADOPTED_STYLE_SHEET_LISTENERS = new WeakMap();
+  const STYLE_SHEET_STATE_LISTENERS = new WeakMap();
   const SHADOW_TRACKER_KEY = typeof Symbol === "function"
     ? Symbol.for("hotdeal-focus.shadow-tracker.v1")
     : "__HOTDEAL_FOCUS_SHADOW_TRACKER_V1__";
@@ -243,6 +257,11 @@
   const STRUCTURAL_CONTAINER_ELEMENTS = "div, section, header, ul, ol, menu, form, dialog, table";
   const LEAF_MEDIA_ELEMENTS = "img, picture, video, audio, source, track, iframe, canvas, svg";
   const COMMENT_TOKEN_PATTERN = /(?:댓글|답글|코멘트|comment|comments|reply|replies|コメント|返信|评论|回复)/i;
+  const COMMENT_CONTINUATION_PATTERN = /(?:\b(?:pagination|page|load(?:ing)?|next|prev|previous)\b|\bmore\s+(?:comments?|repl(?:y|ies))\b|\b(?:comments?|repl(?:y|ies))\s+more\b|(?:\uB313\uAE00|\uB2F5\uAE00|\uCF54\uBA58\uD2B8)\s*(?:\uB354\s*\uBCF4\uAE30|\uBD88\uB7EC\uC624\uAE30|\uCD94\uAC00)|\uB354\s*\uBCF4\uAE30|\uBD88\uB7EC\uC624\uAE30|\u30DA\u30FC\u30B8|\u3082\u3063\u3068(?:\u8868\u793A|\u8AAD\u3080)?|\u66F4(?:\u591A)?(?:\u8BC4\u8BBA|\u56DE\u590D)?)/iu;
+  const COMMENT_STRUCTURAL_CONTINUATION_PATTERN = /(?:pagination|page|load(?:ing)?|next|prev|previous)/iu;
+  const COMMENT_REPLY_TOKEN_PATTERN = /(?:reply|repl(?:y|ies)|\uB2F5\uAE00|\u8FD4\u4FE1|\u56DE\u590D)/iu;
+  const COMMENT_REPLY_REVEAL_PATTERN = /(?:view|show|open|more|load|expand|\uBCF4\uAE30|\uD3BC\uCE58|\uD45C\uC2DC|\u66F4\u591A|\u67E5\u770B|\u5C55\u5F00)/iu;
+  const COMMENT_REPLY_COUNT_PATTERN = /(?:\d+\s*(?:reply|repl(?:y|ies)|\uB2F5\uAE00|\u8FD4\u4FE1|\u56DE\u590D|\uAC1C|\u4EF6|\u6761)|(?:reply|repl(?:y|ies)|\uB2F5\uAE00|\u8FD4\u4FE1|\u56DE\u590D)\s*\d+)/iu;
   const PRODUCT_TOKEN_PATTERN = /(?:가격|상품|구매|쿠폰|배송|price|product|buy|coupon|shipping|価格|商品|購入|优惠|价格|购买)/i;
   const PRODUCT_SOURCE_IDENTITY_PATTERN = /(?:^|\s)(?:source\s+url|purchase|offer|deal\s+link|buy\s+link|shop\s+link|product\s+link)(?:$|\s)/i;
   const BODY_METADATA_TOKEN_PATTERN = /(?:^|\s)(?:author|byline|writer|profile|avatar|nickname|member\s+info|post\s+meta|article\s+meta)(?:$|\s)/i;
@@ -1267,9 +1286,8 @@
       !/^\d{13}$/.test(relayT) ||
       Math.abs(now - Number(relayT)) > SEED_MAX_AGE_MS ||
       (navigationNonce && !/^hdf-[0-9a-z]{28}$/.test(navigationNonce)) ||
-      (requireNavigationProof === true && (
-        !/^hdf-[0-9a-z]{28}$/.test(navigationNonce) || !destination
-      ))
+      (requireNavigationProof === true &&
+        !/^hdf-[0-9a-z]{28}$/.test(navigationNonce))
     ) {
       return null;
     }
@@ -1287,7 +1305,7 @@
     });
   }
 
-  function encodeSeedFragment(browserRoot, seed) {
+  function encodeSeedCarrier(browserRoot, seed) {
     const serialized = JSON.stringify(seed);
     if (utf8ByteLength(serialized) > SEED_MAX_BYTES || typeof browserRoot.btoa !== "function") {
       return null;
@@ -1303,7 +1321,7 @@
     }
   }
 
-  function decodeSeedFragment(browserRoot, encoded) {
+  function decodeSeedCarrier(browserRoot, encoded) {
     if (!/^[A-Za-z0-9_-]+$/.test(encoded) || typeof browserRoot.atob !== "function") {
       return null;
     }
@@ -1322,80 +1340,61 @@
     }
   }
 
-  function fragmentParts(hash) {
-    return String(hash || "").replace(/^#/, "").split("&").filter(Boolean);
-  }
-
-  function writeSeedFragment(browserRoot, anchor, seed) {
-    const encoded = encodeSeedFragment(browserRoot, seed);
-    if (!encoded) {
-      return false;
-    }
-    let url;
-    try {
-      url = new URL(anchor.href, anchor.ownerDocument.location.href);
-    } catch (_error) {
-      return false;
-    }
-    const retained = fragmentParts(url.hash).filter(function retainFragmentPart(part) {
-      return !part.startsWith(`${SEED_FRAGMENT_KEY}=`);
-    });
-    retained.push(`${SEED_FRAGMENT_KEY}=${encoded}`);
-    url.hash = retained.join("&");
-    anchor.href = url.href;
-    return true;
-  }
-
-  function readAndClearFragmentSeed(browserRoot) {
-    const parts = fragmentParts(browserRoot.location.hash);
-    let encoded = null;
-    const retained = [];
-    parts.forEach(function classifyFragmentPart(part) {
-      if (encoded === null && part.startsWith(`${SEED_FRAGMENT_KEY}=`)) {
-        encoded = part.slice(SEED_FRAGMENT_KEY.length + 1);
-      } else if (!part.startsWith(`${SEED_FRAGMENT_KEY}=`)) {
-        retained.push(part);
-      }
-    });
-    if (encoded === null) {
-      return null;
-    }
-    try {
-      const remainingHash = retained.length ? `#${retained.join("&")}` : "";
-      const cleanUrl = `${browserRoot.location.pathname}${browserRoot.location.search}${remainingHash}`;
-      browserRoot.history.replaceState(
-        browserRoot.history.state,
-        browserRoot.document.title,
-        cleanUrl
-      );
-    } catch (_error) {
-      return null;
-    }
-    return decodeSeedFragment(browserRoot, encoded);
-  }
-
   function readAndClearSeed(browserRoot) {
-    const fragmentSeed = readAndClearFragmentSeed(browserRoot);
     let navigationName = "";
     try {
       navigationName = String(browserRoot.name || "");
+      if (!navigationName.startsWith(SEED_WINDOW_NAME_PREFIX)) {
+        return null;
+      }
       browserRoot.name = "";
     } catch (_error) {
       return null;
     }
+    const carrierSeed = decodeSeedCarrier(
+      browserRoot,
+      navigationName.slice(SEED_WINDOW_NAME_PREFIX.length),
+    );
     if (
-      !fragmentSeed ||
+      !carrierSeed ||
       !isAlgumonReferrer(browserRoot.document.referrer) ||
-      navigationName !== `hdf-provenance:${fragmentSeed.navigationNonce}` ||
-      !sameArticleNavigation(
-        fragmentSeed.destinationUrl,
-        browserRoot.location.href,
-        fragmentSeed.siteType,
-      )
+      !carrierSeed.navigationNonce
     ) {
       return null;
     }
-    return fragmentSeed;
+    return carrierSeed;
+  }
+
+  function clearPublicSeedFragment(browserRoot) {
+    let location;
+    try {
+      location = browserRoot.location;
+    } catch (_error) {
+      return false;
+    }
+    const rawHash = String(location?.hash || "");
+    if (!rawHash) return false;
+    const retainedParts = rawHash.slice(1).split("&").filter(function keepNonSeedPart(part) {
+      return !/^hdf-seed(?:=|$)/u.test(part);
+    });
+    if (retainedParts.length === rawHash.slice(1).split("&").length) {
+      return false;
+    }
+    const history = browserRoot === RUNTIME_GLOBAL
+      ? NATIVE.history
+      : browserRoot.history;
+    const replaceState = browserRoot === RUNTIME_GLOBAL
+      ? NATIVE.historyReplaceState
+      : history?.replaceState;
+    if (!history || typeof replaceState !== "function") return false;
+    try {
+      const replacement = `${location.pathname}${location.search}` +
+        (retainedParts.length ? `#${retainedParts.join("&")}` : "");
+      NATIVE.reflectApply(replaceState, history, [null, "", replacement]);
+      return true;
+    } catch (_error) {
+      return false;
+    }
   }
 
   function exactSignedAlgumonDealUrl(urlLike, expectedDealId) {
@@ -1505,8 +1504,7 @@
   function extractAlgumonSeed(anchor) {
     let url;
     try {
-      const rawHref = anchor.getAttribute("href") ||
-        anchor.getAttribute("data-hotdeal-focus-blocked-href") || "";
+      const rawHref = anchor.getAttribute("href") || "";
       url = exactSignedAlgumonDealUrl(
         new URL(rawHref, anchor.ownerDocument.location.href).href,
       );
@@ -1564,21 +1562,8 @@
 
   function installAlgumonSeedCapture(browserRoot) {
     const document = browserRoot.document;
-    const BLOCKED_HREF_ATTR = "data-hotdeal-focus-blocked-href";
-    const RELAY_RESPONSE_MAX_BYTES = 4096;
-    const RELAY_CACHE_TTL_MS = 30 * 1000;
-    const relayResolutionCache = new Map();
     function dealHref(anchor) {
-      return anchor.getAttribute("href") || anchor.getAttribute(BLOCKED_HREF_ATTR) || "";
-    }
-    function isDealNavigation(anchor) {
-      try {
-        const dealUrl = new URL(dealHref(anchor), anchor.ownerDocument.location.href);
-        return isAlgumonHostname(dealUrl.hostname) &&
-          /^\/l\/d\/\d{1,24}(?:\/|$)/.test(dealUrl.pathname);
-      } catch (_error) {
-        return false;
-      }
+      return anchor.getAttribute("href") || "";
     }
     function isExactSignedDealNavigation(anchor) {
       try {
@@ -1589,189 +1574,29 @@
         return false;
       }
     }
-    function enforceDealLinkIdentity() {
-      document.querySelectorAll(`a[href*="/l/d/"], a[${BLOCKED_HREF_ATTR}]`).forEach(
-        function classifyDealAnchor(anchor) {
-          if (!isDealNavigation(anchor)) {
-            return;
-          }
-          const blockedHref = anchor.getAttribute(BLOCKED_HREF_ATTR);
-          if (isExactSignedDealNavigation(anchor) && extractAlgumonSeed(anchor)) {
-            if (blockedHref && !anchor.hasAttribute("href")) {
-              anchor.setAttribute("href", blockedHref);
-            }
-            anchor.removeAttribute(BLOCKED_HREF_ATTR);
-            anchor.removeAttribute("aria-disabled");
-            return;
-          }
-          const href = anchor.getAttribute("href") || blockedHref;
-          if (href) {
-            anchor.setAttribute(BLOCKED_HREF_ATTR, href);
-          }
-          anchor.removeAttribute("href");
-          anchor.setAttribute("aria-disabled", "true");
-        }
-      );
-    }
-    let enforcementScheduled = false;
-    function scheduleDealLinkEnforcement() {
-      if (enforcementScheduled) return;
-      enforcementScheduled = true;
-      const queue = browserRoot === RUNTIME_GLOBAL
-        ? NATIVE.queueMicrotask
-        : browserRoot.queueMicrotask.bind(browserRoot);
-      queue(function enforceAfterMutationBatch() {
-        enforcementScheduled = false;
-        enforceDealLinkIdentity();
-      });
-    }
-    function createSecureRelayPopup() {
-      let child = null;
-      try {
-        child = browserRoot.open("about:blank", "_blank");
-        if (!child) {
-          return null;
-        }
-        child.opener = null;
-        const childDocument = child.document;
-        const head = childDocument.head || childDocument.createElement("head");
-        const body = childDocument.body || childDocument.createElement("body");
-        if (!childDocument.head) {
-          childDocument.documentElement.appendChild(head);
-        }
-        if (!childDocument.body) {
-          childDocument.documentElement.appendChild(body);
-        }
-        const referrer = childDocument.createElement("meta");
-        referrer.setAttribute("name", "referrer");
-        referrer.setAttribute("content", "origin");
-        head.appendChild(referrer);
-        return child;
-      } catch (_error) {
-        try {
-          if (child && !child.closed) child.close();
-        } catch (_closeError) {
-          // The originating Algumon page remains in place on relay failure.
-        }
-        return null;
-      }
-    }
-    function parseSignedRelayDocument(source, siteType) {
-      if (!source || utf8ByteLength(source) > RELAY_RESPONSE_MAX_BYTES) {
-        return null;
-      }
-      const parsed = new browserRoot.DOMParser().parseFromString(source, "text/html");
+    function staysInCurrentBrowsingContext(event, anchor) {
       if (
-        !parsed ||
-        parsed.querySelector("parsererror") ||
-        parsed.querySelector("base, meta[http-equiv='refresh' i]")
+        event.type === "auxclick" ||
+        event.button !== 0 ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.shiftKey ||
+        event.altKey
       ) {
-        return null;
-      }
-      const scripts = Array.from(parsed.querySelectorAll("script"));
-      const anchors = Array.from(parsed.body?.querySelectorAll("a[href]") || []);
-      if (scripts.length !== 1 || anchors.length !== 1) {
-        return null;
-      }
-      const scriptMatch = String(scripts[0].textContent || "").match(
-        /^\s*window\.location\.href\s*=\s*("(?:\\.|[^"\\])*")\s*;\s*$/u,
-      );
-      if (!scriptMatch) {
-        return null;
-      }
-      let scriptedUrl;
-      try {
-        scriptedUrl = JSON.parse(scriptMatch[1]);
-      } catch (_error) {
-        return null;
-      }
-      const scriptDestination = exactDestinationUrl(scriptedUrl, siteType);
-      const anchorDestination = exactDestinationUrl(
-        anchors[0].getAttribute("href"),
-        siteType,
-      );
-      if (
-        !scriptDestination ||
-        !anchorDestination ||
-        scriptDestination.href !== anchorDestination.href
-      ) {
-        return null;
-      }
-      return scriptDestination;
-    }
-    function resolveSignedAlgumonDestination(signedUrl, seed) {
-      const cacheKey = signedUrl.href;
-      const cached = relayResolutionCache.get(cacheKey);
-      if (cached && cached.expiresAt > Date.now()) {
-        return cached.promise;
-      }
-      const resolution = browserRoot.fetch(cacheKey, {
-        method: "GET",
-        credentials: "same-origin",
-        cache: "no-store",
-        redirect: "error",
-        referrerPolicy: "no-referrer",
-      }).then(async function verifySignedResponse(response) {
-        if (
-          response.status !== 200 ||
-          response.redirected ||
-          response.url !== cacheKey ||
-          !/^text\/html(?:\s*;|$)/iu.test(response.headers.get("content-type") || "")
-        ) {
-          throw new Error("invalid signed relay response");
-        }
-        const source = await response.text();
-        const destination = parseSignedRelayDocument(source, seed.siteType);
-        if (!destination) {
-          throw new Error("invalid signed relay document");
-        }
-        return destination;
-      });
-      relayResolutionCache.set(cacheKey, {
-        expiresAt: Date.now() + RELAY_CACHE_TTL_MS,
-        promise: resolution,
-      });
-      resolution.catch(function discardFailedRelay() {
-        const current = relayResolutionCache.get(cacheKey);
-        if (current?.promise === resolution) relayResolutionCache.delete(cacheKey);
-      });
-      return resolution;
-    }
-    function closeRelayPopup(child) {
-      try {
-        if (child && !child.closed) child.close();
-      } catch (_error) {
-        // A failed relay remains fail-closed even if the blank popup cannot be closed.
-      }
-    }
-    function navigateResolvedRelay(child, destination, seed) {
-      try {
-        child.name = `hdf-provenance:${seed.navigationNonce}`;
-        const relay = document.createElement("a");
-        relay.href = destination.href;
-        relay.target = child.name;
-        relay.referrerPolicy = "origin";
-        if (!writeSeedFragment(browserRoot, relay, seed)) {
-          return false;
-        }
-        if (typeof NATIVE.anchorClick !== "function") return false;
-        relay.hidden = true;
-        document.documentElement.appendChild(relay);
-        NATIVE.reflectApply(NATIVE.anchorClick, relay, []);
-        relay.remove();
-        return true;
-      } catch (_error) {
         return false;
       }
+      const target = String(anchor.getAttribute("target") || "")
+        .trim()
+        .toLocaleLowerCase();
+      return target === "" || target === "_self";
     }
     function captureDealNavigation(event) {
       const isKeyboardActivation = event.type === "keydown" && event.key === "Enter";
       const isPrimaryActivation = event.type === "click" && event.button === 0;
-      const isMiddleActivation = event.type === "auxclick" && event.button === 1;
       if (
         event.isTrusted !== true ||
         event.defaultPrevented ||
-        (!isKeyboardActivation && !isPrimaryActivation && !isMiddleActivation)
+        (!isKeyboardActivation && !isPrimaryActivation)
       ) {
         return;
       }
@@ -1782,76 +1607,38 @@
       if (!anchor) {
         return;
       }
-      if (!isDealNavigation(anchor)) {
+      if (!isExactSignedDealNavigation(anchor) ||
+          !staysInCurrentBrowsingContext(event, anchor)) {
         return;
       }
       const seed = extractAlgumonSeed(anchor);
-      const signedUrl = seed
-        ? exactSignedAlgumonDealUrl(
-            new URL(dealHref(anchor), anchor.ownerDocument.location.href).href,
-            seed.dealId,
-          )
-        : null;
-      if (!seed || !signedUrl) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        publishDiagnostics(browserRoot, {
-          state: "blocked",
-          targetReason: "algumon-unapproved-site-type",
-        });
+      if (!seed) {
         return;
       }
       const navigationNonce = createRunNonce(browserRoot);
       if (!/^hdf-[0-9a-z]{28}$/.test(String(navigationNonce || ""))) {
-        event.preventDefault();
-        event.stopImmediatePropagation();
-        publishDiagnostics(browserRoot, {
-          state: "blocked",
-          targetReason: "algumon-navigation-proof-unavailable",
-        });
         return;
       }
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      const child = createSecureRelayPopup();
-      if (!child) {
-        publishDiagnostics(browserRoot, {
-          state: "blocked",
-          targetReason: "algumon-popup-blocked",
-        });
+      const navigationSeed = validateSeed(
+        { ...seed, navigationNonce },
+        Date.now(),
+        true,
+      );
+      const carrier = navigationSeed
+        ? encodeSeedCarrier(browserRoot, navigationSeed)
+        : null;
+      if (!carrier) {
         return;
       }
-      resolveSignedAlgumonDestination(signedUrl, seed)
-        .then(function navigateVerifiedDestination(destination) {
-          const navigationSeed = validateSeed(
-            { ...seed, navigationNonce, destinationUrl: destination.href },
-            Date.now(),
-            true
-          );
-          if (!navigationSeed || !navigateResolvedRelay(child, destination, navigationSeed)) {
-            closeRelayPopup(child);
-            throw new Error("signed relay navigation failed");
-          }
-        })
-        .catch(function rejectRelay() {
-          closeRelayPopup(child);
-          publishDiagnostics(browserRoot, {
-            state: "blocked",
-            targetReason: "algumon-relay-rejected",
-          });
-        });
+      try {
+        browserRoot.name = `${SEED_WINDOW_NAME_PREFIX}${carrier}`;
+      } catch (_error) {
+        // The normal user navigation proceeds without a provenance carrier.
+      }
     }
     document.addEventListener("click", captureDealNavigation, true);
     document.addEventListener("auxclick", captureDealNavigation, true);
     document.addEventListener("keydown", captureDealNavigation, true);
-    const observer = createNativeMutationObserver(browserRoot, scheduleDealLinkEnforcement);
-    observer.observe(document, {
-      subtree: true,
-      childList: true,
-      attributes: true,
-      attributeFilter: ["href", "src", "data-site", "data-site-type"],
-    });
-    scheduleDealLinkEnforcement();
   }
 
   function createRunNonce(browserRoot) {
@@ -2139,6 +1926,16 @@
     const previousContentVisibilityPriority = html.style.getPropertyPriority("content-visibility");
     const previousClipPath = html.style.getPropertyValue("clip-path");
     const previousClipPathPriority = html.style.getPropertyPriority("clip-path");
+    const measurementRestore = Object.freeze({
+      properties: Object.freeze([
+        inlinePropertySnapshot(html, "transition"),
+        inlinePropertySnapshot(html, "animation"),
+        inlinePropertySnapshot(html, "opacity"),
+        inlinePropertySnapshot(html, "visibility"),
+        inlinePropertySnapshot(html, "content-visibility"),
+        inlinePropertySnapshot(html, "clip-path"),
+      ]),
+    });
     const previouslyDisabled = gateSheet.disabled;
     html.style.setProperty("transition", "none", "important");
     html.style.setProperty("animation", "none", "important");
@@ -2148,7 +1945,12 @@
     html.style.setProperty("clip-path", "inset(50%)", "important");
     html.setAttribute(ATTR.measure, "1");
     try {
-      gateSheet.disabled = true;
+      measurementStyleSheetMutationDepth += 1;
+      try {
+        gateSheet.disabled = true;
+      } finally {
+        measurementStyleSheetMutationDepth -= 1;
+      }
       const view = document.defaultView;
       const rootStyle = view ? nativeComputedStyle(view, html) : null;
       if (
@@ -2185,7 +1987,12 @@
       return inspect();
     } finally {
       html.style.setProperty("visibility", "hidden", "important");
-      gateSheet.disabled = previouslyDisabled;
+      measurementStyleSheetMutationDepth += 1;
+      try {
+        gateSheet.disabled = previouslyDisabled;
+      } finally {
+        measurementStyleSheetMutationDepth -= 1;
+      }
       html.removeAttribute(ATTR.measure);
       if (previousOpacity) {
         html.style.setProperty("opacity", previousOpacity, previousOpacityPriority);
@@ -2221,6 +2028,7 @@
       } else {
         html.style.removeProperty("transition");
       }
+      MEASUREMENT_HTML_RESTORES.set(html, measurementRestore);
     }
   }
 
@@ -4226,6 +4034,40 @@
     return null;
   }
 
+  function isCommentContinuationControl(control) {
+    if (!control || !isRendered(control)) {
+      return false;
+    }
+    const visibleText = normalizeProjectionTokenText([
+      control.getAttribute("aria-label"),
+      control.getAttribute("title"),
+      control.textContent,
+    ].join(" "));
+    const semanticText = normalizeProjectionTokenText([
+      semanticTokenText(control),
+      projectionNoiseMetadataText(control),
+    ].join(" "));
+    if (
+      COMMENT_CONTINUATION_PATTERN.test(visibleText) ||
+      COMMENT_STRUCTURAL_CONTINUATION_PATTERN.test(semanticText)
+    ) {
+      return true;
+    }
+    // A bare Reply button commonly opens a composer and does not prove that
+    // existing replies are hidden. Treat it as a continuation only when it
+    // explicitly reveals a reply set, names a reply count, or exposes state.
+    return COMMENT_REPLY_TOKEN_PATTERN.test(visibleText) && (
+      COMMENT_REPLY_REVEAL_PATTERN.test(visibleText) ||
+      COMMENT_REPLY_COUNT_PATTERN.test(visibleText) ||
+      control.hasAttribute("aria-expanded") ||
+      control.hasAttribute("aria-controls")
+    );
+  }
+
+  function hasVisibleCommentContinuationControl(commentControls) {
+    return commentControls.some(isCommentContinuationControl);
+  }
+
   function visibleCommentTotalEvidence(commentMount, boundaryRoot, excludedRoots) {
     if (!commentMount || !boundaryRoot || (
       commentMount !== boundaryRoot && !boundaryRoot.contains(commentMount)
@@ -5172,9 +5014,11 @@
     }
   }
 
-  function claimBootstrapLock(document) {
+  function claimBootstrapLock(document, removePublisherMarkers = true) {
     const html = document.documentElement;
-    if (!html || !removePublisherHdfMarkers(document)) return null;
+    if (!html || (removePublisherMarkers && !removePublisherHdfMarkers(document))) {
+      return null;
+    }
     const declarations = Object.freeze([
       ["animation", BOOTSTRAP_INLINE_LOCK.animation],
       ["caret-color", BOOTSTRAP_INLINE_LOCK.caretColor],
@@ -5777,6 +5621,7 @@
       `[${ATTR.status}="ready"]`;
     const owned = `.${CLASS.keep}[${ATTR.keep}="${nonce}"]`;
     const shell = `.${CLASS.shell}[${ATTR.shell}="${nonce}"]`;
+    const releaseProbe = `[data-hdf-v2-release-probe="${nonce}"]`;
     return [
       lockRule,
       `${readyRoot} { visibility: visible !important; }`,
@@ -5785,6 +5630,10 @@
         `${readyRoot} body::before, ${readyRoot} body::after { ` +
         `content: none !important; display: none !important; background: none !important; }`,
       `${readyRoot} body *:not(${owned}) { display: none !important; }`,
+      `${readyRoot} ${releaseProbe} { ` +
+        `--hdf-v2-cascade-proof: ${nonce} !important; ` +
+        `display: none !important; visibility: hidden !important; ` +
+        `opacity: 0 !important; pointer-events: none !important; }`,
       `${readyRoot} ${owned}${shell} { visibility: hidden !important; }`,
       `${readyRoot} ${owned}.${CLASS.deep}[${ATTR.deep}],`,
       `${readyRoot} ${owned}.${roleClass("title")}[${ATTR.role}="title"],`,
@@ -5844,7 +5693,6 @@
   }
 
   function runtimeGateStyleFailure(styleElement, runtime) {
-    const enginePresence = runtime.engineStylePresence;
     if (!styleElement) return "missing";
     if (!styleElement.isConnected) return "disconnected";
     if (
@@ -5853,14 +5701,6 @@
     if (styleElement.textContent !== runtime.expectedStyleText) return "text";
     if (runtime.expectedStyleRules === null) return "expected-rules";
     if (canonicalRuntimeCssRules(styleElement) !== runtime.expectedStyleRules) return "rules";
-    if (
-      enginePresence &&
-      styleElement.hasAttribute("nonce") !== enginePresence.noncePresent
-    ) return "nonce-presence";
-    if (
-      enginePresence &&
-      styleElement.hasAttribute("data-source") !== enginePresence.dataSourcePresent
-    ) return "data-source-presence";
     return null;
   }
 
@@ -5994,6 +5834,9 @@
       roles: Object.freeze(details.roles || {}),
       layoutAliases: Object.freeze((details.layoutAliases || []).slice()),
       semanticProjectionCount: Number(details.semanticProjectionCount || 0),
+      standaloneCascadeProof: details.standaloneCascadeProof
+        ? Object.freeze({ ...details.standaloneCascadeProof })
+        : null,
       commentControlProjection: details.commentControlProjection
         ? Object.freeze({ ...details.commentControlProjection })
         : null,
@@ -6320,6 +6163,18 @@
     );
     if (!visibleCommentTotal.ok) {
       return { ok: false, role: "comments", reason: "count-evidence-conflict" };
+    }
+    const knownCommentTotal = visibleCommentTotal.count !== null ||
+      seedCommentCount !== null || metadataCommentCount !== null;
+    if (
+      knownCommentTotal &&
+      hasVisibleCommentContinuationControl(commentControls)
+    ) {
+      return {
+        ok: false,
+        role: "comments",
+        reason: "incomplete-comment-control",
+      };
     }
     if (visibleCommentTotal.count !== null) {
       if (commentItems.length !== visibleCommentTotal.count) {
@@ -6738,6 +6593,90 @@
     };
   }
 
+  function subscribeAdoptedStyleSheetMutations(browserRoot, listener) {
+    const prototypes = [
+      browserRoot.Document?.prototype,
+      browserRoot.ShadowRoot?.prototype,
+    ].filter(function uniquePrototype(prototype, index, candidates) {
+      return prototype && candidates.indexOf(prototype) === index;
+    });
+    const records = [];
+    prototypes.forEach(function observeAdoptedStyleSheets(prototype) {
+      let record = ADOPTED_STYLE_SHEET_LISTENERS.get(prototype);
+      if (!record) {
+        const descriptor = Object.getOwnPropertyDescriptor(prototype, "adoptedStyleSheets");
+        if (
+          !descriptor ||
+          typeof descriptor.get !== "function" ||
+          typeof descriptor.set !== "function"
+        ) {
+          return;
+        }
+        const listeners = new Set();
+        try {
+          NATIVE.defineProperty(prototype, "adoptedStyleSheets", {
+            configurable: false,
+            enumerable: descriptor.enumerable === true,
+            get: descriptor.get,
+            set: function hotdealFocusObservedAdoptedStyleSheets() {
+              const result = NATIVE.reflectApply(descriptor.set, this, arguments);
+              listeners.forEach(function reportAdoptedStyleSheetMutation(callback) {
+                callback(this);
+              });
+              return result;
+            },
+          });
+        } catch (_error) {
+          return;
+        }
+        record = { listeners };
+        ADOPTED_STYLE_SHEET_LISTENERS.set(prototype, record);
+      }
+      record.listeners.add(listener);
+      records.push(record);
+    });
+    return function unsubscribeAdoptedStyleSheetMutations() {
+      records.forEach(function removeAdoptedStyleSheetListener(record) {
+        record.listeners.delete(listener);
+      });
+    };
+  }
+
+  function subscribeStyleSheetStateMutations(browserRoot, listener) {
+    const prototype = browserRoot.StyleSheet?.prototype;
+    const descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, "disabled");
+    if (!prototype || !descriptor || typeof descriptor.get !== "function" ||
+        typeof descriptor.set !== "function") {
+      return function noopUnsubscribe() {};
+    }
+    let record = STYLE_SHEET_STATE_LISTENERS.get(prototype);
+    if (!record) {
+      const listeners = new Set();
+      try {
+        NATIVE.defineProperty(prototype, "disabled", {
+          configurable: false,
+          enumerable: descriptor.enumerable === true,
+          get: descriptor.get,
+          set: function hotdealFocusObservedStyleSheetState() {
+            const result = NATIVE.reflectApply(descriptor.set, this, arguments);
+            listeners.forEach(function reportStyleSheetStateMutation(callback) {
+              callback(this);
+            });
+            return result;
+          },
+        });
+      } catch (_error) {
+        return function noopUnsubscribe() {};
+      }
+      record = { listeners };
+      STYLE_SHEET_STATE_LISTENERS.set(prototype, record);
+    }
+    record.listeners.add(listener);
+    return function unsubscribeStyleSheetStateMutations() {
+      record.listeners.delete(listener);
+    };
+  }
+
   function installCascadeGuard(browserRoot, runtime, styleElement) {
     const document = browserRoot.document;
     const pendingElements = new Set();
@@ -6760,6 +6699,107 @@
       if (pendingElements.size > MAX_PENDING_ROOTS) {
         runtime.enterTerminal("cascade-mutation-budget");
       }
+    };
+    const authorizedCommentControlStateMutation =
+      function authorizedCommentControlStateMutation(mutation) {
+        const state = runtime.projectionState;
+        const target = mutation?.target;
+        if (
+          !state ||
+          mutation?.type !== "attributes" ||
+          !COMMENT_CONTROL_STATE_ATTRIBUTES.has(mutation.attributeName) ||
+          target?.nodeType !== 1 ||
+          !state.roles.comments.contains(target)
+        ) {
+          return false;
+        }
+        let candidate = target;
+        while (candidate && state.roles.comments.contains(candidate)) {
+          if (
+            state.commentControlRoots.has(candidate) &&
+            elementMatchesAny(candidate, state.commentControlSelectors)
+          ) {
+            return true;
+          }
+          candidate = candidate.parentElement;
+        }
+        return false;
+      };
+    const authorizedProjectedMarkerClassMutation =
+      function authorizedProjectedMarkerClassMutation(mutation) {
+        const state = runtime.projectionState;
+        const target = mutation?.target;
+        return Boolean(
+          state &&
+          mutation?.type === "attributes" &&
+          mutation.attributeName === "class" &&
+          target?.nodeType === 1 &&
+          state.ownedElements.has(target) &&
+          markerShapeMatches(target, state.expectedMarkerShapes.get(target))
+        );
+      };
+    const nodeIntroducesCascadeSurface = function nodeIntroducesCascadeSurface(node) {
+      if (node?.nodeType !== 1) return false;
+      return node.matches(
+        "style, link[rel~='stylesheet' i], [style], dialog[open], [popover], iframe, object, embed",
+      ) || Boolean(node.querySelector(
+        "style, link[rel~='stylesheet' i], [style], dialog[open], [popover], iframe, object, embed",
+      ));
+    };
+    const deferredAtomicProjectionMutation =
+      function deferredAtomicProjectionMutation(mutation) {
+        const state = runtime.projectionState;
+        const mutationParent = mutation?.target?.nodeType === 1
+          ? mutation.target
+          : mutation?.target?.parentElement;
+        const insideAtomicRole = Boolean(state && mutationParent) &&
+          [state.roles.title, state.roles.body, state.roles.product]
+            .filter(Boolean)
+            .some(function parentIsInsideAtomicRole(roleRoot) {
+              return roleRoot === mutationParent || roleRoot.contains(mutationParent);
+            });
+        if (!insideAtomicRole) return false;
+        if (mutation.type === "characterData") return true;
+        if (mutation.type !== "childList") return false;
+        return [...mutation.addedNodes, ...mutation.removedNodes]
+          .every(function atomicMutationAvoidsCascadeSurface(node) {
+            return !nodeIntroducesCascadeSurface(node);
+          });
+      };
+    const deferredCommentProjectionMutation =
+      function deferredCommentProjectionMutation(mutation) {
+        const state = runtime.projectionState;
+        const mutationParent = mutation?.target?.nodeType === 1
+          ? mutation.target
+          : mutation?.target?.parentElement;
+        if (!state || !mutationParent || !state.roles.comments.contains(mutationParent)) {
+          return false;
+        }
+        if (mutation.type === "characterData") return true;
+        if (mutation.type !== "childList") return false;
+        return [...mutation.addedNodes, ...mutation.removedNodes]
+          .every(function commentMutationAvoidsCascadeSurface(node) {
+            return !nodeIntroducesCascadeSurface(node);
+          });
+      };
+    const authorizedMeasurementMutation = function authorizedMeasurementMutation(mutation) {
+      const html = document.documentElement;
+      const restore = MEASUREMENT_HTML_RESTORES.get(html);
+      if (
+        !restore ||
+        mutation?.type !== "attributes" ||
+        mutation.target !== html
+      ) {
+        return false;
+      }
+      if (mutation.attributeName === ATTR.measure) {
+        return !html.hasAttribute(ATTR.measure);
+      }
+      return mutation.attributeName === "style" &&
+        restore.properties.every(function propertyWasRestored(snapshot) {
+          return html.style.getPropertyValue(snapshot.property) === snapshot.value &&
+            html.style.getPropertyPriority(snapshot.property) === snapshot.priority;
+        });
     };
     const exposesUnowned = function exposesUnowned(elements) {
       return elements.some(function exposedOutsideProjection(element) {
@@ -6851,6 +6891,34 @@
       }
       return true;
     };
+    runtime.verifyUnlockedCascadeRelease = function verifyUnlockedCascadeRelease() {
+      if (
+        runtime.terminallyBlocked ||
+        runtime.releasePhase !== "released" ||
+        !runtime.authorizedReady ||
+        !document.body
+      ) {
+        if (!runtime.terminallyBlocked) runtime.enterTerminal("cascade-unlock-state");
+        return false;
+      }
+      const releaseCandidates = collectBoundedFullScan();
+      if (!releaseCandidates) return false;
+      pendingElements.clear();
+      fullScanRequired = false;
+      if (!runtimeGateStyleIntact(styleElement, runtime)) {
+        runtime.enterTerminal("runtime-style-tamper-unlock");
+        return false;
+      }
+      if (runtime.projectionState && !verifyOwnedState(document, runtime.projectionState)) {
+        runtime.enterTerminal("projection-publisher-invariant");
+        return false;
+      }
+      if (exposesRootPaint() || exposesTopLayer() || exposesUnowned(releaseCandidates)) {
+        runtime.enterTerminal("cascade-visible-leak");
+        return false;
+      }
+      return true;
+    };
     const verifyCascade = function verifyCascade() {
       if (runtime.terminallyBlocked) return false;
       if (!runtimeGateStyleIntact(styleElement, runtime)) {
@@ -6895,6 +6963,44 @@
       return true;
     };
     const observer = createNativeMutationObserver(browserRoot, function keepGateStyleLast(mutations) {
+      const containsMeasurementMutation = mutations.some(authorizedMeasurementMutation);
+      if (
+        mutations.length > 0 &&
+        mutations.every(function authorizedInternalMutation(mutation) {
+          return authorizedProjectedMarkerClassMutation(mutation) ||
+            authorizedCommentControlStateMutation(mutation) ||
+            deferredAtomicProjectionMutation(mutation) ||
+            deferredCommentProjectionMutation(mutation) ||
+            authorizedMeasurementMutation(mutation);
+        })
+      ) {
+        if (containsMeasurementMutation) {
+          MEASUREMENT_HTML_RESTORES.delete(document.documentElement);
+        }
+        return;
+      }
+      if (runtime.releasePhase === "released" && runtime.authorizedReady) {
+        const styleFailure = runtimeGateStyleFailure(styleElement, runtime);
+        if (styleFailure) {
+          runtime.enterTerminal(`runtime-style-tamper-post-ready-${styleFailure}`);
+          return;
+        }
+        const stylesheetMutation = mutations.some(function touchesPublisherStyles(mutation) {
+          return mutation.target?.tagName === "STYLE" ||
+            mutation.target?.tagName === "LINK" ||
+            Array.from(mutation.addedNodes || []).some(function addsPublisherStyles(node) {
+              return node.nodeType === 1 && (
+                node.tagName === "STYLE" ||
+                node.tagName === "LINK" ||
+                node.querySelector("style, link[rel~='stylesheet' i]")
+              );
+            });
+        });
+        runtime.relockForReprojection(
+          stylesheetMutation ? "post-ready-stylesheet" : "post-ready-dom",
+        );
+        return;
+      }
       let stylesheetChanged = false;
       mutations.forEach(function recordCascadeMutation(mutation) {
         if (mutation.type === "attributes") {
@@ -6944,12 +7050,62 @@
       childList: true,
       characterData: true,
       attributes: true,
-      attributeFilter: ["href", "rel", "media", "disabled", "style", "class", "hidden"],
+      attributeFilter: [
+        "href", "rel", "media", "disabled", "style", "class", "hidden", "open", "popover",
+      ],
     });
     runtime.cascadeGuard = observer;
+    runtime.discardCascadeRecords = function discardCascadeRecords() {
+      observer.takeRecords();
+      pendingElements.clear();
+      fullScanRequired = false;
+    };
     runtime.unsubscribeCssom = subscribeCssomMutations(
       browserRoot,
-      function cssomMutationObserved() {
+      function cssomMutationObserved(sheet) {
+        if (runtime.terminallyBlocked) return;
+        if (sheet === styleElement.sheet) {
+          runtime.enterTerminal("runtime-style-tamper-cssom");
+          return;
+        }
+        if (runtime.releasePhase === "released" && runtime.authorizedReady) {
+          runtime.relockForReprojection("post-ready-cssom");
+          return;
+        }
+        fullScanRequired = true;
+      },
+    );
+    runtime.unsubscribeAdoptedStyleSheets = subscribeAdoptedStyleSheetMutations(
+      browserRoot,
+      function adoptedStyleSheetsObserved() {
+        if (runtime.terminallyBlocked) return;
+        if (runtime.releasePhase === "released" && runtime.authorizedReady) {
+          runtime.relockForReprojection("post-ready-adopted-stylesheet");
+          return;
+        }
+        fullScanRequired = true;
+      },
+    );
+    runtime.unsubscribeStyleSheetState = subscribeStyleSheetStateMutations(
+      browserRoot,
+      function styleSheetStateObserved(sheet) {
+        if (runtime.terminallyBlocked) return;
+        if (measurementStyleSheetMutationDepth > 0) {
+          fullScanRequired = true;
+          return;
+        }
+        if (sheet === styleElement.sheet) {
+          if (document.documentElement.hasAttribute(ATTR.measure)) {
+            fullScanRequired = true;
+            return;
+          }
+          runtime.enterTerminal("runtime-style-tamper-sheet-state");
+          return;
+        }
+        if (runtime.releasePhase === "released" && runtime.authorizedReady) {
+          runtime.relockForReprojection("post-ready-stylesheet-state");
+          return;
+        }
         fullScanRequired = true;
       },
     );
@@ -6962,7 +7118,7 @@
     runtime.cascadeFrameId = nativeAnimationFrame(browserRoot, sentinelFrame);
   }
 
-  function proveExtendedCssRelease(
+  function proveStandaloneCascadeRelease(
     browserRoot,
     runtime,
     styleElement,
@@ -6973,15 +7129,21 @@
     if (!document.body || runtime.terminallyBlocked || runtime.releasePending) return false;
     runtime.releasePending = true;
     const probe = document.createElement("div");
-    probe.setAttribute("data-hdf-v2-release-probe", "unowned-inline-important");
+    const proofNonce = runtime.activeNonce;
+    if (!proofNonce) {
+      runtime.releasePending = false;
+      runtime.enterTerminal("standalone-cascade-proof-nonce");
+      return false;
+    }
+    probe.setAttribute("data-hdf-v2-release-probe", proofNonce);
     probe.textContent = "hotdeal-focus-release-probe";
-    const armProbe = function armInlineImportantProbe() {
-      probe.style.setProperty("display", "block", "important");
-      probe.style.setProperty("visibility", "visible", "important");
-      probe.style.setProperty("opacity", "1", "important");
-      probe.style.setProperty("position", "fixed", "important");
-      probe.style.setProperty("inset", "0", "important");
-      probe.style.setProperty("z-index", "2147483647", "important");
+    const armProbe = function armStandaloneCascadeProbe() {
+      probe.style.setProperty("display", "block");
+      probe.style.setProperty("visibility", "visible");
+      probe.style.setProperty("opacity", "1");
+      probe.style.setProperty("position", "fixed");
+      probe.style.setProperty("inset", "0");
+      probe.style.setProperty("z-index", "2147483647");
     };
     const discardProbe = function discardReleaseProbe() {
       if (probe.isConnected) probe.remove();
@@ -6997,41 +7159,47 @@
     document.body.appendChild(probe);
     runtime.releaseProbe = probe;
     let provedFrames = 0;
-    const sample = function sampleExtendedCssCallback() {
+    const sample = function sampleStandaloneCascade() {
       runtime.releaseProofFrameId = 0;
       if (runtime.terminallyBlocked) {
         discardProbe();
         return;
       }
-      const enginePresence = Object.freeze({
-        noncePresent: styleElement.hasAttribute("nonce"),
-        dataSourcePresent: styleElement.hasAttribute("data-source"),
-      });
       const computed = nativeComputedStyle(browserRoot, probe);
-      const callbackApplied = probe.style.getPropertyValue("display") === "none" &&
-        probe.style.getPropertyPriority("display") === "important";
-      const hidden = Boolean(computed) && (
-        computed.display === "none" ||
-        computed.visibility === "hidden" ||
-        Number(computed.opacity) === 0
-      );
+      const inlineStateIntact = probe.style.getPropertyValue("display") === "block" &&
+        probe.style.getPropertyPriority("display") === "" &&
+        probe.style.getPropertyValue("visibility") === "visible" &&
+        probe.style.getPropertyPriority("visibility") === "" &&
+        probe.style.getPropertyValue("opacity") === "1" &&
+        probe.style.getPropertyPriority("opacity") === "";
+      const nonceBoundRuleApplied = Boolean(computed) &&
+        computed.getPropertyValue("--hdf-v2-cascade-proof").trim() === proofNonce;
+      const hidden = Boolean(computed) &&
+        computed.display === "none" &&
+        computed.visibility === "hidden" &&
+        Number(computed.opacity) === 0 &&
+        probe.getClientRects().length === 0;
       if (
-        !enginePresence.noncePresent ||
-        !enginePresence.dataSourcePresent ||
-        !callbackApplied ||
+        !inlineStateIntact ||
+        !nonceBoundRuleApplied ||
         !hidden ||
         !runtimeGateStyleIntact(styleElement, runtime)
       ) {
-        reject("extended-css-release-proof");
+        reject("standalone-cascade-release-proof");
         return;
       }
       provedFrames += 1;
-      if (provedFrames < RELEASE_PROOF_FRAMES) {
+      if (provedFrames < CASCADE_PROOF_FRAMES) {
         armProbe();
         runtime.releaseProofFrameId = nativeAnimationFrame(browserRoot, sample);
         return;
       }
-      runtime.engineStylePresence = enginePresence;
+      runtime.standaloneCascadeProof = Object.freeze({
+        authority: "userscript-runtime-style",
+        frameCount: provedFrames,
+        nonceBound: true,
+        unownedHidden: true,
+      });
       discardProbe();
       if (
         !runtimeGateStyleIntact(styleElement, runtime) ||
@@ -7071,15 +7239,6 @@
       "data-src",
       "data-srcset",
       "class",
-      "style",
-    ]);
-    const controlStateAttributes = new Set([
-      "class",
-      "hidden",
-      "aria-expanded",
-      "aria-pressed",
-      "aria-selected",
-      "aria-hidden",
       "style",
     ]);
     const trackedRoots = function trackedRoots(rootSet) {
@@ -7288,6 +7447,12 @@
       return "non-item";
     };
     const observer = createNativeMutationObserver(browserRoot, function sealProjection(mutations) {
+      if (runtime.releasePhase !== "released" || !runtime.authorizedReady) {
+        return;
+      }
+      if (runtime.terminallyBlocked) {
+        return;
+      }
       let failureReason = null;
       let projectionTouched = false;
       let commentProjectionChanged = false;
@@ -7341,7 +7506,7 @@
             : null;
           if (
             controlRoot &&
-            controlStateAttributes.has(name) &&
+            COMMENT_CONTROL_STATE_ATTRIBUTES.has(name) &&
             elementMatchesAny(controlRoot, state.commentControlSelectors)
           ) {
             commentProjectionChanged = true;
@@ -7599,15 +7764,6 @@
         runtime.unsubscribeShadow = null;
       };
     }
-    const projectionContains = function projectionContains(node) {
-      return Boolean(node) && ["title", "body", "comments", "product"].some(
-        function nodeInsideRole(role) {
-          const root = state.roles[role];
-          if (role === "title") return insideOwnedTitleSurface(node);
-          return root && (root === node || root.contains(node));
-        }
-      );
-    };
     if (typeof NATIVE.addEventListener === "function" && typeof NATIVE.removeEventListener === "function") {
       const subscriptions = [];
       const subscribe = function subscribe(target, type, listener) {
@@ -7617,16 +7773,15 @@
       const rejectOpeningPopover = function rejectOpeningPopover(event) {
         const target = event.target;
         if (
-          target?.matches?.("[popover]") &&
-          projectionContains(target) &&
-          (event.newState === "open" || activePopover(target))
+          target?.matches?.("[popover], dialog") &&
+          (event.newState === "open" || activePopover(target) || target.open === true)
         ) {
-          terminalBlock("top-layer-activation");
+          runtime.enterTerminal("role-projection-top-layer-activation");
         }
       };
       const rejectProjectedFullscreen = function rejectProjectedFullscreen() {
-        if (projectionContains(document.fullscreenElement)) {
-          terminalBlock("top-layer-activation");
+        if (document.fullscreenElement) {
+          runtime.enterTerminal("role-projection-top-layer-activation");
         }
       };
       subscribe(document, "beforetoggle", rejectOpeningPopover);
@@ -7664,6 +7819,8 @@
       cascadeGuard: null,
       cascadeFrameId: 0,
       unsubscribeCssom: null,
+      unsubscribeAdoptedStyleSheets: null,
+      unsubscribeStyleSheetState: null,
       unsubscribeShadow: null,
       unsubscribeProjectionEvents: null,
       projectionState: null,
@@ -7673,9 +7830,9 @@
       authorizedReady: false,
       releasePhase: "discovering",
       releasePending: false,
+      reprojectionReason: null,
       releaseProofFrameId: 0,
       releaseProbe: null,
-      engineStylePresence: null,
       expectedStyleText: styleElement.textContent,
       expectedStyleRules: canonicalRuntimeCssRules(styleElement),
       terminallyBlocked: false,
@@ -7683,9 +7840,13 @@
       beginDiscovery: null,
       stop: null,
       enterTerminal: null,
+      relockForReprojection: null,
+      discardCascadeRecords: null,
       prepareCascadeRelease: null,
       verifyCascadeRelease: null,
+      verifyUnlockedCascadeRelease: null,
       readyDiagnostics: null,
+      standaloneCascadeProof: null,
       publishReadyProjectionDiagnostics: null,
     };
 
@@ -7710,6 +7871,7 @@
       }
       publishDiagnostics(browserRoot, {
         ...runtime.readyDiagnostics,
+        standaloneCascadeProof: runtime.standaloneCascadeProof,
         commentControlProjection,
       });
       return true;
@@ -7723,6 +7885,7 @@
       runtime.releasePhase = "terminal";
       runtime.releasePending = false;
       runtime.activeNonce = null;
+      runtime.standaloneCascadeProof = null;
       runtime.projectionState = null;
       runtime.readyDiagnostics = null;
       [
@@ -7754,6 +7917,14 @@
         runtime.unsubscribeCssom();
         runtime.unsubscribeCssom = null;
       }
+      if (runtime.unsubscribeAdoptedStyleSheets) {
+        runtime.unsubscribeAdoptedStyleSheets();
+        runtime.unsubscribeAdoptedStyleSheets = null;
+      }
+      if (runtime.unsubscribeStyleSheetState) {
+        runtime.unsubscribeStyleSheetState();
+        runtime.unsubscribeStyleSheetState = null;
+      }
       if (runtime.unsubscribeShadow) runtime.unsubscribeShadow();
       if (runtime.unsubscribeProjectionEvents) runtime.unsubscribeProjectionEvents();
       document.documentElement.classList.add(CLASS.lock);
@@ -7775,6 +7946,49 @@
       });
     };
 
+    runtime.relockForReprojection = function relockForReprojection(reason) {
+      if (runtime.terminallyBlocked || runtime.releasePhase !== "released") {
+        return false;
+      }
+      runtime.releasePhase = "relocking";
+      runtime.authorizedReady = false;
+      runtime.releasePending = false;
+      runtime.reprojectionReason = reason || "reprojection";
+      if (runtime.integrityObserver) {
+        runtime.integrityObserver.disconnect();
+        runtime.integrityObserver = null;
+      }
+      if (runtime.unsubscribeShadow) runtime.unsubscribeShadow();
+      if (runtime.unsubscribeProjectionEvents) runtime.unsubscribeProjectionEvents();
+      document.documentElement.classList.add(CLASS.lock);
+      document.documentElement.setAttribute(ATTR.lock, "1");
+      writeRuntimeGateStyle(styleElement, null, runtime);
+      (document.head || document.documentElement).appendChild(styleElement);
+      clearProtocolState(document);
+      document.documentElement.classList.add(CLASS.lock);
+      document.documentElement.setAttribute(ATTR.lock, "1");
+      document.documentElement.setAttribute(ATTR.state, "locked");
+      document.documentElement.setAttribute(
+        ATTR.status,
+        `locked-${reason || "reprojection"}`.slice(0, 96),
+      );
+      runtime.activeNonce = null;
+      runtime.projectionState = null;
+      runtime.readyDiagnostics = null;
+      runtime.standaloneCascadeProof = null;
+      runtime.bootstrapLock = claimBootstrapLock(document, false);
+      if (!runtime.bootstrapLock) {
+        runtime.enterTerminal("bootstrap-relock-unavailable");
+        return false;
+      }
+      publishDiagnostics(browserRoot, {
+        state: "locked",
+        targetReason: reason || "reprojection",
+      });
+      runtime.beginDiscovery();
+      return true;
+    };
+
     function attemptResolution() {
       runtime.attemptScheduled = false;
       if (runtime.releasePending || runtime.authorizedReady || runtime.terminallyBlocked) {
@@ -7785,6 +7999,10 @@
       }
       const resolution = resolveDocument(document, layouts, seed);
       if (!resolution.ok) {
+        if (runtime.reprojectionReason) {
+          runtime.enterTerminal("projection-publisher-invariant");
+          return false;
+        }
         document.documentElement.setAttribute(ATTR.state, "blocked");
         document.documentElement.setAttribute(
           ATTR.status,
@@ -7819,6 +8037,10 @@
       runtime.projectionState = state;
       writeRuntimeGateStyle(styleElement, nonce, runtime);
       if (!verifyOwnedState(document, state)) {
+        if (runtime.reprojectionReason) {
+          runtime.enterTerminal("projection-publisher-invariant");
+          return false;
+        }
         runtime.activeNonce = null;
         runtime.projectionState = null;
         writeRuntimeGateStyle(styleElement, null, runtime);
@@ -7861,7 +8083,7 @@
         layoutAliases: resolution.layoutAliases,
         semanticProjectionCount: resolution.semanticProjectionCount,
       });
-      return proveExtendedCssRelease(
+      return proveStandaloneCascadeRelease(
         browserRoot,
         runtime,
         styleElement,
@@ -7879,7 +8101,9 @@
           }
           document.documentElement.removeAttribute(ATTR.lock);
           document.documentElement.classList.remove(CLASS.lock);
+          if (!runtime.verifyUnlockedCascadeRelease()) return;
           installIntegrityObserver(browserRoot, runtime, state, styleElement);
+          runtime.discardCascadeRecords?.();
           if (typeof onReady === "function") onReady(resolution);
         },
       );
@@ -7902,7 +8126,12 @@
         return;
       }
       runtime.discoveryObserver = createNativeMutationObserver(browserRoot, scheduleAttempt);
-      runtime.discoveryObserver.observe(document, { subtree: true, childList: true });
+      runtime.discoveryObserver.observe(document, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+      });
       scheduleAttempt();
     };
     runtime.stop = function stopRuntime() {
@@ -7936,6 +8165,14 @@
         runtime.unsubscribeCssom();
         runtime.unsubscribeCssom = null;
       }
+      if (runtime.unsubscribeAdoptedStyleSheets) {
+        runtime.unsubscribeAdoptedStyleSheets();
+        runtime.unsubscribeAdoptedStyleSheets = null;
+      }
+      if (runtime.unsubscribeStyleSheetState) {
+        runtime.unsubscribeStyleSheetState();
+        runtime.unsubscribeStyleSheetState = null;
+      }
       if (runtime.unsubscribeShadow) runtime.unsubscribeShadow();
       if (runtime.unsubscribeProjectionEvents) runtime.unsubscribeProjectionEvents();
     };
@@ -7963,7 +8200,6 @@
 
   function installNavigationRevalidation(browserRoot, revalidate) {
     const history = browserRoot.history;
-    let installed = true;
     ["pushState", "replaceState"].forEach(function wrapHistoryMethod(methodName) {
       const original = browserRoot === RUNTIME_GLOBAL
         ? methodName === "pushState"
@@ -7971,7 +8207,6 @@
           : NATIVE.historyReplaceState
         : history[methodName];
       if (typeof original !== "function") {
-        installed = false;
         return;
       }
       const wrapper = function hotdealFocusHistoryWrapper() {
@@ -7987,20 +8222,22 @@
           value: wrapper,
         });
       } catch (_error) {
-        installed = false;
+        // The userscript-manager urlchange event remains the authoritative SPA trigger.
       }
     });
     const addEventListener = browserRoot === RUNTIME_GLOBAL
       ? NATIVE.addEventListener
       : browserRoot.EventTarget?.prototype?.addEventListener;
     if (typeof addEventListener !== "function") return false;
+    NATIVE.reflectApply(addEventListener, browserRoot, ["urlchange", revalidate, true]);
+    NATIVE.reflectApply(addEventListener, browserRoot, ["hashchange", revalidate, true]);
     NATIVE.reflectApply(addEventListener, browserRoot, ["popstate", revalidate, true]);
     NATIVE.reflectApply(addEventListener, browserRoot, ["pageshow", function revalidateRestoredPage(event) {
       if (event.persisted === true) {
         revalidate();
       }
     }, true]);
-    return installed;
+    return true;
   }
 
   function start(browserRoot) {
@@ -8015,6 +8252,7 @@
     if (!contract) {
       return { mode: "out-of-scope" };
     }
+    clearPublicSeedFragment(browserRoot);
     const document = browserRoot.document;
     lockWhenHtmlExists(document, function configureTarget(html, initialBootstrapLock) {
       if (!initialBootstrapLock) {
@@ -8109,6 +8347,8 @@
             currentArticleIdentity !== expectedArticleIdentity
           ) {
             terminalNavigationBlock("navigation-identity");
+          } else if (activeRuntime) {
+            activeRuntime.relockForReprojection("same-article-navigation");
           }
           return;
         }

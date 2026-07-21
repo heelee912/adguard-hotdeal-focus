@@ -2,79 +2,64 @@
 
 [한국어](#한국어) · [English](#english) · [日本語](#日本語) · [简体中文](#简体中文)
 
-AdGuard Hotdeal Focus는 Algumon에서 핫딜 글로 이동했을 때 제목, 상품·구매 정보, 본문, 댓글·답글만 원래 DOM 그대로 남기는 fail-closed 리더 게이트입니다. 대상은 클리앙, 뽐뿌(PC/모바일), 루리웹, 퀘이사존, 어미새, ZOD, 아카라이브입니다.
-
 ## 한국어
 
-### 설치: URL 두 개가 모두 필요합니다
+AdGuard Hotdeal Focus는 알구몬에서 핫딜 글로 이동했을 때 **제목, 구매 정보, 본문, 전체 댓글과 답글만 원래 DOM 그대로 남기는** fail-closed 리더 게이트입니다. 광고, 헤더, 푸터, 사이드바, 인기글, 추천글, 다른 게시물, 회원 위젯 등 나머지는 모두 공개하지 않습니다.
 
-다음 두 URL을 설치하십시오.
+지원 대상은 PC·모바일의 클리앙, 뽐뿌, 루리웹, 퀘이사존, 어미새, ZOD, 아카라이브입니다.
 
-1. AdGuard 사용자 정의 필터:
+### 설치 — URL 하나
 
-   `https://github.com/heelee912/adguard-hotdeal-focus/releases/download/gate-v2.0.2/filter.txt`
+AdGuard의 **확장 프로그램 / Userscripts / URL로 추가**에서 다음 URL 하나만 설치하고 활성화하십시오.
 
-2. AdGuard 확장(Userscript):
+```text
+https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
+```
 
-   `https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js`
+사용자 필터나 별도 사용자 규칙은 필요하지 않습니다. `filter.txt`, `filter-static.txt`, 과거 `gate-v2.0.2` URL은 설치하지 마십시오. `gate-v2.0.2`는 구버전 구독자를 깨뜨리지 않기 위해 원격에만 보존된 레거시 증거이며 현재 릴리스·업데이트·검증 권위가 아닙니다.
 
-선택 진단용 Userscript는 `https://raw.githubusercontent.com/heelee912/adguard-hotdeal-focus/main/scripts/csp-probe.user.js`에 공개되어 있습니다. 일반 설치에는 필요하지 않습니다. Windows CLI의 `adguard csp-probe`는 이 SHA-256 고정 파일을 공식 AdGuard strict-CSP 시험 페이지에 일시 설치하고 브라우저 주입을 증명한 뒤, 설치 전 Userscript 상태를 정확히 복원합니다.
+구버전 Hotdeal Focus 규칙을 이미 쓰고 있다면 새 Userscript를 먼저 검증한 뒤 그 **7개 대상 전용 구버전 규칙만** 비활성화하거나 제거하십시오. 두 방식을 함께 실행하면 과거 CSS·scriptlet이 본문과 댓글을 다시 훼손할 수 있습니다. 새 설치에는 Userscript 외 항목이 없습니다.
 
-AdGuard에서 첫 URL은 **필터 → 사용자 정의 필터 → URL로 추가**, 두 번째 URL은 **확장/Userscripts → URL로 추가**에 등록합니다. 사용자 정의 필터는 **활성화 및 Trusted(신뢰함)**, Userscript는 **활성화** 상태인지 반드시 확인하십시오. Windows, macOS, Android 등 `#?#` ExtendedCSS와 Userscript 확장을 지원하는 AdGuard 제품이 대상입니다. 기존에 같은 목적의 User rules가 있다면 백업 후 비활성화하여 충돌을 막으십시오.
+AdGuard 공식 문서는 Windows·Android·Mac의 Userscript, `@downloadURL`, `@updateURL`, `GM_addElement`, `window.onurlchange` 지원과 URL 설치 방식을 설명합니다: [AdGuard Extensions](https://adguard.com/kb/general/extensions/).
 
-`filter-static.txt`는 DOM 분석과 회귀 비교용입니다. 기본 필터로 구독하지 마십시오.
+Userscript의 `@downloadURL`과 `@updateURL`은 위 설치 URL과 동일합니다. 기기가 켜진 뒤 AdGuard가 확장 업데이트를 확인하면 더 높은 `@version`을 자동으로 받습니다.
 
-Windows에서는 저장소의 재현 가능한 CLI로 백업·설치·사후 검증을 한 번에 수행할 수도 있습니다. 관리자 PowerShell에서 아래처럼 공개 매니페스트의 **정확한 설치용 해시 필드**를 넘기십시오. `sha256`은 내려받은 필터 원본, `canonicalTextSha256`은 줄바꿈을 정규화한 Userscript, `installedRulesSha256`은 AdGuard에 전달할 비주석 규칙 91개의 순서를 각각 고정합니다.
+알구몬 광고를 DNS에서 살리고 다른 사이트에서는 계속 차단하려면 [ALGUMON_ADS_NETWORK_POLICY.md](ALGUMON_ADS_NETWORK_POLICY.md)를 따르십시오. NextDNS의 전역 DNS 허용과 $domain=algumon.com AdGuard 웹 예외를 의도적으로 분리하며, Reader Gate 설치 항목을 늘리지 않습니다.
+
+### 동작 원리
+
+- `document-start`에서 페이지 전체를 먼저 잠가 초기 노출을 막습니다.
+- 알구몬의 서명된 relay 응답, 공개 단기 seed, 현재 글 ID·제목·메타데이터를 함께 검증하며 seed 하나만 신뢰하지 않습니다.
+- 사이트·경로·레이아웃 variant 하나가 정확히 결정되고 제목·구매정보·본문·댓글 경계가 완전할 때만 해당 원본 노드를 공개합니다.
+- 댓글 mount 안의 의미 있는 모든 노드는 댓글/답글, 허용된 조작부, 숨김 chrome 중 하나로 완전히 분류되어야 합니다.
+- DOM, CSSOM, shadow DOM, top layer, pseudo-content 또는 SPA URL이 바뀌면 다시 검증합니다. 불명확하거나 변조되면 같은 task에서 즉시 전체를 다시 잠급니다.
+- 휴리스틱 fallback이나 부분 공개는 없습니다. 모르면 빈 화면으로 닫힙니다.
+
+### PC가 꺼져 있어도 자동 대응
+
+GitHub Actions가 매주 월요일 03:17 KST(일요일 18:17 UTC)에 알구몬의 정확한 7개 사이트 inventory를 한 번만 다시 수집합니다. 이 원본 수집은 global inventory 1회, 사이트 문서 7회, 사이트별 서명 relay 3회로 **최대 29회 시작**하도록 하드 캡이 걸려 있습니다. 후보 증명과 승격 재검증은 봉인된 source snapshot만 재사용하므로 알구몬을 다시 방문하지 않으며, 워크플로가 자기 자신을 재호출하지도 않습니다. 공유 레이아웃은 PC와 모바일 각각 최신 relay 표본 3개 이상이 동일한 semantic shape를 증명해야 승격됩니다. 후보는 과거 fixture, 현재 live DOM, zero-leak, 변조, 네트워크 충실도 테스트를 통과한 뒤에만 one-parent fast-forward 커밋으로 `main`에 승격됩니다.
+
+Pages 배포 전에는 현재 공개 버전보다 낮거나 같은 버전의 다른 바이트를 거부합니다. 배포 후에는 cache-busting HTTPS 요청으로 실제 Userscript와 manifest 바이트가 예상 SHA-256과 같아질 때까지 확인합니다. PC가 꺼져 있어도 이 감지·검증·승격·배포는 GitHub에서 계속됩니다.
+
+### Windows 자동 설치·검증
+
+관리자 PowerShell에서 저장소 CLI를 실행하면 공개 manifest의 해시를 검증하고 Userscript 하나만 백업 가능한 transaction으로 설치합니다. 일반 User filter와 모든 비대상 필터 구독은 읽기 전·후 바이트/규칙 해시가 같아야 성공합니다.
 
 ```powershell
 $releaseBase = 'https://heelee912.github.io/adguard-hotdeal-focus'
 $manifest = Invoke-RestMethod "$releaseBase/release-manifest.json"
 .\scripts\adguard_windows_cli.ps1 deploy `
-  -UserscriptSource "$releaseBase/hotdeal-focus.user.js" `
-  -FilterUrl $manifest.filterSubscriptionUrl `
+  -UserscriptSource $manifest.installUrl `
   -ReleaseManifestSource "$releaseBase/release-manifest.json" `
   -ExpectedUserscriptSha256 $manifest.artifacts.'hotdeal-focus.user.js'.canonicalTextSha256 `
-  -ExpectedFilterSha256 $manifest.artifacts.'filter.txt'.sha256 `
-  -ExpectedInstalledFilterRulesSha256 $manifest.artifacts.'filter.txt'.installedRulesSha256 `
-  -ApproveExclusiveTargetMigration `
   -Apply
 ```
 
-`-ApproveExclusiveTargetMigration`은 현재의 안정적인 API snapshot에서 **7개 대상 도메인에만 적용되는 모든** cosmetic/ExtendedCSS/CSS-injection/scriptlet 규칙을 비활성화해도 된다는 별도 승인입니다. 도메인 scope만으로 그 규칙이 이 프로젝트의 구형 필터였다는 출처까지 증명되지는 않습니다. 먼저 `migrate-legacy -WhatIf`의 plaintext 없는 인덱스·SHA-256 계획을 검토하고, 이 승인이 맞을 때만 switch를 사용하십시오. 규칙은 삭제되지 않고 backup과 transaction delta로 복구할 수 있습니다.
+JSON-only 통합 CLI와 복구 명령은 [CLI.md](CLI.md), 경계와 자동 승격 설계는 [ARCHITECTURE.md](ARCHITECTURE.md)를 참고하십시오.
 
-### 왜 필터와 Userscript가 모두 필요한가
+### 개발과 검증
 
-- `filter.txt`는 7개 대상 도메인 전체를 즉시 잠급니다. 목록·홈·미승인 경로도 기본값은 빈 화면이며, 정확한 프로토콜 버전과 ready 마커가 없으면 계속 숨깁니다.
-- Userscript는 `document-start`에 실행되어 승인된 사이트 레이아웃 하나를 원자적으로 확인합니다.
-- 승인된 variant 하나만 경로에 맞고, 그 variant의 page root·제목·본문·댓글 mount와 해당 사이트에서 별도 영역인 구매정보가 각각 허용된 cardinality·포함관계·문서 순서를 만족해야 열립니다. 별도 구매영역이 없는 글은 본문 안의 구매 링크를 그대로 보존하며 정상 글을 오탐 차단하지 않습니다. 런타임은 점수나 추정 fallback을 사용하지 않습니다.
-- 댓글 mount 안의 모든 의미 있는 내용은 기존 댓글 item, 승인된 control, 또는 명시적으로 숨길 comment chrome(`ignored`)으로 전부 분류되어야 합니다. `ignored`는 분류에는 참여하지만 keep 마커를 절대 받지 않습니다. 승인된 item selector와 정확히 일치하는 새 댓글·답글은 원래 노드와 그 하위 미디어·서식을 그대로 보존하고 검증된 개수를 단조 증가시킵니다. 새 형태 답글이 하나라도 섞이면 일부 댓글만 보여주지 않고 전체를 잠급니다.
-- 의미 점수는 CI에서 새 candidate를 발견하는 감사 oracle로만 쓰이며 공개 런타임의 승인 근거가 아닙니다.
-- 새 광고·추천·사이드바는 keep 마커가 없으므로 자동으로 사라집니다. 승인 후에는 정확히 분류된 새 댓글·답글과 허용된 lazy-media 속성만 수용합니다. 댓글 삭제, stale·분리 배치의 총개수 변경, 또는 그 밖의 의미 있는 DOM/텍스트/식별 속성 변경은 같은 문서에서는 다시 열지 않는 terminal lock으로 전환합니다.
-- 원래 제목·본문·댓글 노드와 텍스트를 복제하거나 교체하지 않습니다. shell 가시성, role/deep 마커만으로 직접 텍스트와 pseudo-content 누출을 막습니다.
-
-Algumon에서는 사용자가 현재 카드의 정확한 signed `/l/d/<id>?v=…&t=…` 링크를 작동시킨 그 순간에만 같은 출처로 한 번 가져옵니다. 응답이 `200`이고, 문서 전체가 허용된 단일 redirect script와 동일 URL의 단일 anchor만 가지며, 최종 HTTPS host가 그 카드의 정확한 사이트 allowlist와 일치할 때에만 relay를 우회해 최종 URL로 이동합니다. 일반 클릭, `_blank`, Ctrl/Cmd/Shift-click, 중클릭, Enter를 같은 검증 경로로 처리합니다. fetch·응답 구조·URL·팝업 검증 중 하나라도 실패하면 새 창을 닫고 Algumon에 그대로 남으며 다른 전달 경로로 추측하지 않습니다.
-
-검증된 최종 URL에는 사이트 유형, 글 ID, 제목, 명시적으로 존재할 때만 원문 댓글 수, 시각을 담은 최대 1KB·10분의 base64url fragment를 붙입니다. fragment는 서버로 전송되지 않고 대상 문서가 `document-start`에 즉시 제거합니다. `window.name`과 referrer는 권한 근거로 사용하지 않습니다. 목적지에서는 seed 글 ID·현재 URL 글 ID·제목 core·원문 article metadata·전체 DOM 계약이 모두 맞아야 열리며, seed 하나만으로는 절대 충분하지 않습니다. 본문·댓글·계정·쿠키·토큰은 수집하거나 저장하지 않습니다.
-
-과거 User rules가 23줄인지 170줄인지 여부는 새 시스템의 커버리지 지표가 아닙니다. 구형 규칙은 정확히 일치하는 항목만 마이그레이션·회귀 목록으로 사용합니다. 공개 `filter.txt`는 7개 도메인 각각에 class·attribute 이중 마커, top-layer·backdrop·pseudo-content 방어를 포함한 13개씩, 총 91개의 결정론적 fail-closed 잠금 규칙을 가지며, 실제 사이트별 의미 계약과 자동 적응은 Userscript·검증 설정·GitHub 증거에 있습니다.
-
-91개 잠금 규칙은 GitHub의 불변 `gate-v2.0.2` 릴리스 자산입니다. 일반 의미 릴리스가 올라가도 이 바이트와 구독 URL은 바뀌지 않으며, Pages의 `filter.txt`는 검증용 미러일 뿐 설치 기준이 아닙니다. 사이트 DOM 변경은 Pages의 Userscript와 승인 상태만 더 높은 의미 버전으로 갱신합니다. 프로토콜 1 자산은 롤백 증거로만 그대로 보존되며 v2 설치·검증의 호환 경로나 fallback으로 허용되지 않습니다. 공개 설치·배포에는 저장소의 Python CLI가 GitHub 불변 릴리스와 자산 증명을 먼저 확인한 뒤 내부 PowerShell 배포기를 호출하는 경로를 권장합니다.
-
-### PC가 꺼져 있어도 동작하는 자동화
-
-GitHub Actions가 클라우드에서 6시간마다 라이브 DOM과 적용 가능한 PC/모바일 계약을 검사합니다. 로컬 데몬이나 켜진 PC가 필요 없습니다. 먼저 알구몬의 사이트 드롭다운이 현재 7개 설정과 정확히 같은 집합인지 검증하며, 하나라도 추가·누락되면 relay target과 candidate를 모두 0으로 만듭니다. 새 구조는 먼저 배포 불가 draft bundle과 base commit·audit report·순서·fingerprint·draft SHA-256을 묶은 canonical queue manifest를 고정합니다. 전체 queue는 그대로 서명하되 한 실행의 matrix는 `github.run_number`에 결합된 8개 circular batch로 제한하여 작업 시간을 고정하고, 연속 실행이 남은 후보를 유한 횟수 안에 모두 선택합니다. 후보별 검증은 독립 matrix job으로 실행되므로 한 후보의 timeout이 뒤 후보를 굶기지 않습니다. 집계기는 누락·미실행 결과를 queue에 결합된 `infrastructure-missing` 비승인 상태로 명시적으로 완성해 현재 batch의 proven 후보 검증을 계속하되, 추가·중복·변조 artifact가 하나라도 있으면 전체 승격을 차단합니다. 그 뒤 queue 순서상 첫 proven 후보 하나만 원자적으로 승격합니다.
-
-고정 sample은 직접 방문이 계속 빈 화면인지 확인하는 `direct-negative` 전용이고, 실제 읽기 검증은 매 글·프로필 직전에 같은 Algumon deal ID의 5분 이내 signed URL을 다시 취득한 `relay-positive`에서만 수행합니다. CI 의미 오라클은 제목·구매정보·본문·댓글을 각각 따로 추측하지 않고 완전한 `ProjectionTuple` 조합을 제한된 수만큼 전수 검사합니다. 서로 떨어진 복제 조합, 동점, 본문 노이즈, 누락 댓글, 예산 초과는 모두 후보 0입니다. Playwright 버전과 실제 Chromium 지문이 다르면 실행을 거부하며, CAPTCHA/WAF/HTTP 차단 페이지는 DOM 변경 후보가 아니라 source/infrastructure 실패로 분리합니다. 허용된 challenge subresource와 검증된 1회용 메모리 쿠키 lease 외에는 우회 경로가 없고, 실패 시 릴리스는 바뀌지 않습니다.
-
-그 정확한 candidate 바이트로 profile별 서로 다른 글 3개 이상과 fixture를 다시 검증합니다. Algumon·JSON-LD 댓글 수는 획득 뒤 새 답글이 생길 수 있으므로 엄격한 하한으로만 사용하고 DOM 항목이 그보다 적으면 차단합니다. 같은 댓글 shell의 시각적 총계만 정확한 전체 수로 취급합니다. Algumon이 수를 제공하지 않으면 값을 꾸며내지 않고, 동일한 댓글 mount/item selector와 최소 2개 nonempty 표본 또는 3개 exact-empty 증거를 요구합니다. 누출 0, 기존 노출 증가 없음, selector 안정성 1, 단일 semantic projection, 다른 projection co-match 0을 모두 만족한 proven 증거만 더 높은 버전으로 자동 승격합니다. 정상 실행은 작은 JSON/hash 증거만 남기고 screenshot은 실패·후보 증명에만 용량 상한과 짧은 보존기간을 적용합니다. 자동 커밋은 저장소 변수 `ENABLE_STATE_COMMITS=true`, Pages 배포는 `ENABLE_PAGES_PUBLISH=true`로 명시적으로 활성화합니다.
-
-초기 GitHub 설정도 GUI에 의존하지 않습니다. `python scripts/hotdeal_focus_cli.py cloud configure --repo heelee912/adguard-hotdeal-focus --workflow verify.yml --source-ref <clean-default-head-SHA> --apply --json --evidence-dir outputs/cloud-configure-001`은 전체 SHA, 세 workflow blob, GitHub Actions integration `15368`의 정확한 `verify` job/check를 먼저 증명하고 각 mutation 직전에 같은 head를 다시 빌립니다. `hdf-release-publisher`, `hdf-main-automation`, `github-pages`는 정확히 기본 브랜치만 허용합니다. Workflow dispatch는 nonce·path·head·event·display title이 모두 맞는 새 run만 자신의 실행으로 귀속합니다.
-
-네 개의 ruleset 중 두 개는 `refs/tags/gate-v2.0.2`만 대상으로 합니다. 생성 ruleset은 저장소의 유일한 write Deploy Key만 우회할 수 있고, 별도 동결 ruleset은 우회 주체 없이 수정·삭제를 금지합니다. 자동화 개인키는 저장소 secret이 아니라 `hdf-main-automation` 환경 secret에만 있으며, live Chromium 증명 job과 secret-bearing push job은 서로 다른 fresh runner입니다. local gate publish는 직접 쓰지 않고 `hdf-release-publisher`의 main-only 배포 기록 체크포인트를 거칩니다. 이어지는 `hdf-main-automation` runner는 개인키를 읽기 전에 immutable-release 정책, 기존 릴리스/드래프트, 태그 상태와 remote head를 읽기 전용 preflight로 검증합니다. 태그 생성은 전용 키로 딱 한 번만 수행하며, 정확히 동결된 태그가 관찰된 순간을 commit point로 삼습니다. 그 뒤 main이 전진하거나 최초 릴리스 시도가 중단돼도 금지된 태그 이동·삭제 없이 해당 태그의 고정 source와 filter bytes를 다시 증명해 릴리스를 완결합니다.
-
-### 빌드와 검증
-
-Python 3.10+와 Node.js 20+를 사용합니다.
+Python 3.10+, Node.js 20+가 필요합니다.
 
 ```bash
 npm ci --ignore-scripts --no-audit --no-fund
@@ -84,164 +69,65 @@ npm run verify
 npm run test:behavior
 ```
 
-에이전트용 JSON-only 통합 CLI로 위 검증, GitHub Actions 실행·증거 다운로드, Windows AdGuard 배포·롤백을 GUI 없이 재현할 수 있습니다. 명령 계약과 종료 코드는 [CLI.md](CLI.md)에 있습니다.
-
-단일 빌드는 저장소 루트의 `filter.txt`, 분석용 `filter-static.txt`, `release-manifest.json`을 결정론적으로 생성합니다. 공개 artifact 해시는 필터와 Userscript만 포함하고, 설정·fixture·분석 필터는 별도 `sourceIntegrity`로 고정합니다.
-
-검증된 새 variant는 루트 릴리스를 직접 수정하지 않고 격리 출력으로 만듭니다.
-
-```bash
-state_args=()
-if [[ -f state/approved-variants.json ]]; then
-  state_args=(--merge-approved-state state/approved-variants.json)
-fi
-python scripts/build_filter.py \
-  --candidate-draft discovered.json \
-  --output-dir candidate-draft \
-  "${state_args[@]}"
-# candidate-draft의 실제 실행 증거로 proven.json을 만든 뒤
-python scripts/build_filter.py \
-  --candidate proven.json \
-  --output-dir candidate-release \
-  "${state_args[@]}"
-```
-
-롤백도 과거 파일이나 낮은 버전으로 되감지 않습니다. 반드시 더 높은 `@version`을 발행하고 `rollback_of`에 이전 릴리스 버전과 SHA-256을 기록합니다.
+공개 Pages artifact는 `hotdeal-focus.user.js`와 감사용 `release-manifest.json` 두 파일뿐입니다. `filter-static.txt`는 내부 분석 산출물이며 구독 대상이 아닙니다. 롤백도 이전 버전으로 내리지 않고, 현재 live 검증을 다시 통과한 마지막 정상 내용을 더 높은 버전으로 재발행합니다.
 
 ## English
 
-### Install both URLs
+AdGuard Hotdeal Focus is a fail-closed reader gate for links opened from Algumon. It preserves the original DOM for the **title, purchase information, article body, and every comment/reply**, while withholding ads, headers, footers, sidebars, recommendations, popular posts, unrelated posts, and account widgets.
 
-1. Custom AdGuard filter: `https://github.com/heelee912/adguard-hotdeal-focus/releases/download/gate-v2.0.2/filter.txt`
-2. AdGuard Userscript extension: `https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js`
+It covers desktop and mobile layouts for Clien, Ppomppu, Ruliweb, Quasarzone, Eomisae, ZOD, and Arca Live.
 
-The optional diagnostic Userscript is public at `https://raw.githubusercontent.com/heelee912/adguard-hotdeal-focus/main/scripts/csp-probe.user.js`. Normal users do not install it. The Windows CLI's `adguard csp-probe` temporarily installs this SHA-256-pinned file on AdGuard's official strict-CSP test page, proves browser injection, and restores the exact pre-probe Userscript state.
+### Install one URL
 
-Add the first URL under **Filters → Custom filters → Add by URL** and the second under **Extensions/Userscripts → Add by URL**. Confirm that the custom filter is **enabled and Trusted**, and that the Userscript is **enabled**. The target clients are AdGuard products for Windows, macOS, and Android that support `#?#` ExtendedCSS and Userscript extensions. Back up and disable older rules with the same purpose. Do not subscribe to `filter-static.txt`; it is an analysis-only artifact.
+Add and enable this single URL under **AdGuard → Extensions / Userscripts → Add by URL**:
 
-On Windows, the repository CLI can perform a reversible backup, deploy, and post-install verification. Run it from an elevated PowerShell and pass the release manifest fields exactly:
-
-```powershell
-$releaseBase = 'https://heelee912.github.io/adguard-hotdeal-focus'
-$manifest = Invoke-RestMethod "$releaseBase/release-manifest.json"
-.\scripts\adguard_windows_cli.ps1 deploy `
-  -UserscriptSource "$releaseBase/hotdeal-focus.user.js" `
-  -FilterUrl $manifest.filterSubscriptionUrl `
-  -ReleaseManifestSource "$releaseBase/release-manifest.json" `
-  -ExpectedUserscriptSha256 $manifest.artifacts.'hotdeal-focus.user.js'.canonicalTextSha256 `
-  -ExpectedFilterSha256 $manifest.artifacts.'filter.txt'.sha256 `
-  -ExpectedInstalledFilterRulesSha256 $manifest.artifacts.'filter.txt'.installedRulesSha256 `
-  -ApproveExclusiveTargetMigration `
-  -Apply
+```text
+https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ```
 
-`-ApproveExclusiveTargetMigration` is a separate authorization to disable every current-snapshot cosmetic, ExtendedCSS, CSS-injection, and scriptlet rule scoped exclusively to the seven target domains. Domain scope alone does not prove that a rule came from an older release of this project. Review the plaintext-free index/SHA-256 plan from `migrate-legacy -WhatIf` first and use the switch only when that scope is intended. Rules are disabled, never deleted, and the backup plus exact transaction delta can restore them.
+No custom filter or user rule is required. Do not install `filter.txt`, `filter-static.txt`, or the old `gate-v2.0.2` URL. The old remote gate remains immutable only for existing subscribers and is not part of the current release, update, or verification authority.
 
-The marker filter locks every page on all seven target domains; list, home, unknown, and unapproved routes therefore remain blank by default. The document opens only when exactly one approved semantic projection resolves one page root, title, body, complete comment mount, and the configured zero-or-one or required purchase-information boundary with exact cardinality, containment, and document order. A site with no separate purchase block keeps an in-body purchase link without rejecting the article. Every meaningful node inside the comment mount must be classified as an approved item, approved control, or explicitly hidden comment chrome (`ignored`). Ignored nodes participate in completeness checks but never receive keep markers. One known comment plus one newly shaped reply fails closed instead of exposing an incomplete thread. After approval, any meaningful mutation other than an exactly classified new comment/reply or an allowed lazy-media attribute causes a terminal same-document lock. Runtime approval never uses semantic scores or a guessed fallback; scoring exists only in the CI discovery oracle. Unmarked ads, sidebars, recommendations, and later injected siblings remain hidden. Original content nodes, text nodes, and event identity are not replaced.
+When upgrading from old Hotdeal Focus rules, verify the new Userscript first, then disable or remove only the old rules scoped to these seven targets. Running both authorities can let obsolete CSS or scriptlets damage the article or comments. Fresh installations contain only the Userscript.
 
-Only a user activation of the card's exact signed `/l/d/<id>?v=…&t=…` URL triggers one same-origin Algumon fetch. The gate requires HTTP 200, one whole-document redirect script, one anchor with the identical destination, and an HTTPS destination host matching the card's exact site allowlist. Normal, new-tab, modified, middle-click, and Enter activations all use this path. A fetch, parser, URL, host, signature-shape, or popup failure closes the child and leaves Algumon in place; there is no guessed carrier. The validated destination receives a capped ten-minute public seed in a base64url fragment, then removes it at `document-start`. Neither `window.name` nor referrer is authority. The destination still requires matching URL article identity, title core, consistent article metadata, and the complete DOM contract. No body, comments, account data, cookies, or tokens are collected or stored.
+The Userscript locks the document at `document-start`, proves one exact semantic projection, then reveals only owned original nodes. DOM/CSSOM/shadow/top-layer/SPA changes are revalidated. Any ambiguity or tamper synchronously returns the page to a terminal blank state; there is no heuristic fallback or partial reveal.
 
-The old User-rule count—whether 23 or roughly 170—is not a coverage target. Exact old rules are only migration and regression inventory. The public filter contains thirteen deterministic fail-closed rules per domain, ninety-one total, covering dual class/attribute markers plus top-layer, backdrop, and pseudo-content defenses; site meaning and adaptation live in the Userscript contract and GitHub proof pipeline.
+For the separate policy that permits the needed Algumon ad DNS hosts while web filtering still blocks them on other sites, see [ALGUMON_ADS_NETWORK_POLICY.md](ALGUMON_ADS_NETWORK_POLICY.md). It deliberately separates global NextDNS resolution from $domain=algumon.com AdGuard web exceptions and adds no Reader Gate runtime.
 
-Those ninety-one lock rules are the byte-fixed asset of the immutable GitHub `gate-v2.0.2` release. Semantic releases do not change its bytes or subscription URL; the Pages `filter.txt` is only a verified mirror, not the installation authority. DOM adaptations update only the Pages Userscript and approved state at a higher semantic version. The protocol-1 asset remains unchanged solely as rollback evidence and is neither a compatibility path nor a fallback for v2 installation or verification. For public installation and deployment, the recommended Python CLI verifies the immutable GitHub release and asset attestations before invoking the internal PowerShell deployer.
+GitHub Actions runs once each Monday at 03:17 KST (Sunday 18:17 UTC) without a local PC. The one source collection has a hard cap of **29 starts**: one global inventory, seven source documents, and three signed relays per source. Candidate proof and promotion retest reuse a sealed source snapshot and make zero additional Algumon requests; no workflow self-dispatches another Algumon audit. A shared layout requires at least three fresh Algumon relay proofs for **each** applicable desktop and mobile profile. Historical fixtures, current live DOM, zero-leak, tamper, and network-fidelity tests must all pass before a one-parent fast-forward promotion. Pages rejects downgrade or same-version byte replacement and verifies the live HTTPS bytes after deployment.
 
-GitHub Actions performs six-hour cloud audits, so no local daemon or powered-on PC is required. The Algumon source dropdown must first equal the exact configured seven-site set; any addition or omission yields zero relay targets and zero candidates. Discovery freezes non-promotable drafts and a canonical queue manifest binding the base commit, audit report, order, fingerprint, and draft hashes. The full queue remains signed, while each run exposes only an eight-item circular matrix batch bound to `github.run_number`; consecutive runs therefore cover every queued candidate in finite rounds without unbounded job growth. Each selected candidate runs in an independent matrix job, so one timeout cannot starve later candidates. The aggregator completes a missing or unselected result as a queue-bound, non-promotable `infrastructure-missing` status and may still select a proven candidate from the current batch; any extra, duplicate, or tampered artifact blocks the entire promotion. It atomically selects only the first proven candidate in queue order. Algumon and JSON-LD comment counts are strict lower bounds; only a visible total in the same comment shell is exact. The exact bytes must pass at least three distinct URLs per applicable profile, structural comment proof when no source count exists, fixtures, zero visible leaks, no new baseline exposure, selector stability 1, exactly one semantic projection, and zero conflicting projections before a higher release is promoted. Normal runs retain only bounded JSON/hash evidence; screenshots are capped and reserved for failures and candidate proof. Set `ENABLE_STATE_COMMITS=true` to permit bot commits and `ENABLE_PAGES_PUBLISH=true` to publish verified artifacts.
-
-Fixed samples are direct-negative probes only; live readability is proven exclusively by relay-positive targets whose exact Algumon deal ID and signed URL are reacquired within five minutes immediately before each article/profile audit. The CI oracle enumerates bounded complete `ProjectionTuple(title, product?, body, comments)` combinations instead of guessing roles independently. Disconnected duplicates, ties, body noise, escaped comments, or a budget overflow produce zero candidates. The workflow refuses a Playwright-device/Chromium-version mismatch, and classifies CAPTCHA, WAF, and HTTP block documents as source/infrastructure failures rather than DOM drift. Only explicitly approved challenge subresources and a validated one-use in-memory cookie lease may cross the bootstrap boundary; failure never changes the release.
-
-The dry-run-by-default `cloud configure` command proves the exact public/admin repository before and after mutation. In addition to the two variables and Pages `build_type=workflow`, it requires Actions enabled with `allowed_actions=selected`, mandatory SHA pinning, GitHub-owned actions only (`verified_allowed=false`, no patterns), a read-only default `GITHUB_TOKEN` that cannot approve pull requests, and all three repository workflows in `active` state. It uses GitHub API `2026-03-10`, enable-only endpoints, and permission narrowing; an already-enabled policy that would have to be broadened is rejected before mutation. Dispatches bind a fresh nonce to both the workflow input and run title, preventing attribution to a concurrent run on the same commit.
-
-Apply is authorized by a clean full default-head SHA, byte-identical copies of all three workflows, and the exact GitHub Actions `verify` job/check from integration `15368`. Four reserved rulesets protect PR/CI, immutable fast-forward history, Deploy-Key-only creation of `refs/tags/gate-v2.0.2`, and no-bypass update/deletion freezing of that tag. The private key exists only in the default-branch-restricted `hdf-main-automation` environment. Browser proof and secret-bearing push run on fresh separate runners. Local gate publication records a main-only `hdf-release-publisher` environment checkpoint; this is an auditable sequencing checkpoint, not a separate manual approval. Before exposing the key, the `hdf-main-automation` runner read-only preflights the immutable-release policy, release/draft state, tag state, and remote head. The exact frozen tag is the commit point: if main advances or the first release attempt stops afterward, a rerun proves that tag's source and fixed filter bytes and completes the release without moving or deleting the tag.
-
-```bash
-npm ci --ignore-scripts --no-audit --no-fund
-npx playwright install chromium
-npm run build
-npm run verify
-npm run test:behavior
-```
-
-The JSON-only agent CLI reproduces verification, GitHub Actions/evidence operations, and Windows AdGuard deployment/rollback without remembered GUI state. See [CLI.md](CLI.md) for its command and exit-code contract.
-
-The single release build deterministically produces root `filter.txt`, `filter-static.txt`, and `release-manifest.json`. Rollbacks are forward releases: use a higher `@version` and record the previous version/hash in `rollback_of`.
+The Windows command shown in the Korean section installs only the Userscript and requires all unrelated User-filter and subscription hashes to remain unchanged. See [CLI.md](CLI.md) and [ARCHITECTURE.md](ARCHITECTURE.md) for machine-readable operations and the trust model.
 
 ## 日本語
 
-### 2つのURLを両方インストールしてください
+AdGuard Hotdeal Focus は、Algumon から開いた特価記事で **タイトル、購入情報、本文、すべてのコメント／返信だけ**を元の DOM のまま表示する fail-closed リーダーゲートです。広告、ヘッダー、フッター、サイドバー、人気記事、関連記事などは表示しません。
 
-1. AdGuard カスタムフィルター: `https://github.com/heelee912/adguard-hotdeal-focus/releases/download/gate-v2.0.2/filter.txt`
-2. AdGuard Userscript 拡張: `https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js`
+AdGuard の **拡張機能 / Userscripts / URL から追加**で、次の URL だけをインストールして有効化してください。
 
-任意診断用 Userscript は `https://raw.githubusercontent.com/heelee912/adguard-hotdeal-focus/main/scripts/csp-probe.user.js` で公開しています。通常の利用者がインストールする必要はありません。Windows CLI の `adguard csp-probe` は、この SHA-256 固定ファイルを AdGuard 公式の strict-CSP テストページへ一時的にインストールしてブラウザー注入を証明し、実行前の Userscript 状態を正確に復元します。
-
-1つ目は **フィルター → カスタムフィルター → URLから追加**、2つ目は **拡張/Userscripts → URLから追加** に登録します。カスタムフィルターが **有効かつ Trusted（信頼済み）**、Userscript が **有効** であることを必ず確認してください。`#?#` ExtendedCSS と Userscript に対応する Windows、macOS、Android 向け AdGuard が対象です。`filter-static.txt` は解析専用なので購読しないでください。
-
-フィルターは7つの対象ドメインの全ページを直ちにロックするため、一覧・ホーム・未知または未承認のパスも既定では空白です。Userscript が承認済みの semantic projection を1つだけ解決し、その page root・タイトル・本文・完全なコメント mount・設定済みの必須または0〜1個の購入情報の cardinality、包含関係、文書順序を確認した場合だけ表示します。独立した購入ブロックがない記事では、本文内の購入リンクをそのまま保ちます。コメント mount 内の意味ある内容は承認済み item/control または明示的に非表示にする `ignored` chrome に完全分類される必要があり、`ignored` には keep marker を付与しません。承認済み item selector に正確に一致する新しいコメント／返信は、元のノードと配下のメディア・書式を保ったまま単調に追加できます。新形式の返信が1件でも混在すれば不完全表示せず fail-closed になります。コメント削除、古い／別 batch の総数更新、その他の未知の意味的 mutation は同一文書を terminal lock にし、実行時の承認にスコアや推測 fallback は使いません。
-
-Algumon でユーザーが正確な signed `/l/d/<id>?v=…&t=…` リンクを操作した時だけ、同一オリジンへ1回 fetch します。HTTP 200、単一の厳密な redirect script、同じ URL の単一 anchor、カードのサイト種別と一致する HTTPS host をすべて確認してから、最終 URL に有効期限付き fragment seed を付けて移動します。失敗時は子ウィンドウを閉じて Algumon に残り、`window.name` や referrer に切り替えません。移動先でも記事ID、タイトル core、一意で整合する article metadata、完全な DOM 契約が必要です。
-
-旧 User rules が23行でも約170行でも、それは新設計の coverage 指標ではありません。旧ルールは厳密な migration／regression inventory に限って使います。公開フィルターは class／attribute の二重マーカーと top-layer・backdrop・pseudo-content 防御を含む1ドメイン13規則、合計91規則を持ち、サイト固有の意味契約は Userscript と GitHub の証明パイプラインが担当します。
-
-この91規則は GitHub の不変 `gate-v2.0.2` リリース資産としてバイト固定されます。通常の意味バージョン更新では購読 URL とゲートのバイトを変えず、Pages の `filter.txt` は検証済みミラーとしてのみ扱います。DOM 変更時は Pages の Userscript と承認状態だけを更新します。protocol 1 資産は rollback 証拠としてのみ変更せず保存し、v2 の互換経路や fallback としては受け入れません。
-
-GitHub Actions が6時間ごとにクラウド監査を行うため、ローカル常駐処理や起動中のPCは不要です。監査はまず Algumon の source dropdown が設定済みの7サイトと完全一致することを要求し、追加または欠落があれば relay target と candidate をともに0件にします。全 canonical queue はハッシュ固定したまま、各実行は `github.run_number` に結合した8件の circular batch だけを独立 matrix job で検証します。連続実行は有限回で全候補を選択するため、1件の timeout や大量候補が後続候補を恒久的に停止させません。欠落・未実行結果は queue に結合された非昇格 `infrastructure-missing` 状態として補完しますが、余分・重複・改ざん済み artifact が1件でもあれば全昇格を拒否します。aggregator は queue 順で最初の proven candidate 1件だけを原子的に昇格します。Algumon または JSON-LD のコメント数は取得後に返信が増える可能性があるため厳密な下限として扱い、DOM 項目数が下回れば拒否します。同一 comment shell 内で可視の総数だけを厳密な総数として扱います。原文コメント数を取得できない場合は値を偽装せず、安定したコメント構造を別途証明します（`ENABLE_STATE_COMMITS=true`、Pages は `ENABLE_PAGES_PUBLISH=true`）。
-
-固定 sample は直接訪問が確実に遮断されることだけを示す `direct-negative` です。可読性は各記事・profile の直前に同じ Algumon deal ID の5分以内の signed URL を再取得する `relay-positive` だけで証明します。CI は各 role を個別に推測せず、完全な `ProjectionTuple(title, product?, body, comments)` を上限付きで全列挙します。分離した重複、同点、本文ノイズ、コメント漏れ、探索上限超過は candidate 0です。Playwright descriptor と Chromium の版不一致は拒否し、CAPTCHA/WAF/HTTP block は DOM drift ではなく source/infrastructure failure として分離します。明示的な challenge subresource と検証済み1回限りのメモリ cookie lease 以外の迂回はありません。
-
-`cloud configure` は変更前後に正確な公開リポジトリと管理者権限を確認します。2変数と Pages の `build_type=workflow` に加え、Actions を有効化し、`allowed_actions=selected`、SHA pin 必須、GitHub 所有 Action のみ許可（verified creator と pattern は不許可）、既定 `GITHUB_TOKEN` は read-only・PR 承認不可、3つの workflow はすべて `active` であることを API `2026-03-10` で厳密に再検証します。変更は enable-only endpoint と権限縮小に限定し、有効中のポリシーを拡大しなければ到達できない場合は変更前に拒否します。dispatch は nonce を workflow input と run title の両方に結合し、同時実行の誤帰属を防ぎます。
-
-`--apply` は clean な default-head の full SHA、3 workflow の同一 byte、integration `15368` の正確な `verify` job/check を先に証明します。4つの ruleset のうち、作成用 ruleset は `refs/tags/gate-v2.0.2` を唯一の write Deploy Key だけが作成できるようにし、別の凍結 ruleset は bypass なしで更新・削除を禁止します。秘密鍵は default branch 限定の `hdf-main-automation` environment secret のみに置き、browser proof と push は別の fresh runner で実行します。local gate publish は、手動承認ではなく監査可能な main-only `hdf-release-publisher` checkpoint を記録します。別の runner は鍵を読む前に policy・release/draft・tag・remote head を read-only preflight し、タグを一度だけ作成します。正確に凍結されたタグを commit point とするため、その後 main が進んだり初回 release が中断しても、タグを移動・削除せず固定 source と filter bytes を再証明して完了できます。
-
-```bash
-npm ci --ignore-scripts --no-audit --no-fund
-npx playwright install chromium
-npm run build
-npm run verify
-npm run test:behavior
+```text
+https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ```
 
-JSON-only エージェント CLI により、GUI 状態に依存せず検証、GitHub Actions／証拠取得、Windows AdGuard の配布／ロールバックを再現できます。コマンドと終了コードは [CLI.md](CLI.md) を参照してください。
+カスタムフィルターは不要です。`filter.txt`、`filter-static.txt`、旧 `gate-v2.0.2` はインストールしないでください。Userscript は `document-start` でページを先にロックし、PC・モバイル双方の意味的境界を完全に証明できた場合だけ元ノードを公開します。不明確な変更や改変を検出すると即座に全体を再ロックし、部分表示や推測 fallback は行いません。
 
-ロールバックも過去ファイルへ戻しません。より高い `@version` を発行し、`rollback_of` に以前のバージョンと SHA-256 を記録します。
+旧 Hotdeal Focus ルールから移行する場合は、新 Userscript の検証後にこの7対象専用の旧ルールだけを無効化または削除してください。新規インストールは Userscript 1個だけです。
+
+GitHub Actions は毎週月曜日 03:17 KST（日曜日 18:17 UTC）に一度だけ監視・検証・昇格・Pages 配布を実行するため、PC がオフでも自動対応は継続します。Algumon の原本収集は最大 29 開始に固定され、候補証明と再検証は封印済み snapshot を再利用して Algumon を再訪しません。ワークフロー自身の再起動も行いません。
 
 ## 简体中文
 
-### 必须同时安装两个 URL
+AdGuard Hotdeal Focus 是一个 fail-closed 阅读门控脚本。通过 Algumon 打开优惠文章时，它只保留原始 DOM 中的**标题、购买信息、正文以及全部评论/回复**；广告、页眉页脚、侧栏、热门文章、推荐文章和其他噪声均不公开。
 
-1. AdGuard 自定义过滤器：`https://github.com/heelee912/adguard-hotdeal-focus/releases/download/gate-v2.0.2/filter.txt`
-2. AdGuard Userscript 扩展：`https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js`
+请在 **AdGuard → 扩展 / Userscripts → 通过 URL 添加**中只安装并启用以下地址：
 
-可选诊断 Userscript 公开于 `https://raw.githubusercontent.com/heelee912/adguard-hotdeal-focus/main/scripts/csp-probe.user.js`。普通用户无需安装。Windows CLI 的 `adguard csp-probe` 会将该 SHA-256 固定文件临时安装到 AdGuard 官方 strict-CSP 测试页面，证明浏览器注入成功，然后精确恢复诊断前的 Userscript 状态。
-
-第一个 URL 添加到 **过滤器 → 自定义过滤器 → 通过 URL 添加**，第二个添加到 **扩展/Userscripts → 通过 URL 添加**。请务必确认自定义过滤器处于 **已启用且 Trusted（受信任）** 状态，并确认 Userscript **已启用**。目标客户端是支持 `#?#` ExtendedCSS 和 Userscript 的 Windows、macOS、Android 版 AdGuard。`filter-static.txt` 仅供分析，请勿订阅。
-
-过滤器会立即锁定七个目标域名的全部页面，因此列表、首页、未知及未批准路径默认均为空白。只有 Userscript 恰好解析出一个已批准的 semantic projection，并确认 page root、标题、正文、完整评论 mount，以及配置为必需或0至1个的购买信息满足 cardinality、包含关系与文档顺序后，页面才会显示。没有独立购买区块时，正文中的购买链接仍会原样保留。评论 mount 内所有有意义的内容必须完整归类为已批准 item/control 或明确隐藏的 `ignored` chrome；`ignored` 永远不会获得 keep marker。与已批准 item selector 精确匹配的新评论／回复可以单调追加，并原样保留其节点、媒体与格式；即使仅混入一个新形态回复也会 fail-closed。评论删除、过时或分离 batch 的总数更新及其他未知的有意义 mutation 会使同一文档进入 terminal lock；运行时批准不使用语义分数或猜测 fallback。
-
-只有用户在 Algumon 激活精确的 signed `/l/d/<id>?v=…&t=…` 链接时，才会向同源发送一次 fetch。系统必须同时验证 HTTP 200、唯一且严格匹配的 redirect script、指向同一 URL 的唯一 anchor，以及与卡片站点类型一致的 HTTPS host，然后才把限时 fragment seed 添加到最终 URL。任何失败都会关闭子窗口并留在 Algumon，不会改用 `window.name` 或 referrer。目标页面仍须同时匹配文章 ID、标题 core、唯一一致的 article metadata 和完整 DOM 契约。
-
-旧 User rules 无论是23行还是约170行，都不是新架构的覆盖率指标。旧规则仅作为精确 migration／regression inventory。公开过滤器为每个域名提供13条、合计91条确定性的 fail-closed 规则，涵盖 class／attribute 双标记以及 top-layer、backdrop、pseudo-content 防护；站点语义与自动适配由 Userscript 契约和 GitHub 证据流水线负责。
-
-这91条锁定规则是 GitHub 不可变 `gate-v2.0.2` 发布中的字节固定资产。普通语义版本更新不会改变其订阅 URL 或字节；Pages 上的 `filter.txt` 只作为已验证镜像，不是安装权威。DOM 变化仅更新 Pages Userscript 与已批准状态。protocol 1 资产仅作为 rollback 证据原样保留，不得作为 v2 安装或验证的兼容路径或 fallback。
-
-GitHub Actions 每6小时在云端审计，不需要本地守护进程，也不要求电脑保持开机。审计首先要求 Algumon 的来源下拉列表与配置的七个站点精确相等；任何新增或缺失都会使 relay target 与 candidate 同时归零。完整 canonical queue 保持哈希绑定，每次运行仅在相互独立的 matrix job 中验证与 `github.run_number` 绑定的8项 circular batch。连续运行会在有限轮次内选中所有候选项，因此单个 timeout 或大量候选项不会永久饿死后续项。缺失或未运行结果会被补全为与队列绑定、不可提升的 `infrastructure-missing` 状态；但任何额外、重复或遭篡改的 artifact 都会阻止整次提升。aggregator 只原子提升队列中第一个 proven candidate。Algumon 或 JSON-LD 的评论数可能在采集后因新增回复而变大，因此只作为严格下限；DOM 项目数低于该下限即拒绝，只有同一评论 shell 中可见的总数才作为精确总数。无法取得原站评论数时不会伪造分数，而会独立证明稳定的评论结构（`ENABLE_STATE_COMMITS=true`；Pages 发布另设 `ENABLE_PAGES_PUBLISH=true`）。AdGuard 通过上述两个 URL 获取验证后的更新。
-
-固定 sample 仅用于证明直接访问保持封锁，即 `direct-negative`；可读性只由 `relay-positive` 证明，并在每篇文章、每个 profile 审计前重新取得同一 Algumon deal ID 且五分钟内有效的 signed URL。CI 不会分别猜测各个 role，而是在固定上限内穷举完整的 `ProjectionTuple(title, product?, body, comments)`。分离的重复组合、并列结果、正文噪声、评论遗漏或预算溢出都会产生零候选。Playwright device descriptor 与实际 Chromium 版本不一致时工作流拒绝运行；CAPTCHA、WAF 与 HTTP 拦截页被归类为 source/infrastructure failure，绝不会作为 DOM drift 学习。除明确允许的 challenge 子资源和经验证的一次性内存 cookie lease 外不存在绕行路径。
-
-`cloud configure` 会在变更前后核对精确的公开仓库与管理员权限。除两个变量和 Pages `build_type=workflow` 外，它还要求启用 Actions、设置 `allowed_actions=selected`、强制 SHA 固定、仅允许 GitHub 自有 Action（不允许 verified creator，pattern 为空）、默认 `GITHUB_TOKEN` 只读且不能批准 PR，并确保三个工作流全部为 `active`；这些状态均通过 API `2026-03-10` 精确复验。变更只使用启用型端点和权限收窄；若已启用策略必须扩大权限才能达到目标，则在任何变更前拒绝。dispatch 将随机 nonce 同时绑定到 workflow input 和 run title，避免把同一 commit 的并发运行误认为自己的运行。
-
-`--apply` 会先证明干净的默认分支完整 SHA、三个 workflow 的字节一致性，以及 integration `15368` 的精确 `verify` job/check。四个 ruleset 中，创建 ruleset 只允许仓库唯一的 write Deploy Key 创建 `refs/tags/gate-v2.0.2`，独立冻结 ruleset 则不允许任何主体绕过更新与删除禁令。私钥只存在于限定默认分支的 `hdf-main-automation` environment secret；浏览器证明与含 secret 的 push 使用不同的新 runner。本地 gate 发布会记录可审计的 main-only `hdf-release-publisher` checkpoint，它不是独立的人工审批。独立 runner 在读取私钥前以只读方式预检 policy、release/draft、tag 与 remote head，并且只创建一次标签。精确冻结的标签就是 commit point；此后即使 main 前进或首次发布中断，也能在不移动或删除标签的情况下重新证明固定 source 与 filter bytes 并完成发布。
-
-```bash
-npm ci --ignore-scripts --no-audit --no-fund
-npx playwright install chromium
-npm run build
-npm run verify
-npm run test:behavior
+```text
+https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ```
 
-JSON-only 智能体 CLI 可在不依赖 GUI 状态的情况下重现验证、GitHub Actions／证据下载以及 Windows AdGuard 部署／回滚。命令与退出码契约见 [CLI.md](CLI.md)。
+无需自定义过滤器。请勿安装 `filter.txt`、`filter-static.txt` 或旧的 `gate-v2.0.2`。Userscript 在 `document-start` 阶段先锁住整页，只有在桌面端和移动端的语义边界都得到完整证明后才显示原始节点。遇到未知结构或篡改时会立即重新锁定整页，不进行猜测式 fallback，也不会部分显示。
 
-回滚也必须作为更高版本向前发布，并在 `rollback_of` 中记录旧版本和 SHA-256；禁止降低版本或把 latest 指向旧文件。
+从旧版 Hotdeal Focus 规则升级时，请先验证新 Userscript，再仅禁用或删除作用于这七个目标站点的旧规则。全新安装只有一个 Userscript。
+
+GitHub Actions 每周一 03:17 KST（周日 18:17 UTC）仅在云端执行一次监测、验证、自动晋升和 Pages 发布，因此即使本地电脑关机，自动响应仍会继续运行。Algumon 源采集硬性限制为最多 29 次启动；候选证明和复验只复用密封 snapshot，不会再次访问 Algumon，工作流也不会自行再次调度。
 
 ## License
 

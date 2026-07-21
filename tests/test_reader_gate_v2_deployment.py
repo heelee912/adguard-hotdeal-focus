@@ -11,7 +11,6 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
-IMMUTABLE_FILTER = (ROOT / "filter.txt").read_bytes()
 CLI_PATH = ROOT / "scripts" / "hotdeal_focus_cli.py"
 SPEC = importlib.util.spec_from_file_location("hotdeal_focus_cli_reader_v2", CLI_PATH)
 assert SPEC and SPEC.loader
@@ -33,6 +32,9 @@ VALID_USERSCRIPT = b"""// ==UserScript==
 // @match        https://*.arca.live/*
 // @run-at       document-start
 // @grant        GM_addElement
+// @grant        window.onurlchange
+// @downloadURL  https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
+// @updateURL    https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 // @noframes
 // ==/UserScript==
 const PROTOCOL_VERSION = "2";
@@ -57,34 +59,38 @@ GM_addElement(document.documentElement, "style", {
 });
 """
 
-VALID_FILTER = b"""! Title: AdGuard Hotdeal Focus Marker Gate
-! Version: 2.0.2
-! Hotdeal-Focus-Protocol: 2
-example.com##html.hdf-v2-lock:not(.hdf-v2-ready[data-hotdeal-focus-ready="1"][data-hotdeal-focus-protocol="2"][data-hotdeal-focus-state="ready"][data-hotdeal-focus-status="ready"]) .hdf-v2-keep
-example.com##[data-hotdeal-focus-ready][data-hotdeal-focus-keep][data-hotdeal-focus-shell][data-hotdeal-focus-deep][data-hotdeal-focus-role="body"].hdf-v2-shell.hdf-v2-deep.hdf-v2-role-body
-"""
+
+def empty_high_water_prefix() -> dict[str, object]:
+    prefix_bytes = cli.canonical_json_bytes(
+        {
+            "bundleFormat": "hdf-public-bundle-v1",
+            "records": [],
+            "schemaVersion": 1,
+        }
+    )
+    return {
+        "bytes": len(prefix_bytes),
+        "mode": "append-only-prefix-v1",
+        "recordCount": 0,
+        "sha256": hashlib.sha256(prefix_bytes).hexdigest(),
+    }
 
 
 def manifest_bytes(
     userscript: bytes = VALID_USERSCRIPT,
-    filter_source: bytes = IMMUTABLE_FILTER,
 ) -> bytes:
     manifest = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "status": "release-ready",
         "releaseVersion": "2.1.0",
         "protocolVersion": 2,
-        "gateArtifactVersion": "2.0.2",
-        "filterSubscriptionUrl": cli.GATE_LOCK_SUBSCRIPTION_URL,
+        "installUrl": cli.RELEASE_USERSCRIPT_URL,
+        "generatorVersion": "2.1.0",
+        "rollback_of": None,
+        "configSha256": "a" * 64,
+        "coverage": {},
+        "promotion": None,
         "artifacts": {
-            "filter.txt": {
-                "version": "2.0.2",
-                "bytes": len(filter_source),
-                "sha256": hashlib.sha256(filter_source).hexdigest(),
-                "installedRulesSha256": cli.installed_filter_rules_sha256(
-                    filter_source
-                ),
-            },
             "hotdeal-focus.user.js": {
                 "version": "2.1.0",
                 "bytes": len(userscript),
@@ -94,26 +100,25 @@ def manifest_bytes(
                 ).hexdigest(),
             },
         },
+        "sourceIntegrity": {
+            "state/release-high-water.json": empty_high_water_prefix(),
+        },
     }
     return json.dumps(manifest, sort_keys=True).encode("utf-8")
 
 
 class ReaderGateV2DeploymentContractTests(unittest.TestCase):
-    def test_exact_protocol_two_bundle_is_accepted(self) -> None:
+    def test_exact_standalone_protocol_two_bundle_is_accepted(self) -> None:
         manifest, records = cli._verify_release_files(
             manifest_bytes(),
-            {
-                "filter.txt": IMMUTABLE_FILTER,
-                "hotdeal-focus.user.js": VALID_USERSCRIPT,
-            },
+            {"hotdeal-focus.user.js": VALID_USERSCRIPT},
         )
         self.assertEqual(manifest["protocolVersion"], 2)
-        self.assertEqual(manifest["gateArtifactVersion"], "2.0.2")
+        self.assertEqual(manifest["installUrl"], cli.RELEASE_USERSCRIPT_URL)
         self.assertEqual(cli._reader_gate_v2_contract(VALID_USERSCRIPT), 2)
-        self.assertEqual(cli._marker_gate_v2_contract(IMMUTABLE_FILTER), 2)
         self.assertEqual(
             [record["path"] for record in records],
-            ["filter.txt", "hotdeal-focus.user.js", "release-manifest.json"],
+            ["hotdeal-focus.user.js", "release-manifest.json"],
         )
 
     def test_userscript_rejects_none_extra_grant_and_protocol_one(self) -> None:
@@ -122,8 +127,15 @@ class ReaderGateV2DeploymentContractTests(unittest.TestCase):
                 b"// @grant        GM_addElement", b"// @grant        none"
             ),
             "extra grant": VALID_USERSCRIPT.replace(
-                b"// @grant        GM_addElement",
-                b"// @grant        GM_addElement\n// @grant        none",
+                b"// @grant        window.onurlchange",
+                b"// @grant        window.onurlchange\n// @grant        none",
+            ),
+            "missing urlchange grant": VALID_USERSCRIPT.replace(
+                b"// @grant        window.onurlchange\n", b""
+            ),
+            "mutable update url": VALID_USERSCRIPT.replace(
+                cli.RELEASE_USERSCRIPT_URL.encode(),
+                b"https://example.com/mutable.user.js",
             ),
             "protocol one": VALID_USERSCRIPT.replace(
                 b'const PROTOCOL_VERSION = "2";',
@@ -141,39 +153,21 @@ class ReaderGateV2DeploymentContractTests(unittest.TestCase):
             with self.subTest(label=label), self.assertRaises(cli.IntegrityFailure):
                 cli._reader_gate_v2_contract(source)
 
-    def test_filter_rejects_protocol_one_and_missing_core_marker(self) -> None:
-        invalid_sources = {
-            "header protocol one": VALID_FILTER.replace(
-                b"! Hotdeal-Focus-Protocol: 2", b"! Hotdeal-Focus-Protocol: 1"
-            ),
-            "rule protocol one": VALID_FILTER.replace(
-                b'data-hotdeal-focus-protocol="2"',
-                b'data-hotdeal-focus-protocol="1"',
-            ),
-            "missing core class": VALID_FILTER.replace(
-                b"hdf-v2-deep", b"hdf-removed-deep"
-            ),
-        }
-        for label, source in invalid_sources.items():
-            with self.subTest(label=label), self.assertRaises(cli.IntegrityFailure):
-                cli._marker_gate_v2_contract(source)
-
-    def test_manifest_rejects_every_v1_and_cross_version_binding(self) -> None:
+    def test_manifest_rejects_legacy_filter_and_wrong_install_binding(self) -> None:
         baseline = json.loads(manifest_bytes())
         invalid_manifests = []
         for field, value in (
+            ("schemaVersion", 1),
             ("protocolVersion", 1),
             ("protocolVersion", "2"),
-            ("gateArtifactVersion", "1.0.0"),
-            (
-                "filterSubscriptionUrl",
-                "https://github.com/heelee912/adguard-hotdeal-focus/releases/"
-                "download/gate-v1.0.0/filter.txt",
-            ),
+            ("installUrl", "https://example.com/mutable.user.js"),
         ):
             candidate = json.loads(json.dumps(baseline))
             candidate[field] = value
             invalid_manifests.append((field, candidate))
+        with_filter = json.loads(json.dumps(baseline))
+        with_filter["artifacts"]["filter.txt"] = {"sha256": "b" * 64}
+        invalid_manifests.append(("legacy filter artifact", with_filter))
         for label, candidate in invalid_manifests:
             with self.subTest(label=label), self.assertRaises(cli.IntegrityFailure):
                 cli._manifest_contract(json.dumps(candidate).encode("utf-8"))
@@ -183,11 +177,11 @@ class ReaderGateV2DeploymentContractTests(unittest.TestCase):
             b"// @grant        GM_addElement", b"// @grant        none"
         )
         with self.assertRaisesRegex(
-            cli.IntegrityFailure, "exactly one @grant GM_addElement"
+            cli.IntegrityFailure, "exact ordered grants"
         ):
             cli._verify_release_files(
                 manifest_bytes(),
-                {"filter.txt": IMMUTABLE_FILTER, "hotdeal-focus.user.js": invalid},
+                {"hotdeal-focus.user.js": invalid},
             )
 
     @unittest.skipUnless(sys.platform == "win32", "PowerShell harness is Windows-only")

@@ -24,22 +24,23 @@ sys.modules[SPEC.name] = cli
 SPEC.loader.exec_module(cli)
 
 
-def release_bundle(
-    filter_bytes: bytes = (
-        b"! Title: AdGuard Hotdeal Focus Marker Gate\n"
-        b"! Version: 2.0.2\n"
-        b"! Hotdeal-Focus-Protocol: 2\n"
-        b"example.com##html.hdf-v2-lock:not(.hdf-v2-ready"
-        b"[data-hotdeal-focus-ready=\"1\"]"
-        b"[data-hotdeal-focus-protocol=\"2\"]"
-        b"[data-hotdeal-focus-state=\"ready\"]"
-        b"[data-hotdeal-focus-status=\"ready\"]) .hdf-v2-keep\n"
-        b"example.com##[data-hotdeal-focus-ready][data-hotdeal-focus-keep]"
-        b"[data-hotdeal-focus-shell][data-hotdeal-focus-deep]"
-        b"[data-hotdeal-focus-role=\"body\"]"
-        b".hdf-v2-shell.hdf-v2-deep.hdf-v2-role-body\n"
-    ),
-):
+def empty_high_water_prefix() -> dict[str, object]:
+    prefix_bytes = cli.canonical_json_bytes(
+        {
+            "bundleFormat": "hdf-public-bundle-v1",
+            "records": [],
+            "schemaVersion": 1,
+        }
+    )
+    return {
+        "bytes": len(prefix_bytes),
+        "mode": "append-only-prefix-v1",
+        "recordCount": 0,
+        "sha256": hashlib.sha256(prefix_bytes).hexdigest(),
+    }
+
+
+def release_bundle():
     userscript = b"""// ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @version      1.2.3
@@ -53,6 +54,9 @@ def release_bundle(
 // @match        https://*.arca.live/*
 // @run-at       document-start
 // @grant        GM_addElement
+// @grant        window.onurlchange
+// @downloadURL  https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
+// @updateURL    https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 // @noframes
 // ==/UserScript==
 const PROTOCOL_VERSION = "2";
@@ -77,19 +81,17 @@ GM_addElement(document.documentElement, "style", {
 });
 """
     manifest = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "status": "release-ready",
         "releaseVersion": "1.2.3",
         "protocolVersion": 2,
-        "gateArtifactVersion": "2.0.2",
-        "filterSubscriptionUrl": cli.GATE_LOCK_SUBSCRIPTION_URL,
+        "installUrl": cli.RELEASE_USERSCRIPT_URL,
+        "generatorVersion": "1.2.3",
+        "rollback_of": None,
+        "configSha256": "c" * 64,
+        "coverage": {},
+        "promotion": None,
         "artifacts": {
-            "filter.txt": {
-                "version": "2.0.2",
-                "bytes": len(filter_bytes),
-                "sha256": hashlib.sha256(filter_bytes).hexdigest(),
-                "installedRulesSha256": cli.installed_filter_rules_sha256(filter_bytes),
-            },
             "hotdeal-focus.user.js": {
                 "version": "1.2.3",
                 "bytes": len(userscript),
@@ -99,10 +101,12 @@ GM_addElement(document.documentElement, "style", {
                 ).hexdigest(),
             },
         },
+        "sourceIntegrity": {
+            "state/release-high-water.json": empty_high_water_prefix(),
+        },
     }
     manifest_bytes = json.dumps(manifest, sort_keys=True).encode("utf-8")
     return manifest, manifest_bytes, {
-        "filter.txt": filter_bytes,
         "hotdeal-focus.user.js": userscript,
     }
 
@@ -169,8 +173,8 @@ class ParserAndOutputContractTests(unittest.TestCase):
             code, payload, _ = self.run_main(["doctor", "--json"])
         self.assertEqual(code, 0)
         self.assertTrue(payload["capabilities"]["adguardWindowsInspect"])
-        self.assertFalse(payload["capabilities"]["adguardWindowsDeployment"])
-        self.assertFalse(payload["capabilities"]["immutableGateRelease"])
+        self.assertTrue(payload["capabilities"]["adguardWindowsDeployment"])
+        self.assertNotIn("immutableGateRelease", payload["capabilities"])
 
     def test_exception_exit_taxonomy_is_stable(self):
         cases = [
@@ -318,26 +322,40 @@ class ReleaseIntegrityTests(unittest.TestCase):
         actual_manifest, records = cli._verify_release_files(manifest_bytes, artifacts)
         self.assertEqual(actual_manifest, manifest)
         self.assertEqual([item["path"] for item in records], [
-            "filter.txt", "hotdeal-focus.user.js", "release-manifest.json"
+            "hotdeal-focus.user.js", "release-manifest.json"
         ])
 
     def test_release_bundle_rejects_raw_hash_mismatch(self):
         _, manifest_bytes, artifacts = release_bundle()
-        artifacts["filter.txt"] += b"tamper"
+        artifacts["hotdeal-focus.user.js"] += b"tamper"
         with self.assertRaises(cli.IntegrityFailure):
             cli._verify_release_files(manifest_bytes, artifacts)
 
     def test_release_bundle_rejects_manifest_byte_count_mismatch(self):
         manifest, _, artifacts = release_bundle()
-        manifest["artifacts"]["filter.txt"]["bytes"] += 1
+        manifest["artifacts"]["hotdeal-focus.user.js"]["bytes"] += 1
         with self.assertRaisesRegex(cli.IntegrityFailure, "bytes"):
             cli._verify_release_files(json.dumps(manifest).encode(), artifacts)
 
     def test_gate_lock_pins_bytes_rules_version_protocol_and_url(self):
-        manifest, _, artifacts = release_bundle()
-        gate_bytes = artifacts["filter.txt"]
+        gate_bytes = (ROOT / "filter.txt").read_bytes()
         raw_sha = hashlib.sha256(gate_bytes).hexdigest()
         rules_sha = cli.installed_filter_rules_sha256(gate_bytes)
+        rule_count = sum(
+            1 for line in cli.canonical_text_bytes(gate_bytes).decode().splitlines()
+            if line.strip() and not line.lstrip().startswith("!")
+        )
+        manifest = {
+            "protocolVersion": 2,
+            "gateArtifactVersion": "2.0.2",
+            "filterSubscriptionUrl": cli.GATE_LOCK_SUBSCRIPTION_URL,
+            "artifacts": {"filter.txt": {
+                "version": "2.0.2",
+                "bytes": len(gate_bytes),
+                "sha256": raw_sha,
+                "installedRulesSha256": rules_sha,
+            }},
+        }
         lock = {
             "schemaVersion": 1,
             "protocolVersion": 2,
@@ -358,7 +376,7 @@ class ReleaseIntegrityTests(unittest.TestCase):
             GATE_LOCK_BYTES=len(gate_bytes),
             GATE_LOCK_SHA256=raw_sha,
             GATE_LOCK_INSTALLED_RULES_SHA256=rules_sha,
-            GATE_LOCK_RULE_COUNT=2,
+            GATE_LOCK_RULE_COUNT=rule_count,
         ):
             actual = cli._validate_gate_artifact_lock(
                 manifest, gate_bytes, json.dumps(lock).encode()
@@ -410,8 +428,7 @@ class PagesSourceContractTests(unittest.TestCase):
         manifest, manifest_bytes, artifacts = release_bundle()
         responses = {
             "release-manifest.json": manifest_bytes,
-            "filter.txt": artifacts["filter.txt"] + b"tamper",
-            "hotdeal-focus.user.js": artifacts["hotdeal-focus.user.js"],
+            "hotdeal-focus.user.js": artifacts["hotdeal-focus.user.js"] + b"tamper",
         }
 
         def read(url, binding):
@@ -574,7 +591,15 @@ class CloudContractTests(unittest.TestCase):
             "fingerprintVariableName": cli.AUTOMATION_PUSH_FINGERPRINT_VARIABLE,
             "configuredFingerprint": "SHA256:" + ("A" * 43),
             "deployKeyTitle": cli.AUTOMATION_PUSH_DEPLOY_KEY_TITLE,
-            "deployKeys": [],
+            "deployKeys": [{
+                "id": 1,
+                "title": cli.AUTOMATION_PUSH_DEPLOY_KEY_TITLE,
+                "readOnly": False,
+                "verified": True,
+                "keyType": "ssh-ed25519",
+                "fingerprint": "SHA256:" + ("A" * 43),
+                "ed25519Exact": True,
+            }],
             "writeKeyCount": 1,
             "reservedTitleKeyCount": 1,
             "keyExact": True,
@@ -593,7 +618,7 @@ class CloudContractTests(unittest.TestCase):
                     cli._required_branch_ruleset_contracts().items()
                 )
             },
-            "repositoryRulesetCount": 4,
+            "repositoryRulesetCount": 2,
             "extraRulesets": [],
             "unprovenApplicableRulesets": [],
             "classicBranchProtection": {"present": False, "compatible": True},
@@ -608,7 +633,6 @@ class CloudContractTests(unittest.TestCase):
                 "exact": True,
             }
             for index, environment in enumerate((
-                cli.RELEASE_PUBLISHER_ENVIRONMENT,
                 cli.MAIN_AUTOMATION_ENVIRONMENT,
                 cli.PAGES_ENVIRONMENT,
             ))
@@ -695,7 +719,7 @@ class CloudContractTests(unittest.TestCase):
             pages_workflow=False,
             actions=broad_actions,
             workflow_states=self._workflow_states(
-                "disabled_manually", "disabled_inactivity", "disabled_fork"
+                "disabled_manually", "disabled_inactivity"
             ),
         )
         after = self._cloud_state()
@@ -723,7 +747,7 @@ class CloudContractTests(unittest.TestCase):
         self.assertEqual(applied["status"], "configured")
         self.assertTrue(applied["mutationApplied"])
         self.assertTrue(cli._cloud_configuration_is_exact(applied["configuration"]))
-        self.assertEqual(mutation.call_count, 10)
+        self.assertEqual(mutation.call_count, 9)
         mutation_labels = [call.kwargs["label"] for call in mutation.call_args_list]
         for workflow in cli.WORKFLOW_FILES:
             self.assertIn(f"enable-workflow-{workflow}", mutation_labels)
@@ -814,14 +838,14 @@ class CloudContractTests(unittest.TestCase):
             }
             for index, (workflow, state) in enumerate(zip(
                 cli.WORKFLOW_FILES,
-                ("active", "disabled_manually", "disabled_inactivity"),
+                ("active", "disabled_manually"),
             ))
         ]
         with mock.patch.object(cli, "_gh_json", side_effect=payloads):
             observed = cli._github_workflow_states("owner/repo")
         self.assertEqual(
             [observed[name]["state"] for name in cli.WORKFLOW_FILES],
-            ["active", "disabled_manually", "disabled_inactivity"],
+            ["active", "disabled_manually"],
         )
 
     def test_api_mutation_writes_exact_typed_json_to_a_temporary_file(self):
@@ -861,6 +885,73 @@ class CloudContractTests(unittest.TestCase):
         )
         with self.assertRaises(cli.IntegrityFailure):
             cli._openssh_public_key_record(public_key.replace("ssh-ed25519", "ssh-rsa"))
+
+    def test_active_cloud_contract_excludes_tag_and_filter_authority(self):
+        required = cli._required_cloud_configuration()
+        self.assertEqual(cli.WORKFLOW_FILES, ("verify.yml", "watch-dom.yml"))
+        self.assertEqual(
+            set(required["privilegedEnvironments"]),
+            {cli.MAIN_AUTOMATION_ENVIRONMENT, cli.PAGES_ENVIRONMENT},
+        )
+        self.assertEqual(
+            set(required["branchGovernance"]),
+            {"immutableFastForwardHistory", "prAndVerifiedCi"},
+        )
+        serialized = json.dumps(required, sort_keys=True).casefold()
+        self.assertNotIn("publish-gate", serialized)
+        self.assertNotIn("immutablegatetag", serialized)
+        self.assertNotIn("filter", serialized)
+
+    def test_cloud_status_observes_only_two_active_environments_and_no_tag(self):
+        environment_calls = []
+
+        def environment_state(_repo, environment, _branch):
+            environment_calls.append(environment)
+            return {"name": environment, "present": True, "exact": True}
+
+        with mock.patch.object(
+            cli, "_github_environment_state", side_effect=environment_state
+        ):
+            environments = cli._github_privileged_environments_state(
+                "owner/repo", "main"
+            )
+        self.assertEqual(
+            environment_calls,
+            [cli.MAIN_AUTOMATION_ENVIRONMENT, cli.PAGES_ENVIRONMENT],
+        )
+
+        exact = self._cloud_state()
+        with mock.patch.object(
+            cli, "_repository_variables", return_value={
+                "ENABLE_STATE_COMMITS": "true",
+                "ENABLE_PAGES_PUBLISH": "true",
+            }
+        ), mock.patch.object(
+            cli, "_github_pages_state", return_value=exact["pages"]
+        ), mock.patch.object(
+            cli, "_github_privileged_environments_state", return_value=environments
+        ), mock.patch.object(
+            cli, "_github_actions_permissions_state", return_value=exact["actions"]
+        ), mock.patch.object(
+            cli, "_github_workflow_states", return_value=exact["workflows"]
+        ), mock.patch.object(
+            cli, "_automation_push_identity_state",
+            return_value=exact["automationPushIdentity"],
+        ), mock.patch.object(
+            cli, "_github_branch_governance_state",
+            return_value=exact["branchGovernance"],
+        ), mock.patch.object(
+            cli, "_immutable_gate_tag_state",
+            side_effect=AssertionError("cloud status must not inspect an archival tag"),
+        ) as tag_observation:
+            observed = cli._cloud_operating_state("owner/repo", "main")
+
+        self.assertNotIn("immutableGateTag", observed)
+        self.assertEqual(
+            set(observed["privilegedEnvironments"]),
+            {cli.MAIN_AUTOMATION_ENVIRONMENT, cli.PAGES_ENVIRONMENT},
+        )
+        tag_observation.assert_not_called()
 
     def test_deploy_key_read_uses_pinned_api_and_never_returns_raw_key(self):
         public_key = (
@@ -975,6 +1066,9 @@ class CloudContractTests(unittest.TestCase):
 
     def test_ruleset_contract_layers_deploy_key_bypass_below_unbypassable_history(self):
         contracts = cli._required_branch_ruleset_contracts()
+        self.assertEqual(
+            set(contracts), {"prAndVerifiedCi", "immutableFastForwardHistory"}
+        )
         pr = contracts["prAndVerifiedCi"]
         history = contracts["immutableFastForwardHistory"]
         for contract in (pr, history):
@@ -1017,40 +1111,20 @@ class CloudContractTests(unittest.TestCase):
         self.assertNotIn(
             "required_reviewers", mutation_payload["rules"][0]["parameters"]
         )
-        gate_tag_creation = contracts["gateTagCreation"]
-        self.assertEqual(gate_tag_creation["target"], "tag")
-        self.assertEqual(
-            gate_tag_creation["conditions"],
-            {"ref_name": {"include": ["refs/tags/gate-v2.0.2"], "exclude": []}},
-        )
-        self.assertEqual(
-            gate_tag_creation["bypass_actors"],
-            [{"actor_id": None, "actor_type": "DeployKey", "bypass_mode": "always"}],
-        )
-        self.assertEqual(gate_tag_creation["rules"], [{"type": "creation"}])
-        gate_tag_freeze = contracts["immutableGateTag"]
-        self.assertEqual(gate_tag_freeze["target"], "tag")
-        self.assertEqual(gate_tag_freeze["conditions"], gate_tag_creation["conditions"])
-        self.assertEqual(gate_tag_freeze["bypass_actors"], [])
-        self.assertEqual(
-            gate_tag_freeze["rules"],
-            [
-                {"type": "update", "parameters": {"update_allows_fetch_and_merge": False}},
-                {"type": "deletion"},
-            ],
-        )
 
-    def test_only_literal_unrelated_branch_or_tag_rulesets_are_proven_irrelevant(self):
+    def test_unrelated_branch_and_every_tag_ruleset_are_proven_irrelevant(self):
         unrelated_branch = {
             "target": "branch",
             "conditions": {"ref_name": {"include": ["refs/heads/archive"], "exclude": []}},
         }
         unrelated_tag = {
             "target": "tag",
-            "conditions": {"ref_name": {"include": ["refs/tags/legacy"], "exclude": []}},
+            "conditions": {"ref_name": {"include": ["~ALL"], "exclude": []}},
         }
         self.assertFalse(cli._ruleset_ref_scope(unrelated_branch, "main")["relevant"])
-        self.assertFalse(cli._ruleset_ref_scope(unrelated_tag, "main")["relevant"])
+        tag_scope = cli._ruleset_ref_scope(unrelated_tag, "main")
+        self.assertFalse(tag_scope["relevant"])
+        self.assertEqual(tag_scope["reason"], "active-automation-does-not-write-tags")
         for target in ("push", "repository"):
             with self.subTest(target=target):
                 self.assertTrue(cli._ruleset_ref_scope(
@@ -1291,8 +1365,10 @@ class CloudContractTests(unittest.TestCase):
     def test_governance_is_proven_before_missing_identity_is_created(self):
         missing_identity = {
             "scopeRepository": "owner/repo",
+            "environmentName": cli.MAIN_AUTOMATION_ENVIRONMENT,
             "secretName": cli.AUTOMATION_PUSH_SECRET_NAME,
-            "secretPresent": False,
+            "environmentSecretPresent": False,
+            "repositorySecretPresent": False,
             "fingerprintVariableName": cli.AUTOMATION_PUSH_FINGERPRINT_VARIABLE,
             "configuredFingerprint": None,
             "deployKeyTitle": cli.AUTOMATION_PUSH_DEPLOY_KEY_TITLE,
@@ -1319,10 +1395,11 @@ class CloudContractTests(unittest.TestCase):
         )
         after = self._cloud_state()
         fingerprint = "SHA256:" + ("B" * 43)
+        after["automationPushIdentity"]["configuredFingerprint"] = fingerprint
+        after["automationPushIdentity"]["deployKeys"][0]["fingerprint"] = fingerprint
         required_contracts = cli._required_branch_ruleset_contracts()
-        bootstrap_freeze = cli._gate_tag_bootstrap_freeze_contract()
 
-        def governance_state(exact_names=(), *, bootstrap=False):
+        def governance_state(exact_names=()):
             exact_name_set = set(exact_names)
             named = {}
             for index, (name, contract) in enumerate(required_contracts.items()):
@@ -1333,13 +1410,6 @@ class CloudContractTests(unittest.TestCase):
                         "exact": True,
                         "contract": contract,
                     }
-                elif bootstrap and name == "immutableGateTag":
-                    named[name] = {
-                        "present": True,
-                        "id": index + 1,
-                        "exact": False,
-                        "contract": bootstrap_freeze,
-                    }
                 else:
                     named[name] = {
                         "present": False,
@@ -1348,7 +1418,7 @@ class CloudContractTests(unittest.TestCase):
                         "contract": None,
                     }
             return {
-                "target": "~DEFAULT_BRANCH and refs/tags/gate-v2.0.2",
+                "target": "~DEFAULT_BRANCH",
                 "namedRulesets": named,
                 "repositoryRulesetCount": sum(
                     1 for item in named.values() if item["present"]
@@ -1356,30 +1426,19 @@ class CloudContractTests(unittest.TestCase):
                 "extraRulesets": [],
                 "unprovenApplicableRulesets": [],
                 "classicBranchProtection": {"present": False, "compatible": True},
-                "exact": exact_name_set == set(required_contracts) and not bootstrap,
+                "exact": exact_name_set == set(required_contracts),
             }
 
         governance_observations = iter((
             governance_state(("immutableFastForwardHistory",)),
             governance_state(("immutableFastForwardHistory", "prAndVerifiedCi")),
-            governance_state(
-                ("immutableFastForwardHistory", "prAndVerifiedCi"), bootstrap=True
-            ),
-            governance_state(
-                (
-                    "immutableFastForwardHistory",
-                    "prAndVerifiedCi",
-                    "gateTagCreation",
-                ),
-                bootstrap=True,
-            ),
-            governance_state(required_contracts),
         ))
 
         def observe_governance(*_args):
             return next(governance_observations, after["branchGovernance"])
 
         operations = []
+        prerequisite_checks = []
         accepted = cli.ExecutionCapture("accepted", ("gh",), 0, b"", b"")
 
         def capture(argv, **kwargs):
@@ -1394,6 +1453,10 @@ class CloudContractTests(unittest.TestCase):
                 self.assertNotIn("PRIVATE", payload["key"])
                 self.assertFalse(payload["read_only"])
             return cli.ExecutionCapture(label, ("gh",), 0, b"", b"")
+
+        def command_exists(command):
+            prerequisite_checks.append(command)
+            return command == "ssh-keygen"
 
         with tempfile.TemporaryDirectory() as temporary:
             private_path = Path(temporary) / "identity"
@@ -1430,7 +1493,10 @@ class CloudContractTests(unittest.TestCase):
                 cli, "_github_api_mutation", side_effect=api_mutation
             ), mock.patch.object(
                 cli, "_repository_variables",
-                return_value={cli.AUTOMATION_PUSH_FINGERPRINT_VARIABLE: fingerprint},
+                return_value={
+                    "ENABLE_STATE_COMMITS": "false",
+                    cli.AUTOMATION_PUSH_FINGERPRINT_VARIABLE: fingerprint,
+                },
             ), mock.patch.object(
                 cli, "_repository_secret_names",
                 return_value=frozenset(),
@@ -1439,12 +1505,18 @@ class CloudContractTests(unittest.TestCase):
                 return_value=frozenset({cli.AUTOMATION_PUSH_SECRET_NAME}),
             ), mock.patch.object(
                 cli, "_automation_push_identity_state",
-                side_effect=(missing_identity, after["automationPushIdentity"]),
+                side_effect=(
+                    missing_identity,
+                    missing_identity,
+                    after["automationPushIdentity"],
+                ),
             ), mock.patch.object(
                 cli, "_github_branch_governance_state",
                 side_effect=observe_governance,
             ), mock.patch.object(
                 cli, "_github_actions_permissions_state", return_value=after["actions"]
+            ), mock.patch.object(
+                cli, "_command_exists", side_effect=command_exists
             ), mock.patch.object(cli, "_try_source_sha", return_value="a" * 40):
                 result = cli._configure_cloud(
                     "owner/repo", True, None,
@@ -1458,25 +1530,44 @@ class CloudContractTests(unittest.TestCase):
         )
         self.assertLess(
             operations.index("configure-ruleset-prAndVerifiedCi"),
-            operations.index("bootstrap-gate-tag-freeze"),
-        )
-        self.assertLess(
-            operations.index("bootstrap-gate-tag-freeze"),
-            operations.index("configure-ruleset-gateTagCreation"),
-        )
-        self.assertLess(
-            operations.index("configure-ruleset-gateTagCreation"),
-            operations.index("finalize-gate-tag-freeze"),
-        )
-        self.assertLess(
-            operations.index("finalize-gate-tag-freeze"),
             operations.index("set-automation-push-private-key-secret"),
         )
         self.assertLess(
             operations.index("set-automation-push-private-key-secret"),
             operations.index("create-automation-push-deploy-key"),
         )
+        self.assertFalse(any("tag" in operation.casefold() for operation in operations))
+        self.assertEqual(prerequisite_checks, ["ssh-keygen"])
         self.assertNotIn("private-material", json.dumps(result))
+
+    def test_exact_identity_never_observes_or_binds_an_archival_gate_tag(self):
+        exact = self._cloud_state()
+        with mock.patch.object(
+            cli, "_gate_policy_repository", return_value={}
+        ), mock.patch.object(
+            cli, "_cloud_operating_state", return_value=exact
+        ), mock.patch.object(
+            cli, "_immutable_gate_tag_state",
+            side_effect=AssertionError("archival tag state must be unreachable"),
+        ) as tag_observation, mock.patch.object(
+            cli, "_bind_immutable_gate_tag",
+            side_effect=AssertionError("archival tag binding must be unreachable"),
+        ) as tag_binding, mock.patch.object(
+            cli, "_generated_automation_push_identity"
+        ) as identity_generator, mock.patch.object(
+            cli, "_capture_command"
+        ) as mutation:
+            result = cli._configure_cloud(
+                "owner/repo", True, None,
+                source_authority=self._source_authority(),
+            )
+
+        self.assertEqual(result["status"], "already-configured")
+        self.assertNotIn("immutableGateTag", result["configuration"])
+        tag_observation.assert_not_called()
+        tag_binding.assert_not_called()
+        identity_generator.assert_not_called()
+        mutation.assert_not_called()
 
     def test_ambiguous_secret_write_cannot_be_proved_by_secret_name_presence(self):
         missing_identity = {
@@ -1648,61 +1739,56 @@ class CloudContractTests(unittest.TestCase):
         identity_generator.assert_not_called()
         secret_mutation.assert_not_called()
 
-    def test_unobserved_bootstrap_freeze_stops_before_tag_creation(self):
-        missing_identity = {
-            "writeKeyCount": 0,
-            "reservedTitleKeyCount": 0,
-            "exact": False,
-        }
+    def test_archival_tag_ruleset_is_irrelevant_to_exact_branch_governance(self):
+        repo = "owner/repo"
         required = cli._required_branch_ruleset_contracts()
-        named = {}
-        for index, (name, contract) in enumerate(required.items()):
-            exact = name in {"immutableFastForwardHistory", "prAndVerifiedCi"}
-            named[name] = {
-                "id": index + 1 if exact else None,
-                "exact": exact,
-                "contract": contract if exact else None,
-            }
-        governance = {
-            "namedRulesets": named,
-            "extraRulesets": [],
-            "unprovenApplicableRulesets": [],
-            "classicBranchProtection": {"present": False, "compatible": True},
-            "exact": False,
+        required_details = []
+        listing = []
+        for identifier, contract in enumerate(required.values(), start=10):
+            listing.append({
+                "id": identifier,
+                "name": contract["name"],
+                "source_type": "Repository",
+                "source": repo,
+            })
+            required_details.append({
+                "id": identifier,
+                "source_type": "Repository",
+                "source": repo,
+                **contract,
+            })
+        legacy_tag = {
+            "id": 99,
+            "name": cli.GATE_TAG_FREEZE_RULESET_NAME,
+            "source_type": "Repository",
+            "source": repo,
+            "target": "tag",
+            "enforcement": "active",
+            "bypass_actors": [],
+            "conditions": {
+                "ref_name": {"include": ["refs/tags/gate-v2.0.2"], "exclude": []}
+            },
+            "rules": [{"type": "deletion"}],
         }
-        before = self._cloud_state(
-            automation_push_identity=missing_identity,
-            branch_governance=governance,
-        )
-        accepted = cli.ExecutionCapture("ruleset", ("gh",), 0, b"", b"")
-        with mock.patch.object(cli, "_gate_policy_repository"), mock.patch.object(
-            cli, "_cloud_operating_state", side_effect=[before] * 7
+        listing.append({key: legacy_tag[key] for key in (
+            "id", "name", "source_type", "source"
+        )})
+        with mock.patch.object(
+            cli, "_gh_json",
+            side_effect=(listing, *required_details, legacy_tag),
         ), mock.patch.object(
-            cli, "_github_api_mutation", return_value=accepted
-        ) as ruleset_mutation, mock.patch.object(
-            cli, "_github_branch_governance_state", return_value=governance
-        ), mock.patch.object(
-            cli, "_generated_automation_push_identity"
-        ) as identity_generator, mock.patch.object(
-            cli, "_capture_command_with_private_stdin_file"
-        ) as secret_mutation, mock.patch.object(
-            cli, "_github_actions_permissions_state", return_value=before["actions"]
-        ), mock.patch.object(
-            cli, "_try_source_sha", return_value="a" * 40
-        ), mock.patch.object(cli.time, "sleep"):
-            result = cli._configure_cloud(
-                "owner/repo", True, None, source_authority=self._source_authority()
-            )
+            cli, "_github_classic_branch_protection_state",
+            return_value={"present": False, "compatible": True},
+        ):
+            governance = cli._github_branch_governance_state(repo)
 
-        self.assertFalse(result["ok"])
-        self.assertEqual(ruleset_mutation.call_count, 1)
-        self.assertEqual(ruleset_mutation.call_args.args[1], "bootstrap-gate-tag-freeze")
-        self.assertIn(
-            "bootstrap gate-tag freeze was not observed exact",
-            result["activationPrecondition"]["governanceObservationError"],
+        self.assertTrue(governance["exact"])
+        self.assertEqual(governance["unprovenApplicableRulesets"], [])
+        self.assertEqual(len(governance["extraRulesets"]), 1)
+        self.assertEqual(
+            governance["extraRulesets"][0]["scope"],
+            {"relevant": False, "reason": "active-automation-does-not-write-tags"},
         )
-        identity_generator.assert_not_called()
-        secret_mutation.assert_not_called()
 
     def test_write_key_race_is_rechecked_immediately_before_key_provisioning(self):
         missing_identity = {
@@ -1841,7 +1927,7 @@ class CloudContractTests(unittest.TestCase):
             pages_workflow=False,
             actions=broad_actions,
             workflow_states=self._workflow_states(
-                "disabled_manually", "disabled_inactivity", "disabled_fork"
+                "disabled_manually", "disabled_inactivity"
             ),
         )
         observed_labels = []
@@ -1893,7 +1979,7 @@ class CloudContractTests(unittest.TestCase):
             pages_workflow=False,
             actions=broad_actions,
             workflow_states=self._workflow_states(
-                "disabled_manually", "disabled_inactivity", "disabled_fork"
+                "disabled_manually", "disabled_inactivity"
             ),
         )
         after = self._cloud_state()
@@ -1990,7 +2076,7 @@ class CloudContractTests(unittest.TestCase):
         self.assertFalse(
             cli._artifact_name_allowed("github-pages", "publish-gate.yml", 77)
         )
-        self.assertTrue(
+        self.assertFalse(
             cli._artifact_name_allowed(
                 "gate-release-evidence-77", "publish-gate.yml", 77
             )
@@ -2152,7 +2238,7 @@ class CloudContractTests(unittest.TestCase):
     def test_dispatch_expected_source_drift_fails_before_listing_or_mutation(self):
         preflight = {
             "repo": "owner/repo",
-            "workflow": "publish-gate.yml",
+            "workflow": "watch-dom.yml",
             "defaultBranch": "main",
         }
         with mock.patch.object(
@@ -2166,36 +2252,6 @@ class CloudContractTests(unittest.TestCase):
                 )
         runs.assert_not_called()
         mutation.assert_not_called()
-
-    def test_publish_gate_dispatch_binds_the_resolved_source_as_an_input(self):
-        preflight = {
-            "repo": "owner/repo",
-            "workflow": "publish-gate.yml",
-            "defaultBranch": "main",
-        }
-        run = {
-            "id": 8,
-            "head_sha": "a" * 40,
-            "event": "workflow_dispatch",
-            "display_title": "hotdeal-focus-publish-gate-" + ("2" * 32),
-            "path": ".github/workflows/publish-gate.yml",
-            "status": "queued",
-            "conclusion": None,
-            "html_url": "https://github.com/owner/repo/actions/runs/8",
-        }
-        accepted = cli.ExecutionCapture("github-dispatch", ("gh",), 0, b"", b"")
-        with mock.patch.object(cli, "_gh_json", return_value={"sha": "a" * 40}), \
-                mock.patch.object(cli, "_latest_runs", side_effect=[[], [run]]), \
-                mock.patch.object(cli, "_run_metadata", return_value=run), \
-                mock.patch.object(cli, "_capture_command", return_value=accepted) as capture, \
-                mock.patch.object(cli.uuid, "uuid4", return_value=mock.Mock(hex="2" * 32)):
-            result = cli._dispatch_cloud(
-                preflight, True, expected_source_sha="a" * 40
-            )
-        self.assertTrue(result["ok"])
-        argv = capture.call_args.args[0]
-        self.assertIn("dispatch_nonce=" + ("2" * 32), argv)
-        self.assertIn("source_sha=" + ("a" * 40), argv)
 
     def test_dispatch_timeout_without_observable_run_preserves_unknown_state(self):
         preflight = {
@@ -2327,6 +2383,14 @@ class GateReleaseCommandTests(unittest.TestCase):
             ),
             "GITHUB_JOB": "publish",
             "HDF_PRIVILEGED_ENVIRONMENT": cli.MAIN_AUTOMATION_ENVIRONMENT,
+        }
+
+    @staticmethod
+    def _exact_gate_creation_precondition():
+        return {
+            "branchGovernance": {"exact": True},
+            "automationPushIdentity": {"exact": True},
+            "exact": True,
         }
 
     def test_github_publisher_context_requires_the_exact_secret_bearing_job(self):
@@ -3409,7 +3473,7 @@ class GateReleaseCommandTests(unittest.TestCase):
             self.assertEqual(len(verify.call_args.args), 5)
             self.assertEqual(verify.call_args.args[-1], source_sha)
 
-    def test_publish_preflight_rejects_a_remote_commit_that_is_not_default_head(self):
+    def test_publish_preflight_requires_the_cloud_bound_immutable_tag(self):
         source_sha = "d" * 40
         manifest = {
             "gateArtifactVersion": "1.0.0",
@@ -3448,6 +3512,10 @@ class GateReleaseCommandTests(unittest.TestCase):
                 ), mock.patch.object(
                     cli, "_remote_gate_tag_commit", return_value=None
                 ), mock.patch.object(
+                    cli,
+                    "_gate_creation_governance_precondition",
+                    return_value=self._exact_gate_creation_precondition(),
+                ) as governance, mock.patch.object(
                     cli, "_gh_json", side_effect=api_values
                 ), mock.patch.object(
                     cli, "_immutable_release_policy", return_value={"enabled": True}
@@ -3455,16 +3523,16 @@ class GateReleaseCommandTests(unittest.TestCase):
                     cli, "_capture_command", side_effect=captures
                 ) as capture:
             with self.assertRaisesRegex(
-                cli.IntegrityFailure, "current default-branch head"
+                cli.IntegrityFailure, "must be bound by cloud configure"
             ):
                 cli.command_gate_release(args)
         self.assertEqual(capture.call_count, 2)
+        governance.assert_not_called()
 
-    def test_publish_preflight_proves_policy_and_head_before_tag_creation(self):
+    def test_publish_preflight_never_reads_admin_identity_when_tag_is_missing(self):
         repo, source_sha, manifest, args, repository = self._gate_v2_publish_inputs()
         args.action = "prepare-publish"
         args.apply = False
-        exact_head = self._exact_default_head(source_sha)
         with mock.patch.object(cli, "_command_exists", return_value=True), \
                 mock.patch.object(cli, "_validate_locked_gate_bytes"), \
                 mock.patch.object(cli, "_local_release_contract", return_value=(manifest, [])), \
@@ -3474,16 +3542,65 @@ class GateReleaseCommandTests(unittest.TestCase):
                 mock.patch.object(cli, "_immutable_release_policy", return_value={"enabled": True}), \
                 mock.patch.object(cli, "_remote_gate_tag_commit", return_value=None), \
                 mock.patch.object(
-                    cli, "_require_remote_default_head", return_value=exact_head
-                ):
-            result = cli.command_gate_release(args)
+                    cli,
+                    "_gate_creation_governance_precondition",
+                    return_value=self._exact_gate_creation_precondition(),
+                ) as governance, \
+                mock.patch.object(
+                    cli, "_require_remote_default_head"
+                ) as default_head:
+            with self.assertRaisesRegex(
+                cli.IntegrityFailure, "must be bound by cloud configure"
+            ):
+                cli.command_gate_release(args)
 
-        self.assertTrue(result["ok"])
-        self.assertEqual(result["status"], "ready-to-bind-tag")
-        self.assertFalse(result["tagPresent"])
-        self.assertIsNone(result["tagSourceCommit"])
-        self.assertFalse(result["releaseComplete"])
-        self.assertTrue(result["defaultHeadObservation"]["exact"])
+        governance.assert_not_called()
+        default_head.assert_not_called()
+
+    def test_gate_creation_precondition_reobserves_exact_rules_and_identity(self):
+        repo = "heelee912/adguard-hotdeal-focus"
+        governance = {
+            "exact": True,
+            "unprovenApplicableRulesets": [],
+            "classicBranchProtection": {"compatible": True},
+        }
+        identity = {
+            "exact": True,
+            "writeKeyCount": 1,
+            "keyExact": True,
+            "reservedTitleKeyCount": 1,
+        }
+        with mock.patch.object(
+            cli, "_github_branch_governance_state", return_value=governance
+        ) as observe_rules, mock.patch.object(
+            cli, "_automation_push_identity_state", return_value=identity
+        ) as observe_identity:
+            result = cli._gate_creation_governance_precondition(repo, "main")
+
+        self.assertTrue(result["exact"])
+        observe_rules.assert_called_once_with(repo, "main")
+        observe_identity.assert_called_once_with(repo)
+
+        with mock.patch.object(
+            cli,
+            "_github_branch_governance_state",
+            return_value={**governance, "exact": False},
+        ), mock.patch.object(
+            cli, "_automation_push_identity_state", return_value=identity
+        ) as skipped_identity:
+            with self.assertRaisesRegex(cli.IntegrityFailure, "governance is not exact"):
+                cli._gate_creation_governance_precondition(repo, "main")
+        skipped_identity.assert_not_called()
+
+        with mock.patch.object(
+            cli, "_github_branch_governance_state", return_value=governance
+        ), mock.patch.object(
+            cli,
+            "_automation_push_identity_state",
+            return_value={**identity, "exact": False},
+        ):
+            with self.assertRaisesRegex(cli.IntegrityFailure, "one exact automation"):
+                cli._gate_creation_governance_precondition(repo, "main")
 
     def test_publish_preflight_recovers_an_exact_frozen_source_after_main_moves(self):
         repo, source_sha, manifest, args, repository = self._gate_v2_publish_inputs()
@@ -3528,6 +3645,7 @@ class GateReleaseCommandTests(unittest.TestCase):
         self.assertTrue(result["tagPresent"])
         self.assertEqual(result["tagSourceCommit"], frozen_sha)
         self.assertEqual(result["tagSourceAuthority"], authority)
+        self.assertNotIn("tagCreationPrecondition", result)
         self.assertFalse(result["defaultHeadObservation"]["exact"])
 
     def test_publish_timeout_preserves_unknown_terminal_state(self):
@@ -3855,7 +3973,6 @@ class AdGuardContractTests(unittest.TestCase):
             "manifest_source": cli.DEFAULT_PAGES_MANIFEST,
             "backup_path": None,
             "evidence_dir": None,
-            "approve_exclusive_target_migration": False,
             "apply": False,
         }
         values.update(overrides)
@@ -3864,25 +3981,14 @@ class AdGuardContractTests(unittest.TestCase):
     def windows_context(self):
         return contextlib.ExitStack()
 
-    def test_deploy_apply_requires_separate_migration_approval(self):
-        args = self.args(apply=True)
-        with mock.patch.object(cli.sys, "platform", "win32"), mock.patch.object(
-            cli, "_command_exists", return_value=True
-        ):
-            with self.assertRaises(cli.UsageFailure):
-                cli.command_adguard(args)
-
-    def test_approval_switch_is_passed_only_for_approved_apply(self):
+    def test_deploy_delegates_only_the_userscript_release_contract(self):
         manifest, _, artifact_bytes = release_bundle()
         records = [{"path": name, "sha256": hashlib.sha256(content).hexdigest()}
                    for name, content in artifact_bytes.items()]
         urls = {
-            "filter.txt": manifest["filterSubscriptionUrl"],
-            "filterMirrorUrl": "https://heelee912.github.io/adguard-hotdeal-focus/filter.txt",
             "hotdeal-focus.user.js": "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
             "release-manifest.json": cli.DEFAULT_PAGES_MANIFEST,
         }
-        gate_release = {"immutable": True, "tag": "gate-v1.0.0"}
         captured_argv = []
 
         def powershell(argv, *, apply_mutation, rollback):
@@ -3892,24 +3998,40 @@ class AdGuardContractTests(unittest.TestCase):
         with mock.patch.object(cli.sys, "platform", "win32"), mock.patch.object(
             cli, "_command_exists", return_value=True
         ), mock.patch.object(cli, "_public_release_bundle", return_value=(
-            manifest, artifact_bytes, records, urls, gate_release
+            manifest, artifact_bytes, records, urls
         )), mock.patch.object(cli, "_powershell_json", side_effect=powershell), mock.patch.object(
             cli, "_try_source_sha", return_value="e" * 40
         ):
             dry = cli.command_adguard(self.args())
-            applied = cli.command_adguard(self.args(
-                apply=True, approve_exclusive_target_migration=True
-            ))
+            applied = cli.command_adguard(self.args(apply=True))
         self.assertIn("-WhatIf", captured_argv[0])
-        self.assertNotIn("-ApproveExclusiveTargetMigration", captured_argv[0])
-        self.assertIn("-ApproveExclusiveTargetMigration", captured_argv[1])
         self.assertIn("-Apply", captured_argv[1])
-        filter_url_index = captured_argv[1].index("-FilterUrl") + 1
+        for forbidden in (
+            "-FilterUrl", "-ExpectedFilterSha256",
+            "-ExpectedInstalledFilterRulesSha256",
+            "-ApproveExclusiveTargetMigration",
+        ):
+            self.assertNotIn(forbidden, captured_argv[0])
+            self.assertNotIn(forbidden, captured_argv[1])
         self.assertEqual(
-            captured_argv[1][filter_url_index], manifest["filterSubscriptionUrl"]
+            captured_argv[1][captured_argv[1].index("-UserscriptSource") + 1],
+            manifest["installUrl"],
         )
+        self.assertEqual(applied["installUrl"], manifest["installUrl"])
+        self.assertNotIn("gateRelease", applied)
         self.assertFalse(dry["mutationApplied"])
         self.assertTrue(applied["mutationApplied"])
+
+    def test_removed_gate_release_and_migration_switch_are_usage_errors(self):
+        parser = cli.build_parser()
+        with self.assertRaises(cli.UsageFailure):
+            parser.parse_args([
+                "adguard", "deploy", "--approve-exclusive-target-migration", "--json"
+            ])
+        with self.assertRaises(cli.UsageFailure):
+            parser.parse_args([
+                "gate-release", "verify", "--repo", "owner/repo", "--json"
+            ])
 
     def test_plaintext_rule_fields_are_redacted(self):
         value = {
