@@ -139,7 +139,7 @@ Pages publishes exactly the Userscript and manifest. Before deployment, the pipe
 - different bytes require a strictly higher version;
 - a downgrade or same-version replacement is rejected.
 
-After deployment, bounded cache-busting HTTPS polling must observe exact manifest and Userscript SHA-256 values before the job succeeds. The exact schema-v1 predecessors `0.3.6` (current Pages bytes) and `0.5.5` (default-branch source predecessor) are accepted only through a byte-fixed one-time migration contract; every other v1 bundle is rejected.
+After deployment, bounded cache-busting HTTPS polling must observe exact manifest and Userscript SHA-256 values before the job succeeds. The exact schema-v1 predecessors `0.3.6` (current Pages bytes) and `0.5.5` (default-branch source predecessor) are accepted only through a one-time migration contract that pins both full manifest bytes and Userscript bytes; every other v1 bundle is rejected.
 
 Rollback is forward-only. A last-known-good body must pass the current desktop/mobile live suite again and is then republished under a higher version with `rollback_of` evidence. Clients are never pointed to a lower version or mutable historical URL.
 

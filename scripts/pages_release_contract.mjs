@@ -46,20 +46,32 @@ const MANIFEST_KEYS = Object.freeze([
 ]);
 const LEGACY_V1_MIGRATION_PREDECESSORS = Object.freeze([
   Object.freeze({
-    // The bytes currently served by Pages before this one-time protocol-v2 release.
+    // The exact manifest and script bytes currently served by Pages before v2.
+    manifest: Object.freeze({
+      bytes: 6138,
+      sha256: "e18a342f6e3f79980129ca34510e423a2a87d99fe061a89f03c881af4b43a6c3",
+    }),
     releaseVersion: "0.3.6",
-    bytes: 161161,
-    sha256: "760c223c16108c421476d2832ab17060c81ca3dc034236986622d07c1532df5a",
-    canonicalTextSha256:
-      "991c1553ba27f7c8a0052f7af146443fd7fef20a983ca268bc756712d558af49",
+    userscript: Object.freeze({
+      bytes: 161161,
+      sha256: "760c223c16108c421476d2832ab17060c81ca3dc034236986622d07c1532df5a",
+      canonicalTextSha256:
+        "991c1553ba27f7c8a0052f7af146443fd7fef20a983ca268bc756712d558af49",
+    }),
   }),
   Object.freeze({
-    // The exact schema-v1 source predecessor recorded on the default branch.
+    // The exact manifest and script source predecessor recorded on the default branch.
+    manifest: Object.freeze({
+      bytes: 6529,
+      sha256: "ca6d4d808e065febec81b48a3bfcc83c03c05187e82cf64b58bca638b95a160d",
+    }),
     releaseVersion: "0.5.5",
-    bytes: 313912,
-    sha256: "87ab45918f70ce536a6c23f0afa2290ce54e19e5ad8f4ef409f59c837338578c",
-    canonicalTextSha256:
-      "933e3ae50531bdcf2b5db52749ebfb633f5e4a196a1c62cdc4ba1d222dd0eb14",
+    userscript: Object.freeze({
+      bytes: 313912,
+      sha256: "87ab45918f70ce536a6c23f0afa2290ce54e19e5ad8f4ef409f59c837338578c",
+      canonicalTextSha256:
+        "933e3ae50531bdcf2b5db52749ebfb633f5e4a196a1c62cdc4ba1d222dd0eb14",
+    }),
   }),
 ]);
 
@@ -501,27 +513,41 @@ function verifyHighWaterSource(highWaterBytes, proof, previousHighWaterBytes = n
   return { highWater, currentRecord };
 }
 
-function verifyLegacyV1Migration(manifestBytes, userscriptBytes) {
+function matchExactLegacyMigrationPredecessor(candidate, manifestBytes, userscriptBytes) {
+  if (
+    manifestBytes.length !== candidate.manifest.bytes ||
+    sha256(manifestBytes) !== candidate.manifest.sha256
+  ) return null;
   const manifest = decodeJson(manifestBytes, "published legacy manifest");
   const entry = manifest?.artifacts?.[USERSCRIPT_NAME];
-  const predecessor = LEGACY_V1_MIGRATION_PREDECESSORS.find((candidate) =>
+  if (
     manifest?.schemaVersion === 1 &&
     manifest?.status === "release-ready" &&
     manifest?.releaseVersion === candidate.releaseVersion &&
     entry &&
-    entry.bytes === candidate.bytes &&
-    entry.sha256 === candidate.sha256 &&
-    entry.canonicalTextSha256 === candidate.canonicalTextSha256 &&
-    userscriptBytes.length === candidate.bytes &&
-    sha256(userscriptBytes) === candidate.sha256 &&
-    sha256(canonicalText(userscriptBytes)) === candidate.canonicalTextSha256,
-  );
-  if (!predecessor) {
+    entry.bytes === candidate.userscript.bytes &&
+    entry.sha256 === candidate.userscript.sha256 &&
+    entry.canonicalTextSha256 === candidate.userscript.canonicalTextSha256 &&
+    userscriptBytes.length === candidate.userscript.bytes &&
+    sha256(userscriptBytes) === candidate.userscript.sha256 &&
+    sha256(canonicalText(userscriptBytes)) === candidate.userscript.canonicalTextSha256
+  ) return { manifest, artifact: entry };
+  return null;
+}
+
+function verifyLegacyV1Migration(manifestBytes, userscriptBytes) {
+  const match = LEGACY_V1_MIGRATION_PREDECESSORS
+    .map((candidate) => ({
+      candidate,
+      legacy: matchExactLegacyMigrationPredecessor(candidate, manifestBytes, userscriptBytes),
+    }))
+    .find(({ legacy }) => legacy !== null);
+  if (!match) {
     fail("published schema-v1 release is not an exact migration predecessor");
   }
   return {
-    manifest,
-    artifact: entry,
+    manifest: match.legacy.manifest,
+    artifact: match.legacy.artifact,
     bundleSha256: publicBundleSha256(manifestBytes, userscriptBytes),
     legacyMigration: true,
   };
@@ -794,6 +820,7 @@ export {
   fetchBytes,
   highWaterDocument,
   LEGACY_V1_MIGRATION_PREDECESSORS,
+  matchExactLegacyMigrationPredecessor,
   parseHighWater,
   preflight,
   publicBundleSha256,

@@ -10,6 +10,7 @@ import {
   fetchBytes,
   highWaterDocument,
   LEGACY_V1_MIGRATION_PREDECESSORS,
+  matchExactLegacyMigrationPredecessor,
   preflight,
   readBundle,
   releaseHighWaterRecord,
@@ -116,20 +117,79 @@ function writeBundle(root, manifestBytes, source) {
 const base = fixture();
 assert.deepEqual(LEGACY_V1_MIGRATION_PREDECESSORS, [
   {
+    manifest: {
+      bytes: 6138,
+      sha256: "e18a342f6e3f79980129ca34510e423a2a87d99fe061a89f03c881af4b43a6c3",
+    },
     releaseVersion: "0.3.6",
-    bytes: 161161,
-    sha256: "760c223c16108c421476d2832ab17060c81ca3dc034236986622d07c1532df5a",
-    canonicalTextSha256:
-      "991c1553ba27f7c8a0052f7af146443fd7fef20a983ca268bc756712d558af49",
+    userscript: {
+      bytes: 161161,
+      sha256: "760c223c16108c421476d2832ab17060c81ca3dc034236986622d07c1532df5a",
+      canonicalTextSha256:
+        "991c1553ba27f7c8a0052f7af146443fd7fef20a983ca268bc756712d558af49",
+    },
   },
   {
+    manifest: {
+      bytes: 6529,
+      sha256: "ca6d4d808e065febec81b48a3bfcc83c03c05187e82cf64b58bca638b95a160d",
+    },
     releaseVersion: "0.5.5",
-    bytes: 313912,
-    sha256: "87ab45918f70ce536a6c23f0afa2290ce54e19e5ad8f4ef409f59c837338578c",
-    canonicalTextSha256:
-      "933e3ae50531bdcf2b5db52749ebfb633f5e4a196a1c62cdc4ba1d222dd0eb14",
+    userscript: {
+      bytes: 313912,
+      sha256: "87ab45918f70ce536a6c23f0afa2290ce54e19e5ad8f4ef409f59c837338578c",
+      canonicalTextSha256:
+        "933e3ae50531bdcf2b5db52749ebfb633f5e4a196a1c62cdc4ba1d222dd0eb14",
+    },
   },
 ]);
+const syntheticLegacyUserscript = Buffer.from("legacy userscript\n", "utf8");
+const syntheticLegacyManifest = encode({
+  artifacts: {
+    "hotdeal-focus.user.js": {
+      bytes: syntheticLegacyUserscript.length,
+      canonicalTextSha256: digest(Buffer.from("legacy userscript", "utf8")),
+      sha256: digest(syntheticLegacyUserscript),
+    },
+  },
+  releaseVersion: "1.2.3",
+  schemaVersion: 1,
+  status: "release-ready",
+});
+const syntheticLegacyCandidate = {
+  manifest: {
+    bytes: syntheticLegacyManifest.length,
+    sha256: digest(syntheticLegacyManifest),
+  },
+  releaseVersion: "1.2.3",
+  userscript: {
+    bytes: syntheticLegacyUserscript.length,
+    canonicalTextSha256: digest(Buffer.from("legacy userscript", "utf8")),
+    sha256: digest(syntheticLegacyUserscript),
+  },
+};
+const parsedSyntheticLegacyManifest = JSON.parse(syntheticLegacyManifest.toString("utf8"));
+assert.deepEqual(
+  matchExactLegacyMigrationPredecessor(
+    syntheticLegacyCandidate,
+    syntheticLegacyManifest,
+    syntheticLegacyUserscript,
+  ),
+  {
+    artifact: parsedSyntheticLegacyManifest.artifacts["hotdeal-focus.user.js"],
+    manifest: parsedSyntheticLegacyManifest,
+  },
+);
+const alteredLegacyManifest = Buffer.from(syntheticLegacyManifest);
+alteredLegacyManifest[0] ^= 1;
+assert.equal(
+  matchExactLegacyMigrationPredecessor(
+    syntheticLegacyCandidate,
+    alteredLegacyManifest,
+    syntheticLegacyUserscript,
+  ),
+  null,
+);
 assert.equal(base.proof.sha256, digest(base.source));
 assert.equal(
   verifyHighWaterSource(base.highWaterBytes, base.proof).currentRecord.bundleSha256,
