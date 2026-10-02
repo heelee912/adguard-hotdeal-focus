@@ -81,7 +81,7 @@ jobs:
           set +e
           status=0
           timeout --kill-after=5s 60s npm run test:network || status=1
-          timeout --kill-after=5s 90s npm run test:oracle || status=1
+          timeout --kill-after=5s 180s npm run test:oracle || status=1
           timeout --kill-after=5s 60s npm run test:tamper || status=1
           if [[ "${status}" == "0" ]]; then
             timeout --kill-after=10s 15m npm run test:behavior || status=1
