@@ -68,7 +68,7 @@ param(
     [ValidateSet('inspect', 'backup', 'restore-backup', 'install-userscript',
         'migrate-legacy', 'install-filter', 'deploy', 'verify',
         'csp-probe-inspect', 'csp-probe-install', 'csp-probe-restore',
-        'dns-disable', 'dns-enable', 'install-algumon-ads-policy',
+        'dns-disable', 'dns-enable', 'select-nextdns', 'install-algumon-ads-policy',
         'exempt-algumon-ad-dns',
         'enable-algumon-web-filtering', 'exempt-algumon-web-filtering',
         'disable-userscript')]
@@ -95,6 +95,9 @@ param(
     [string] $BackupRoot,
 
     [string] $BackupPath,
+
+    [ValidatePattern('^[0-9a-f]{6}$')]
+    [string] $NextDnsProfileId,
 
     [string] $ReferenceUserFilterSnapshot,
 
@@ -163,7 +166,9 @@ $script:AlgumonAdPolicyHosts = @(
 )
 $script:AlgumonAdDnsExceptionRules = @(
     '@@||doubleclick.net^',
-    '@@||googlesyndication.com^'
+    '@@||googlesyndication.com^',
+    '@@||api2.amplitude.com^',
+    '@@||sr-client-cfg.amplitude.com^'
 )
 $script:CspProbeUserscriptName = 'AdGuard Hotdeal Focus CSP Probe'
 $script:CspProbeUserscriptVersion = '1.2.0'
@@ -4948,6 +4953,68 @@ function Get-DnsFilteringState {
     }
 }
 
+function Select-ExistingNextDnsServer {
+    param(
+        [Parameter(Mandatory = $true)] $Client,
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{6}$')][string] $ProfileId
+    )
+    $address = "https://dns.nextdns.io/$ProfileId"
+    $before = Get-DnsFilteringState -Client $Client
+    if (-not $before.Enabled) { throw 'DNS filtering must remain enabled' }
+    $servers = @($Client.GetDnsProviders() | ForEach-Object { $_.Servers } |
+        Where-Object {
+            [string] $_.ServerType -ceq 'DnsOverHttps' -and
+            @($_.Addresses).Count -eq 1 -and
+            [string] $_.Addresses[0] -ceq $address
+        })
+    if ($servers.Count -ne 1) { throw 'The existing exact NextDNS profile server was not unique' }
+    if (-not $Client.ValidateDnsServer($servers[0])) {
+        throw 'AdGuard rejected the existing NextDNS server'
+    }
+    if (@($before.SelectedServerAddresses).Count -eq 1 -and
+        $before.SelectedServerAddresses[0] -ceq $address -and
+        $before.SelectedServerType -ceq 'DnsOverHttps') {
+        return [pscustomobject]@{ Changed = $false; Before = $before; After = $before }
+    }
+    $settings = $Client.GetDnsSettings()
+    $originalServer = $settings.SelectedServer
+    try {
+        $settings.SelectedServer = $servers[0]
+        $Client.SaveDnsSettings($settings)
+        foreach ($read in 1..2) {
+            $after = Get-DnsFilteringState -Client $Client
+            if (-not $after.Enabled -or
+                $after.WifiExclusionsEnabled -ne $before.WifiExclusionsEnabled -or
+                $after.SelectedServerType -cne 'DnsOverHttps' -or
+                @($after.SelectedServerAddresses).Count -ne 1 -or
+                $after.SelectedServerAddresses[0] -cne $address) {
+                throw 'AdGuard did not persist the exact NextDNS selection with DNS enabled'
+            }
+        }
+        return [pscustomobject]@{ Changed = $true; Before = $before; After = $after }
+    }
+    catch {
+        $original = $_
+        try {
+            $settings.SelectedServer = $originalServer
+            $settings.IsEnabled = $before.Enabled
+            $settings.ShouldDisableDnsByWifiExclusions = $before.WifiExclusionsEnabled
+            $Client.SaveDnsSettings($settings)
+            $restored = Get-DnsFilteringState -Client $Client
+            if ($restored.Enabled -ne $before.Enabled -or
+                $restored.WifiExclusionsEnabled -ne $before.WifiExclusionsEnabled -or
+                $restored.SelectedServerType -cne $before.SelectedServerType -or
+                -not (Test-ExactStringMultiset -Left $before.SelectedServerAddresses `
+                    -Right $restored.SelectedServerAddresses)) {
+                throw 'NextDNS selection rollback did not restore the previous DNS state'
+            }
+        }
+        catch { throw 'NextDNS selection failed and rollback was incomplete' }
+        throw $original
+    }
+}
+
 function Get-DnsUserFilter {
     param([Parameter(Mandatory = $true)] $Client)
     $filters = @($Client.GetAllFilterSubscriptions() | Where-Object {
@@ -5829,6 +5896,32 @@ try {
     switch ($Command) {
         'inspect' {
             Write-JsonResult -Value (Get-InspectionReport -Session $session)
+        }
+        'select-nextdns' {
+            Assert-MutationAuthorized
+            [void] (Assert-GlobalProtection -Client $client)
+            if (-not $NextDnsProfileId) { throw 'select-nextdns requires -NextDnsProfileId' }
+            if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess(
+                    "Existing NextDNS profile $NextDnsProfileId",
+                    'Select the saved DNS-over-HTTPS server without disabling DNS')) {
+                $result = Select-ExistingNextDnsServer -Client $client -ProfileId $NextDnsProfileId
+                [void] (Assert-GlobalProtection -Client $client)
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'select-nextdns'
+                        changed = [bool] $result.Changed
+                        verified = $true
+                        before = $result.Before
+                        after = $result.After
+                    })
+            } else {
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'select-nextdns'
+                        what_if = $true
+                        desired_address = "https://dns.nextdns.io/$NextDnsProfileId"
+                        current = Get-DnsFilteringState -Client $client
+                        adguard_configuration_changed = $false
+                    })
+            }
         }
         'dns-disable' {
             Assert-MutationAuthorized
