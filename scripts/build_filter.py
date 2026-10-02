@@ -2013,11 +2013,18 @@ def _render_candidate_userscript(
         r"^(//\s*@version\s+)[^\s]+(\s*)$",
         rf"\g<1>{release_version}\g<2>",
         rendered,
-        count=1,
         flags=re.MULTILINE,
     )
     if replacement_count != 1:
         raise ConfigError("userscript @version metadata could not be updated")
+    rendered, generator_replacement_count = re.subn(
+        r"^([ \t]*const[ \t]+GENERATOR_VERSION[ \t]*=[ \t]*)([\"'])([^\"'\r\n]+)\2([ \t]*;[ \t]*)$",
+        rf"\g<1>\g<2>{release_version}\g<2>\g<4>",
+        rendered,
+        flags=re.MULTILINE,
+    )
+    if generator_replacement_count != 1:
+        raise ConfigError("userscript GENERATOR_VERSION must be updated exactly once")
     return rendered
 
 

@@ -22,6 +22,7 @@ from build_filter import (  # noqa: E402
     ConfigError,
     _load_approved_state,
     _path_pattern_matches,
+    _render_candidate_userscript,
     _validate_candidate_payload,
     build_candidate_bundle,
     build_candidate_draft_bundle,
@@ -72,6 +73,21 @@ def userscript_contracts(source: str) -> list[dict]:
 def metadata_values(source: str, key: str) -> list[str]:
     pattern = re.compile(rf"^//\s*@{re.escape(key)}\s+(.+?)\s*$", re.MULTILINE)
     return pattern.findall(source)
+
+
+def exported_generator_version(source: str) -> str:
+    completed = subprocess.run(
+        ["node", "--eval", "const record={exports:{}};"
+         "new Function('module',require('fs').readFileSync(0,'utf8'))(record);"
+         "process.stdout.write(record.exports.GENERATOR_VERSION);"],
+        input=source,
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        cwd=PROJECT_ROOT,
+    )
+    return completed.stdout
 
 
 def raw_layout_paths(layout: dict) -> list[str]:
@@ -190,6 +206,10 @@ class UserscriptMetadataTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.source = userscript_text()
+
+    def test_metadata_internal_export_and_config_versions_are_identical(self) -> None:
+        self.assertEqual([BASE_RELEASE_VERSION], metadata_values(self.source, "version"))
+        self.assertEqual(BASE_RELEASE_VERSION, exported_generator_version(self.source))
 
     def test_document_start_metadata_and_update_placeholders(self) -> None:
         self.assertEqual(
@@ -2115,6 +2135,33 @@ process.stdout.write(JSON.stringify({
 
 
 class CandidatePromotionContractTests(unittest.TestCase):
+    def test_candidate_materialization_updates_both_version_fields_exactly_once(self) -> None:
+        source = userscript_text()
+        payload = self.candidate_payload("version-fields")
+        rendered = _render_candidate_userscript(
+            source, payload, "clien.net", ["desktop", "mobile"], FIRST_CANDIDATE_VERSION,
+        )
+        self.assertEqual([FIRST_CANDIDATE_VERSION], metadata_values(rendered, "version"))
+        self.assertEqual(FIRST_CANDIDATE_VERSION, exported_generator_version(rendered))
+        declaration = re.search(
+            r"^[ \t]*const GENERATOR_VERSION = [\"'][^\"']+[\"'];[ \t]*$",
+            source, re.MULTILINE,
+        ).group(0)
+        for label, altered in (
+            ("missing", source.replace(declaration, "")),
+            ("duplicate", source.replace(declaration, declaration + "\n" + declaration)),
+        ):
+            with self.subTest(generator_declaration=label):
+                with self.assertRaisesRegex(ConfigError, "GENERATOR_VERSION.*exactly once"):
+                    _render_candidate_userscript(
+                        altered, payload, "clien.net", ["desktop", "mobile"], FIRST_CANDIDATE_VERSION,
+                    )
+        duplicated_metadata = source + f"\n// @version {BASE_RELEASE_VERSION}\n"
+        with self.assertRaisesRegex(ConfigError, "@version metadata"):
+            _render_candidate_userscript(
+                duplicated_metadata, payload, "clien.net", ["desktop", "mobile"], FIRST_CANDIDATE_VERSION,
+            )
+
     def candidate_payload(self, variant_id: str) -> dict:
         sample_urls = [
             "https://www.clien.net/service/board/jirum/19230509",
@@ -2621,6 +2668,13 @@ class CandidatePromotionContractTests(unittest.TestCase):
                 bundle["hotdeal-focus.user.js"],
             )
             overlay = json.loads(bundle["config/sites.json"])
+            self.assertEqual(FIRST_CANDIDATE_VERSION, overlay["metadata"]["version"])
+            for stage in (draft_bundle, bundle):
+                materialized_source = stage["hotdeal-focus.user.js"].decode("utf-8")
+                self.assertEqual([overlay["metadata"]["version"]],
+                                 metadata_values(materialized_source, "version"))
+                self.assertEqual(overlay["metadata"]["version"],
+                                 exported_generator_version(materialized_source))
             clien_layout = overlay["sites"][0]["layouts"][0]
             self.assertEqual("jirum", clien_layout["id"])
             self.assertEqual(
