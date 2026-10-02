@@ -11,6 +11,7 @@ import {
   isPrivateOrSpecialIp,
   networkFidelityFailures,
   networkRequestDecision,
+  networkRequestRedirectEvidence,
   networkResourceUrlSha256,
   parseConnectAuthority,
   primeDeclaredArticleNavigation,
@@ -419,6 +420,92 @@ function testOptionalFailuresStayObservedWhileArticleResourcesRemainRequired() {
     "main document failures remain terminal without any role evidence");
 }
 
+function redirectRequestChain(urls) {
+  return urls.reduce((ancestor, url) => ({ url: () => url, redirectedFrom: () => ancestor }), null);
+}
+
+function testRedirectedArticleResourceFailuresRemainRequired() {
+  const urls = [
+    "https://article.example/private-photo?signature=original-secret",
+    "https://images.example/private-hop?signature=intermediate-secret",
+    "https://cdn.example/private-final?signature=final-secret#ignored",
+  ];
+  const request = redirectRequestChain(urls);
+  const redirectEvidence = networkRequestRedirectEvidence(request);
+  assert.deepEqual(redirectEvidence, {
+    ancestorUrlSha256s: urls.slice(0, -1).reverse().map(networkResourceUrlSha256),
+    status: "complete",
+  });
+  const recorder = createNetworkPolicyEvidenceRecorder();
+  recorder.recordAllowedRequestFailure("cdn.example", "image", "net::ERR_CONNECTION_RESET", false,
+    request.url(), redirectEvidence);
+  const snapshot = recorder.snapshot();
+  for (const url of urls) {
+    assert.deepEqual(networkFidelityFailures(snapshot, [], {
+      hosts: [], urlSha256s: [networkResourceUrlSha256(url)],
+    }), ["an allowed remote request failed before a complete response"],
+    "a retained original, intermediate, or final resource URL must identify a failed redirect chain");
+  }
+  assert.deepEqual(networkFidelityFailures(snapshot, ["cdn.example"], {
+    hosts: ["cdn.example"], urlSha256s: [networkResourceUrlSha256("https://cdn.example/unrelated.webp")],
+  }), [], "unrelated redirected advertising remains observed without rejecting the article");
+  for (const sensitiveText of ["private-photo", "private-hop", "private-final", "signature=", "secret"]) {
+    assert.equal(JSON.stringify(snapshot).includes(sensitiveText), false, sensitiveText);
+  }
+  snapshot.failedAllowedRequests[0].redirectAncestorUrlSha256s.length = 0;
+  assert.equal(recorder.snapshot().failedAllowedRequests[0].redirectAncestorUrlSha256s.length, 2,
+    "snapshot consumers cannot mutate recorded ancestry");
+
+  const stylesheet = redirectRequestChain([
+    "https://article.example/article.css", "https://cdn.example/article-v2.css",
+  ]);
+  const responses = createNetworkPolicyEvidenceRecorder();
+  responses.recordAllowedResponseFailure("cdn.example", "stylesheet", 503, false,
+    stylesheet.url(), networkRequestRedirectEvidence(stylesheet));
+  assert.deepEqual(networkFidelityFailures(responses.snapshot(), [], {
+    hosts: [], urlSha256s: [networkResourceUrlSha256("https://article.example/article.css")],
+  }), ["an allowed remote response returned HTTP 4xx or 5xx"]);
+  assert.deepEqual(networkRequestRedirectEvidence(redirectRequestChain([urls[0]])), {
+    ancestorUrlSha256s: [], status: "complete",
+  });
+}
+
+function testRedirectAncestryBoundsAndIncompleteEvidence() {
+  const urls = Array.from({ length: 34 }, (_, index) => `https://cdn.example/hop-${index}`);
+  const atLimit = networkRequestRedirectEvidence(redirectRequestChain(urls.slice(0, 33)));
+  assert.equal(atLimit.status, "complete");
+  assert.equal(atLimit.ancestorUrlSha256s.length, 32);
+  const overflow = networkRequestRedirectEvidence(redirectRequestChain(urls));
+  assert.equal(overflow.status, "overflow");
+  assert.equal(overflow.ancestorUrlSha256s.length, 32);
+  const cycle = { url: () => urls[0], redirectedFrom: () => cycle };
+  const invalid = redirectRequestChain(["not a URL", urls[1]]);
+  const unavailable = { url: () => urls[0], redirectedFrom: () => { throw new Error("private-secret"); } };
+  for (const [request, status] of [
+    [redirectRequestChain(urls), "overflow"], [cycle, "cycle"],
+    [invalid, "invalid-url"], [unavailable, "unavailable"],
+  ]) {
+    const ancestry = networkRequestRedirectEvidence(request);
+    assert.equal(ancestry.status, status);
+    for (const failureKind of ["request", "response"]) {
+      const recorder = createNetworkPolicyEvidenceRecorder();
+      if (failureKind === "request") {
+        recorder.recordAllowedRequestFailure("cdn.example", "image", "net::ERR_ABORTED", false,
+          request.url(), ancestry);
+      } else {
+        recorder.recordAllowedResponseFailure("cdn.example", "stylesheet", 503, false,
+          request.url(), ancestry);
+      }
+      assert.ok(networkFidelityFailures(recorder.snapshot()).includes(
+        "failed resource redirect ancestry was incomplete or cyclic"),
+      `${failureKind}: ${status} must not be silently treated as an optional resource`);
+      assert.equal(JSON.stringify(recorder.snapshot()).includes("private-secret"), false);
+    }
+  }
+  assert.equal(networkRequestRedirectEvidence(redirectRequestChain([urls[0], urls[0]])).status, "complete",
+    "distinct requests sharing one URL are not an object-reference cycle");
+}
+
 function testPublicDnsAnswerCardinalityAndPrivacy() {
   const publicRecords = Array.from({ length: 128 }, (_, index) => ({ address: `8.8.8.${index + 1}` }));
   const full = validatePublicDnsAnswers(publicRecords);
@@ -709,6 +796,8 @@ async function main() {
   testRemoteRequestBudgetBoundary();
   testConcurrentReservations();
   testOptionalFailuresStayObservedWhileArticleResourcesRemainRequired();
+  testRedirectedArticleResourceFailuresRemainRequired();
+  testRedirectAncestryBoundsAndIncompleteEvidence();
   testPublicDnsAnswerCardinalityAndPrivacy();
   testArticleLeaseBudgetsOnlyScopedCookies();
   await testArticleNavigationPrimingIsScopedAndPublic();

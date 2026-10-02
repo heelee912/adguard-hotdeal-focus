@@ -59,6 +59,7 @@ const ARTICLE_ACCESS_LEASE_MAX_COOKIE_BYTES = 64 * 1_024;
 const DESTINATION_CHALLENGE_SETTLE_MAX_MS = 12_000;
 const NETWORK_POLICY_MAX_REMOTE_HOSTS = 128;
 const NETWORK_POLICY_MAX_REMOTE_REQUESTS = 4_096;
+const NETWORK_POLICY_MAX_REDIRECT_ANCESTORS = 32;
 const PINNED_PROXY_MAX_CONNECT_REQUESTS = 1_024;
 const PINNED_PROXY_MAX_ACTIVE_TUNNELS = 256;
 const PINNED_PROXY_MAX_TRANSFER_BYTES = 512 * 1024 * 1024;
@@ -1104,7 +1105,7 @@ function createNetworkPolicyEvidenceRecorder({
     .sort((left, right) =>
       left.hostname < right.hostname ? -1 : left.hostname > right.hostname ? 1 : 0,
     );
-  const recordFailedResource = (collection, hostname, requestType, reason, isMainNavigation, urlText) => {
+  const recordFailedResource = (collection, hostname, requestType, reason, isMainNavigation, urlText, redirectEvidence) => {
     if (collection.length >= maximumRemoteRequests) {
       failedResourceEvidenceOverflowCount += 1;
       return;
@@ -1116,6 +1117,10 @@ function createNetworkPolicyEvidenceRecorder({
       isMainNavigation: isMainNavigation === true,
       // URLs may carry signed queries or path tokens. Persist only their digest.
       urlSha256: networkResourceUrlSha256(urlText),
+      ...(redirectEvidence ? {
+        redirectAncestorUrlSha256s: [...redirectEvidence.ancestorUrlSha256s],
+        redirectAncestryStatus: redirectEvidence.status,
+      } : {}),
     });
   };
   return {
@@ -1161,11 +1166,11 @@ function createNetworkPolicyEvidenceRecorder({
         record(undeclaredPublicByHost, hostname, requestType, reason, isMainNavigation);
       }
     },
-    recordAllowedRequestFailure(hostname, requestType, reason, isMainNavigation, urlText) {
+    recordAllowedRequestFailure(hostname, requestType, reason, isMainNavigation, urlText, redirectEvidence) {
       record(failedAllowedRequestByHost, hostname, requestType, reason, isMainNavigation);
-      recordFailedResource(failedAllowedRequests, hostname, requestType, reason, isMainNavigation, urlText);
+      recordFailedResource(failedAllowedRequests, hostname, requestType, reason, isMainNavigation, urlText, redirectEvidence);
     },
-    recordAllowedResponseFailure(hostname, requestType, status, isMainNavigation, urlText) {
+    recordAllowedResponseFailure(hostname, requestType, status, isMainNavigation, urlText, redirectEvidence) {
       record(
         failedAllowedResponseByHost,
         hostname,
@@ -1174,7 +1179,7 @@ function createNetworkPolicyEvidenceRecorder({
         isMainNavigation,
       );
       recordFailedResource(failedAllowedResponses, hostname, requestType,
-        `http-${Number.isInteger(status) ? status : "invalid"}`, isMainNavigation, urlText);
+        `http-${Number.isInteger(status) ? status : "invalid"}`, isMainNavigation, urlText, redirectEvidence);
     },
     recordExactChallenge(hostname, requestType, reason, isMainNavigation) {
       record(exactChallengeByHost, hostname, requestType, reason, isMainNavigation);
@@ -1240,8 +1245,8 @@ function createNetworkPolicyEvidenceRecorder({
         undeclaredPublicHosts: serialize(undeclaredPublicByHost),
         failedAllowedRequestHosts: serialize(failedAllowedRequestByHost),
         failedAllowedResponseHosts: serialize(failedAllowedResponseByHost),
-        failedAllowedRequests: failedAllowedRequests.map((entry) => ({ ...entry })),
-        failedAllowedResponses: failedAllowedResponses.map((entry) => ({ ...entry })),
+        failedAllowedRequests: structuredClone(failedAllowedRequests),
+        failedAllowedResponses: structuredClone(failedAllowedResponses),
         failedResourceEvidenceOverflowCount,
         navigationViolations: serialize(navigationViolationByAuthority),
         blockedHosts,
@@ -1261,6 +1266,29 @@ function networkResourceUrlSha256(urlText) {
     return sha256(url.href);
   } catch {
     return null;
+  }
+}
+
+function networkRequestRedirectEvidence(request) {
+  const ancestorUrlSha256s = [];
+  const seen = new Set([request]);
+  let current = request;
+  try {
+    while (true) {
+      const ancestor = current.redirectedFrom();
+      if (!ancestor) return { ancestorUrlSha256s, status: "complete" };
+      if (seen.has(ancestor)) return { ancestorUrlSha256s, status: "cycle" };
+      if (ancestorUrlSha256s.length >= NETWORK_POLICY_MAX_REDIRECT_ANCESTORS) {
+        return { ancestorUrlSha256s, status: "overflow" };
+      }
+      seen.add(ancestor);
+      const digest = networkResourceUrlSha256(ancestor.url());
+      if (!digest) return { ancestorUrlSha256s, status: "invalid-url" };
+      ancestorUrlSha256s.push(digest);
+      current = ancestor;
+    }
+  } catch {
+    return { ancestorUrlSha256s, status: "unavailable" };
   }
 }
 
@@ -1307,6 +1335,7 @@ function networkFidelityFailures(
     if (Array.isArray(requests)) {
       return requests.some((entry) => entry.isMainNavigation === true ||
         (entry.urlSha256 && requiredResourceDigests.has(entry.urlSha256)) ||
+        (entry.redirectAncestorUrlSha256s ?? []).some((digest) => requiredResourceDigests.has(digest)) ||
         // Older callers without exact URL evidence keep the conservative host check.
         (!entry.urlSha256 && isRequiredHost(entry.hostname)));
     }
@@ -1345,6 +1374,11 @@ function networkFidelityFailures(
   }
   if ((networkPolicyEvidence?.failedResourceEvidenceOverflowCount ?? 0) > 0) {
     failures.push("failed resource evidence exceeded its bounded request count");
+  }
+  if ([...(networkPolicyEvidence?.failedAllowedRequests ?? []),
+    ...(networkPolicyEvidence?.failedAllowedResponses ?? [])].some((entry) =>
+    entry.redirectAncestryStatus && entry.redirectAncestryStatus !== "complete")) {
+    failures.push("failed resource redirect ancestry was incomplete or cyclic");
   }
   if ((networkPolicyEvidence?.remoteHostBudgetOverflowCount ?? 0) > 0) {
     failures.push("remote resource host cardinality exceeded its fail-closed budget");
@@ -5782,6 +5816,7 @@ async function createPageContext(
       failureText,
       lifecycle.isMainNavigation,
       request.url(),
+      networkRequestRedirectEvidence(request),
     );
     finishInFlightReservation(request);
   };
@@ -5797,6 +5832,7 @@ async function createPageContext(
       response.status(),
       lifecycle.isMainNavigation,
       request.url(),
+      networkRequestRedirectEvidence(request),
     );
   });
   await context.route("**/*", async (route) => {
@@ -11669,6 +11705,7 @@ export {
   networkFidelityFailures,
   networkResourceUrlSha256,
   networkRequestDecision,
+  networkRequestRedirectEvidence,
   isPrivateOrSpecialIp,
   isTopLevelNavigationRequest,
   incrementStablePatchVersion,
