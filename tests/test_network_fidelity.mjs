@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import vm from "node:vm";
+import { EventEmitter } from "node:events";
 
 import {
   FIRST_PAINT_PROBE_SOURCE,
@@ -8,11 +9,13 @@ import {
   consumeArticleAccessLease,
   createArticleAccessLease,
   createNetworkPolicyEvidenceRecorder,
+  createStylesheetDependencyRecorder,
   isPrivateOrSpecialIp,
   networkFidelityFailures,
   networkRequestDecision,
   networkRequestRedirectEvidence,
   networkResourceUrlSha256,
+  observeStylesheetDependencies,
   parseConnectAuthority,
   primeDeclaredArticleNavigation,
   validatePublicDnsAnswers,
@@ -506,6 +509,93 @@ function testRedirectAncestryBoundsAndIncompleteEvidence() {
     "distinct requests sharing one URL are not an object-reference cycle");
 }
 
+async function testStylesheetDependenciesPreserveImportedCssAndFonts() {
+  const main = "https://article.example/main.css?private=root-token";
+  const redirected = "https://styles.example/main.css?private=redirect-token";
+  const imported = "https://themes.example/theme.css?private=theme-token";
+  const font = "https://fonts.example/article.woff2?private=font-token";
+  const event = (url, parent, type = "Stylesheet", frameId = "article-frame") => ({
+    frameId, type, request: { url }, initiator: { type: "parser", url: parent },
+  });
+  const dependencies = createStylesheetDependencyRecorder();
+  const session = new EventEmitter();
+  const commands = [];
+  session.send = async (command) => {
+    commands.push(command);
+    return command === "Page.getFrameTree" ? { frameTree: { frame: { id: "article-frame" } } } : {};
+  };
+  session.detach = async () => { commands.push("detach"); };
+  const stop = await observeStylesheetDependencies({ newCDPSession: async () => session }, {}, dependencies);
+  assert.deepEqual(commands, ["Page.enable", "Page.getFrameTree", "Network.enable"]);
+  session.emit("Network.requestWillBeSent", { ...event(redirected, "https://article.example/deal/1"),
+    redirectResponse: { url: main } });
+  session.emit("Network.requestWillBeSent", event(imported, redirected));
+  session.emit("Network.requestWillBeSent", event(font, imported, "Font"));
+  // Cyclic CSS imports are harmless to dependency traversal, not an unbounded loop.
+  session.emit("Network.requestWillBeSent", event(redirected, imported));
+  const optionalUrls = [
+    ["https://themes.example/ads.css", "https://ads.example/ad-root.css", "Stylesheet", "article-frame"],
+    ["https://fonts.example/ad.woff2", "https://ads.example/ad-root.css", "Font", "article-frame"],
+    ["https://themes.example/frame.css", main, "Stylesheet", "ad-frame"],
+    ["https://fonts.example/frame.woff2", main, "Font", "ad-frame"],
+    ["https://themes.example/analytics", main, "XHR", "article-frame"],
+    ["https://fonts.example/analytics.js", main, "Script", "article-frame"],
+  ];
+  for (const args of optionalUrls) session.emit("Network.requestWillBeSent", event(...args));
+  const roleEvidence = { hosts: ["article.example"], urlSha256s: [networkResourceUrlSha256(main)] };
+  for (const [url, type] of [[imported, "stylesheet"], [font, "font"]]) {
+    const failed = createNetworkPolicyEvidenceRecorder();
+    failed.recordAllowedRequestFailure(new URL(url).hostname, type, "net::ERR_CONNECTION_RESET", false, url);
+    failed.recordAllowedResponseFailure(new URL(url).hostname, type, 503, false, url);
+    const evidence = { ...failed.snapshot(), stylesheetDependencies: dependencies.snapshot() };
+    assert.deepEqual(networkFidelityFailures(evidence, [], roleEvidence), [
+      "an allowed remote request failed before a complete response",
+      "an allowed remote response returned HTTP 4xx or 5xx",
+    ], "required cross-origin CSS imports and fonts retain the same failure semantics as their root stylesheet");
+  }
+  for (const [url, , type] of optionalUrls) {
+    const failed = createNetworkPolicyEvidenceRecorder();
+    failed.recordAllowedResponseFailure(new URL(url).hostname, type.toLowerCase(), 503, false, url);
+    assert.deepEqual(networkFidelityFailures({ ...failed.snapshot(),
+      stylesheetDependencies: dependencies.snapshot() }, [], roleEvidence), [],
+    "unrelated same-host, other-frame, and non-CSS/font resources stay optional");
+  }
+  const serialized = JSON.stringify(dependencies.snapshot());
+  for (const token of ["private=", "root-token", "redirect-token", "theme-token", "font-token", ".css", ".woff2"]) {
+    assert.equal(serialized.includes(token), false, token);
+  }
+  await stop();
+  assert.equal(session.listenerCount("Network.requestWillBeSent"), 0);
+  assert.equal(session.listenerCount("Page.frameNavigated"), 0);
+  assert.equal(commands.at(-1), "detach", "the CDP session is detached during context cleanup");
+
+  const bounded = createStylesheetDependencyRecorder({ maximumDependencies: 1 });
+  bounded.recordRequest(event(imported, main), "article-frame");
+  bounded.recordRequest(event(font, imported, "Font"), "article-frame");
+  assert.equal(bounded.snapshot().dependencies.length, 1);
+  assert.equal(bounded.snapshot().dependencyOverflowCount, 1);
+  assert.ok(networkFidelityFailures({ stylesheetDependencies: bounded.snapshot() }, [], roleEvidence)
+    .includes("stylesheet dependency evidence was invalid or exceeded its bounded dependency count"));
+  const invalid = createStylesheetDependencyRecorder();
+  invalid.recordRequest(event(font, "not-a-url", "Font"), "article-frame");
+  assert.equal(invalid.snapshot().invalidDependencyCount, 1);
+  assert.ok(networkFidelityFailures({ stylesheetDependencies: invalid.snapshot() }, [], roleEvidence)
+    .includes("stylesheet dependency evidence was invalid or exceeded its bounded dependency count"));
+  const brokenSession = new EventEmitter();
+  let detachedAfterFailure = false;
+  brokenSession.send = async (command) => {
+    if (command === "Network.enable") throw new Error("fixture CDP capture unavailable");
+    return command === "Page.getFrameTree" ? { frameTree: { frame: { id: "article-frame" } } } : {};
+  };
+  brokenSession.detach = async () => { detachedAfterFailure = true; };
+  await assert.rejects(() => observeStylesheetDependencies(
+    { newCDPSession: async () => brokenSession }, {}, createStylesheetDependencyRecorder()),
+  /fixture CDP capture unavailable/u);
+  assert.equal(detachedAfterFailure, true);
+  assert.equal(brokenSession.listenerCount("Network.requestWillBeSent"), 0);
+  assert.equal(brokenSession.listenerCount("Page.frameNavigated"), 0);
+}
+
 function testPublicDnsAnswerCardinalityAndPrivacy() {
   const publicRecords = Array.from({ length: 128 }, (_, index) => ({ address: `8.8.8.${index + 1}` }));
   const full = validatePublicDnsAnswers(publicRecords);
@@ -798,6 +888,7 @@ async function main() {
   testOptionalFailuresStayObservedWhileArticleResourcesRemainRequired();
   testRedirectedArticleResourceFailuresRemainRequired();
   testRedirectAncestryBoundsAndIncompleteEvidence();
+  await testStylesheetDependenciesPreserveImportedCssAndFonts();
   testPublicDnsAnswerCardinalityAndPrivacy();
   testArticleLeaseBudgetsOnlyScopedCookies();
   await testArticleNavigationPrimingIsScopedAndPublic();

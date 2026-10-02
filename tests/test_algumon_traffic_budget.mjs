@@ -280,12 +280,33 @@ function testSourceUrlMismatchRetainsDiagnosticIdentityWithoutQueryValues() {
   });
   assert.equal(failure.kind, "source-or-infrastructure-failure");
   assert.equal(failure.exactUrl, false);
-  assert.equal(failure.final.pathname, "/n/deal");
-  assert.deepEqual(failure.final.queryKeys, ["session"]);
+  assert.equal(failure.final.pathKind, "deal-feed");
+  assert.equal(failure.final.pathSha256, createHash("sha256").update("/n/deal").digest("hex"));
+  assert.deepEqual(failure.final.queryKeys, []);
+  assert.equal(failure.final.otherQueryKeyCount, 1);
   assert.equal(failure.final.hasFragment, true);
   assert.equal(failure.response.urlSha256, failure.requested.urlSha256);
   assert.equal(JSON.stringify(failure).includes("not-to-be-recorded"), false);
   assert.notEqual(failure.final.urlSha256, failure.requested.urlSha256);
+}
+
+function testSourceFailureRedactsRedirectPathsAndUnknownQueryKeys() {
+  const secretUrl = "https://private-user:private-password@www.algumon.com/callback/private-path-token?private-query-key=private-query-value&sites=private-site-value#private-fragment";
+  const failure = classifyAlgumonSourceResponse({
+    status: null, requestedUrl: secretUrl, finalUrl: secretUrl, responseUrl: secretUrl,
+  });
+  for (const description of [failure.requested, failure.final, failure.response]) {
+    assert.equal(description.pathKind, "other");
+    assert.equal(description.pathDepth, 2);
+    assert.equal(description.trailingSlash, false);
+    assert.equal(description.pathSha256, createHash("sha256").update("/callback/private-path-token").digest("hex"));
+    assert.deepEqual(description.queryKeys, ["sites"]);
+    assert.equal(description.otherQueryKeyCount, 1);
+    assert.equal(description.hasFragment, true);
+    assert.equal(Object.hasOwn(description, "pathname"), false);
+  }
+  assert.equal(JSON.stringify(failure).includes("private-"), false);
+  assert.equal(JSON.stringify(failure).includes("/callback/"), false);
 }
 
 async function testNavigationErrorsPersistOnlyCategoryAndDigest() {
@@ -327,5 +348,6 @@ testCurrentEncryptedRelaySnapshotRetainsExactProvenance();
 await testSourceSessionCookiesStayInMemoryAndInScope();
 await testRegisteredArticleProjectionDoesNotRequireLegacySeed();
 testSourceUrlMismatchRetainsDiagnosticIdentityWithoutQueryValues();
+testSourceFailureRedactsRedirectPathsAndUnknownQueryKeys();
 await testNavigationErrorsPersistOnlyCategoryAndDigest();
 process.stdout.write("Algumon traffic budget tests passed\n");

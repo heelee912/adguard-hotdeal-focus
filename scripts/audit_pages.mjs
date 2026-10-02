@@ -1292,6 +1292,79 @@ function networkRequestRedirectEvidence(request) {
   }
 }
 
+function createStylesheetDependencyRecorder({ maximumDependencies = NETWORK_POLICY_MAX_REMOTE_REQUESTS } = {}) {
+  if (!Number.isInteger(maximumDependencies) || maximumDependencies < 1) {
+    throw new Error("maximumDependencies must be a positive integer");
+  }
+  const dependencies = new Map();
+  let dependencyOverflowCount = 0;
+  let invalidDependencyCount = 0;
+  const recordDependency = (parentUrl, childUrl, kind) => {
+    const parentUrlSha256 = networkResourceUrlSha256(parentUrl);
+    const childUrlSha256 = networkResourceUrlSha256(childUrl);
+    if (!parentUrlSha256 || !childUrlSha256) {
+      invalidDependencyCount += 1;
+      return;
+    }
+    if (parentUrlSha256 === childUrlSha256) return;
+    const key = `${parentUrlSha256}:${childUrlSha256}`;
+    if (dependencies.has(key)) return;
+    if (dependencies.size >= maximumDependencies) {
+      dependencyOverflowCount += 1;
+      return;
+    }
+    dependencies.set(key, { parentUrlSha256, childUrlSha256, kind });
+  };
+  return {
+    recordRequest(event, mainFrameId) {
+      if (event.frameId !== mainFrameId || !["Stylesheet", "Font"].includes(event.type)) return;
+      // CDP observes parser dependencies even when CSSOM access to an imported
+      // cross-origin stylesheet is forbidden. Do not infer a dependency merely
+      // from sharing a host, or promote unrelated script/XHR/font requests.
+      if (event.initiator?.url) {
+        recordDependency(event.initiator.url, event.request?.url, event.type.toLowerCase());
+      }
+      if (event.redirectResponse?.url) {
+        recordDependency(event.redirectResponse.url, event.request?.url, "redirect");
+      }
+    },
+    snapshot() {
+      return {
+        dependencies: [...dependencies.values()].map((entry) => ({ ...entry })),
+        dependencyOverflowCount,
+        invalidDependencyCount,
+      };
+    },
+  };
+}
+
+async function observeStylesheetDependencies(context, page, recorder) {
+  const session = await context.newCDPSession(page);
+  let mainFrameId;
+  const onFrameNavigated = ({ frame }) => {
+    if (!frame.parentId) mainFrameId = frame.id;
+  };
+  const onRequest = (event) => recorder.recordRequest(event, mainFrameId);
+  try {
+    await session.send("Page.enable");
+    const frameTree = await session.send("Page.getFrameTree");
+    mainFrameId = frameTree.frameTree.frame.id;
+    session.on("Page.frameNavigated", onFrameNavigated);
+    session.on("Network.requestWillBeSent", onRequest);
+    await session.send("Network.enable");
+  } catch (error) {
+    session.off("Page.frameNavigated", onFrameNavigated);
+    session.off("Network.requestWillBeSent", onRequest);
+    await session.detach().catch(() => {});
+    throw error;
+  }
+  return async () => {
+    session.off("Page.frameNavigated", onFrameNavigated);
+    session.off("Network.requestWillBeSent", onRequest);
+    await session.detach().catch(() => {});
+  };
+}
+
 async function primeDeclaredArticleNavigation(session, targetUrl, navigationDomains) {
   const decision = networkRequestDecision(targetUrl, true, navigationDomains, navigationDomains);
   if (!decision.allowed || !decision.hostname) {
@@ -1326,6 +1399,20 @@ function networkFidelityFailures(
     : roleReferencedResourceEvidence ?? { hosts: [] };
   const pinnedTransport = networkPolicyEvidence?.pinnedTransport ?? null;
   const requiredResourceDigests = new Set(roleResourceEvidence.urlSha256s ?? []);
+  const stylesheetDependencies = networkPolicyEvidence?.stylesheetDependencies;
+  const dependencyChildren = new Map();
+  for (const entry of stylesheetDependencies?.dependencies ?? []) {
+    if (!dependencyChildren.has(entry.parentUrlSha256)) dependencyChildren.set(entry.parentUrlSha256, []);
+    dependencyChildren.get(entry.parentUrlSha256).push(entry.childUrlSha256);
+  }
+  const requiredQueue = [...requiredResourceDigests];
+  for (let index = 0; index < requiredQueue.length; index += 1) {
+    for (const digest of dependencyChildren.get(requiredQueue[index]) ?? []) {
+      if (requiredResourceDigests.has(digest)) continue;
+      requiredResourceDigests.add(digest);
+      requiredQueue.push(digest);
+    }
+  }
   const referencedHosts = new Set((roleResourceEvidence.hosts ?? []).map(normalizedHostname));
   const isRequiredHost = (hostname) =>
     declaredResourceDomains.some((domain) => hostnameMatches(hostname, domain)) ||
@@ -1374,6 +1461,10 @@ function networkFidelityFailures(
   }
   if ((networkPolicyEvidence?.failedResourceEvidenceOverflowCount ?? 0) > 0) {
     failures.push("failed resource evidence exceeded its bounded request count");
+  }
+  if ((stylesheetDependencies?.dependencyOverflowCount ?? 0) > 0 ||
+    (stylesheetDependencies?.invalidDependencyCount ?? 0) > 0) {
+    failures.push("stylesheet dependency evidence was invalid or exceeded its bounded dependency count");
   }
   if ([...(networkPolicyEvidence?.failedAllowedRequests ?? []),
     ...(networkPolicyEvidence?.failedAllowedResponses ?? [])].some((entry) =>
@@ -5764,6 +5855,8 @@ async function createPageContext(
   const networkEvidenceRecorder = createNetworkPolicyEvidenceRecorder({
     allowPublicHttpsSubresources,
   });
+  const stylesheetDependencyRecorder = createStylesheetDependencyRecorder();
+  let stopStylesheetObservation = null;
   const pinnedTransport = await createPinnedPublicHttpsProxy();
   let context;
   try {
@@ -5785,6 +5878,7 @@ async function createPageContext(
       if (!contextClosePromise) {
         contextClosePromise = (async () => {
           try {
+            await stopStylesheetObservation?.();
             return await nativeContextClose(...arguments_);
           } finally {
             await pinnedTransport.close();
@@ -6072,6 +6166,7 @@ async function createPageContext(
   let page;
   try {
     page = await context.newPage();
+    stopStylesheetObservation = await observeStylesheetDependencies(context, page, stylesheetDependencyRecorder);
   } catch (error) {
     await context.close();
     throw error;
@@ -6090,6 +6185,7 @@ async function createPageContext(
       await context.close();
       return {
         ...networkEvidenceRecorder.snapshot(),
+        stylesheetDependencies: stylesheetDependencyRecorder.snapshot(),
         pinnedTransport: pinnedTransport.snapshot(),
       };
     },
@@ -8881,11 +8977,17 @@ function classifyAlgumonSourceResponse(responseEvidence) {
   const describeUrl = (value) => {
     try {
       const url = new URL(value);
+      const queryKeys = [...url.searchParams.keys()];
+      const publicQueryKeys = new Set(["sites", "page", "sort", "order", "q", "query"]);
       return {
         protocol: url.protocol,
         hostname: url.hostname,
-        pathname: url.pathname,
-        queryKeys: [...url.searchParams.keys()],
+        pathKind: url.pathname === "/n/deal" ? "deal-feed" : url.pathname === "/" ? "root" : "other",
+        pathSha256: sha256(url.pathname),
+        pathDepth: url.pathname.split("/").filter(Boolean).length,
+        trailingSlash: url.pathname.endsWith("/"),
+        queryKeys: [...new Set(queryKeys.filter((key) => publicQueryKeys.has(key)))],
+        otherQueryKeyCount: queryKeys.filter((key) => !publicQueryKeys.has(key)).length,
         hasFragment: Boolean(url.hash),
         urlSha256: sha256(url.href),
       };
@@ -11713,6 +11815,7 @@ export {
   createAlgumonRequestStartBudget,
   createLowTrafficAlgumonProbePlan,
   createNetworkPolicyEvidenceRecorder,
+  createStylesheetDependencyRecorder,
   createPinnedPublicHttpsProxy,
   exactSignedAlgumonDealUrl,
   fixtureCoverageFailures,
@@ -11723,6 +11826,7 @@ export {
   networkResourceUrlSha256,
   networkRequestDecision,
   networkRequestRedirectEvidence,
+  observeStylesheetDependencies,
   isPrivateOrSpecialIp,
   isTopLevelNavigationRequest,
   incrementStablePatchVersion,
