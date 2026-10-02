@@ -596,6 +596,60 @@ async function testStylesheetDependenciesPreserveImportedCssAndFonts() {
   assert.equal(brokenSession.listenerCount("Page.frameNavigated"), 0);
 }
 
+function testInlineStylesheetDependenciesUseActualDocumentUrl() {
+  const documentUrl = "https://article.example/deal/7?private=document-token";
+  const baseUri = "https://unrelated.example/private-base/";
+  const inlineFont = "https://fonts.example/inline.woff2";
+  const inlineStyle = {
+    localName: "style", matches: () => false, nextElementSibling: null,
+    sheet: { href: null, cssRules: [{ type: 4, cssRules: [
+      { type: 5, style: { getPropertyValue: () => `url("${inlineFont}")` } },
+    ] }] },
+  };
+  const roleEvidence = vm.runInNewContext(`(${collectRetainedRoleResourceEvidence.toString()})([])`, {
+    document: { URL: documentUrl, baseURI: baseUri, head: { firstElementChild: inlineStyle } },
+    performance: { now: () => 0 }, URL,
+  });
+  assert.deepEqual([...roleEvidence.urls], [documentUrl, inlineFont],
+    "the actual document initiator and grouped inline font sources survive a base element");
+  const { urls, ...safeEvidence } = roleEvidence;
+  safeEvidence.urlSha256s = urls.map(networkResourceUrlSha256);
+  const theme = "https://themes.example/inline-theme.css";
+  const importedFont = "https://fonts.example/imported.woff2";
+  const unrelatedFont = "https://fonts.example/unrelated.woff2";
+  const dependencies = createStylesheetDependencyRecorder();
+  for (const [url, parent, type] of [
+    [theme, documentUrl, "Stylesheet"],
+    [importedFont, theme, "Font"],
+    [unrelatedFont, baseUri, "Font"],
+  ]) {
+    dependencies.recordRequest({ frameId: "main", type,
+      request: { url }, initiator: { type: "parser", url: parent } }, "main");
+  }
+  dependencies.recordRequest({ frameId: "main", type: "Font",
+    request: { url: inlineFont }, initiator: { type: "other" } }, "main");
+  for (const url of [theme, importedFont, inlineFont, unrelatedFont]) {
+    const failed = createNetworkPolicyEvidenceRecorder();
+    failed.recordAllowedResponseFailure(new URL(url).hostname, url === theme ? "stylesheet" : "font", 503, false, url);
+    const actual = networkFidelityFailures({ ...failed.snapshot(), stylesheetDependencies: dependencies.snapshot() }, [], safeEvidence);
+    assert.deepEqual(actual, url === unrelatedFont ? [] : ["an allowed remote response returned HTTP 4xx or 5xx"],
+      "only document-rooted inline CSS/font dependencies become required");
+  }
+  const serialized = JSON.stringify({ ...safeEvidence, stylesheetDependencies: dependencies.snapshot() });
+  assert.equal(serialized.includes("document-token"), false);
+  assert.equal(serialized.includes("/deal/7"), false);
+  assert.equal(serialized.includes("private-base"), false);
+  inlineStyle.sheet.cssRules = Array.from({ length: 2049 }, () => ({ type: 1 }));
+  const overBudget = vm.runInNewContext(`(${collectRetainedRoleResourceEvidence.toString()})([])`, {
+    document: { URL: documentUrl, baseURI: baseUri, head: { firstElementChild: inlineStyle } },
+    performance: { now: () => 0 }, URL,
+  });
+  assert.equal(overBudget.stylesheetRuleCount, 2048);
+  assert.equal(overBudget.stylesheetRuleOverflowCount, 1);
+  assert.ok(networkFidelityFailures({}, [], overBudget)
+    .includes("inline stylesheet font evidence was unreadable or exceeded its bounded rule count"));
+}
+
 function testPublicDnsAnswerCardinalityAndPrivacy() {
   const publicRecords = Array.from({ length: 128 }, (_, index) => ({ address: `8.8.8.${index + 1}` }));
   const full = validatePublicDnsAnswers(publicRecords);
@@ -889,6 +943,7 @@ async function main() {
   testRedirectedArticleResourceFailuresRemainRequired();
   testRedirectAncestryBoundsAndIncompleteEvidence();
   await testStylesheetDependenciesPreserveImportedCssAndFonts();
+  testInlineStylesheetDependenciesUseActualDocumentUrl();
   testPublicDnsAnswerCardinalityAndPrivacy();
   testArticleLeaseBudgetsOnlyScopedCookies();
   await testArticleNavigationPrimingIsScopedAndPublic();

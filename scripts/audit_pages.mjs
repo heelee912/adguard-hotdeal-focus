@@ -1519,6 +1519,10 @@ function networkFidelityFailures(
   if ((roleResourceEvidence.nodeOverflowCount ?? 0) > 0) {
     failures.push("semantic role resource traversal exceeded its node budget");
   }
+  if ((roleResourceEvidence.stylesheetRuleOverflowCount ?? 0) > 0 ||
+    (roleResourceEvidence.stylesheetRuleErrorCount ?? 0) > 0) {
+    failures.push("inline stylesheet font evidence was unreadable or exceeded its bounded rule count");
+  }
   if ((roleResourceEvidence.urlOverflowCount ?? 0) > 0) {
     failures.push("semantic role resource traversal exceeded its URL budget");
   }
@@ -3189,6 +3193,10 @@ function collectRetainedRoleResourceEvidence(roleSelectors) {
       }
       rawUrls.push(value.trim());
     };
+    // Inline <style> imports and font faces use the document as their CDP
+    // initiator. The actual document URL, not a <base>-controlled baseURI,
+    // roots those dependencies; the caller persists only URL digests.
+    append(document.URL);
     const appendSrcset = (value) => {
       if (typeof value !== "string") return;
       let index = 0;
@@ -3253,8 +3261,35 @@ function collectRetainedRoleResourceEvidence(roleSelectors) {
         append(cssUnescape(value.trim()));
       }
     };
+    const inlineSheets = new Set();
+    let stylesheetRuleCount = 0;
+    let stylesheetRuleOverflowCount = 0;
+    let stylesheetRuleErrorCount = 0;
+    const appendInlineFontSources = (element) => {
+      const sheet = element.sheet;
+      if (!sheet || sheet.href || inlineSheets.has(sheet)) return;
+      inlineSheets.add(sheet);
+      try {
+        const stack = [{ rules: sheet.cssRules, index: 0 }];
+        while (stack.length > 0) {
+          const frame = stack.at(-1);
+          if (frame.index >= frame.rules.length) { stack.pop(); continue; }
+          if (stylesheetRuleCount >= maximumNodes) { stylesheetRuleOverflowCount += 1; break; }
+          if (performance.now() - startedAt > maximumElapsedMs) { elapsedTimeOverflowCount += 1; break; }
+          const rule = frame.rules[frame.index++];
+          stylesheetRuleCount += 1;
+          if (rule.type === 5) appendCssUrls(rule.style.getPropertyValue("src"));
+          // Imported cross-origin sheets are tracked by CDP instead of reading
+          // their protected CSSOM. Grouped inline font faces remain inspectable.
+          if (rule.type !== 3 && rule.cssRules) stack.push({ rules: rule.cssRules, index: 0 });
+        }
+      } catch {
+        stylesheetRuleErrorCount += 1;
+      }
+    };
     for (const element of nodes) {
       const tagName = element.localName;
+      if (tagName === "style") appendInlineFontSources(element);
       if (["img", "video", "audio"].includes(tagName)) {
         append(element.currentSrc);
       }
@@ -3309,6 +3344,7 @@ function collectRetainedRoleResourceEvidence(roleSelectors) {
       const element = headElement;
       headNodeCount += 1;
       if (element.matches("link[rel~='stylesheet'][href]")) append(element.href);
+      if (element.localName === "style") appendInlineFontSources(element);
       headElement = element.nextElementSibling;
     }
     const hosts = new Set();
@@ -3365,6 +3401,9 @@ function collectRetainedRoleResourceEvidence(roleSelectors) {
       rootCount: roots.size,
       nodeCount: nodes.size,
       headNodeCount,
+      stylesheetRuleCount,
+      stylesheetRuleOverflowCount,
+      stylesheetRuleErrorCount,
       urlCount: rawUrls.length,
       selectorErrorCount,
       rootOverflowCount,
