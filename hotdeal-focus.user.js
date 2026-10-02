@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.91
+// @version      0.6.92
 // @description  Content-preserving hot-deal reader with automatic noise filtering.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
@@ -796,6 +796,7 @@
 
   const TITLE_PUBLISHER_PREFIX_TOKENS = Object.freeze(new Set([
     "선착순", "겜우리", "공식몰", "판매처", "우리동네gs", "ssg", "g마켓", "옥션", "쿠팡", "네이버",
+    "steam", "스팀",
   ]));
   const TITLE_COMMERCE_EXTRA_TOKENS = Object.freeze(new Set([
     "가격", "특가", "할인", "쿠폰", "적립", "최대", "무료", "무료배송", "배송", "무배",
@@ -1917,6 +1918,14 @@
   function exactPublisherTitleMatch(visibleTitle, metadataTitle) {
     const normalize = function normalizePublisherTitle(value) {
       let text = String(value || "").normalize("NFKC").trim();
+      for (let count = 0; count < 2; count += 1) {
+        const prefix = text.match(/^\s*[\[【(（]([^\[【(（\]】)）]{1,24})[\]】)）]\s*/u);
+        // Only established store/decorative labels may disappear here.
+        // Platform, model, color and arbitrary bracketed product words remain
+        // part of an exact title even when the remaining title is very short.
+        if (!prefix || !TITLE_PUBLISHER_PREFIX_TOKENS.has(normalizeText(prefix[1]))) break;
+        text = text.slice(prefix[0].length).trim();
+      }
       for (let count = 0; count < 3; count += 1) {
         const suffix = text.match(TITLE_SITE_SUFFIX_PATTERN);
         // Remove only a delimited publisher label, never a product word,

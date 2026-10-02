@@ -109,6 +109,59 @@ function fixture(article) {
 const browser = await chromium.launch({ headless: true });
 let completed = 0;
 try {
+  const discoveryPage = await browser.newPage();
+  try {
+    for (const [reference, visible, expected] of [
+      ["쌀", "[쿠팡] 쌀", true],
+      ["[쿠팡] 쌀", "쌀", true],
+      ["DOOM", "[Steam] DOOM", true],
+      ["[Steam] DOOM", "DOOM", true],
+      ["DOOM", "[스팀] DOOM", true],
+      ["[PS5] DOOM", "[PC] DOOM", false],
+      ["[PC] DOOM", "[XBOX] DOOM", false],
+      ["[빨강] 컵", "[파랑] 컵", false],
+      ["쌀", "찹쌀", false],
+      ["쌀", "쌀국수", false],
+      ["DOOM", "DOOM Eternal", false],
+      ["[쿠팡] 쌀", "[쿠팡] 우유", false],
+      ["[Steam] DOOM", "[Steam] DOOM Eternal", false],
+    ]) {
+      await discoveryPage.setContent(`<!doctype html><html><head>
+        <meta property="og:title" content="${escapeHtml(visible)}"></head><body>
+        <main><h1 class="new-title">${escapeHtml(visible)}</h1>
+        <article class="new-body"><p>This is the original product description with useful specifications,
+        delivery conditions and purchasing information for the current hot deal.</p>
+        <p>Another complete paragraph provides enough original article context for independent discovery.</p></article>
+        <section class="comments" aria-label="Comments">
+          <div itemprop="comment">Original first comment.</div>
+          <div itemprop="comment">Original second comment.</div>
+        </section></main></body></html>`);
+      const verdict = await discoveryPage.evaluate(({ source, reference }) => {
+        const module = { exports: {} };
+        new Function("module", source)(module);
+        const api = module.exports;
+        const result = api.discoverSemanticContract(document, [{
+          allowEmptyComments: true,
+          requiredRoles: ["title", "body", "comments"],
+          roleProjection: { product: { cardinality: "zero" } },
+          hints: { title: [".old-title"], body: [".old-body"], comments: [".old-comments"],
+            commentItems: ["[itemprop='comment']"], commentControls: [], commentIgnored: [] },
+        }], { title: reference, commentCount: 2 });
+        return {
+          ok: result.ok, reason: result.reason,
+          seedConsistency: result.seedConsistency,
+          policyComplete: result.policyProposal?.complete,
+          comparison: api.titleConsistency(reference, document.querySelector("h1").textContent),
+        };
+      }, { source, reference });
+      assert.equal(verdict.ok, expected, `${reference} -> ${visible}: ${JSON.stringify(verdict)}`);
+      assert.equal(verdict.comparison.ok, expected, `${reference} -> ${visible}: bounded exact core`);
+      if (expected) {
+        assert.equal(verdict.seedConsistency.titleConsistencyOk, true);
+        assert.equal(verdict.policyComplete, true);
+      }
+    }
+  } finally { await discoveryPage.close(); }
   // These are ordinary registered articles, not new-layout promotion inputs.
   // Exercise the cloud auditor against the same untouched DOM before the
   // userscript runs, including h4/span titles and nested div/span comments.
@@ -320,7 +373,7 @@ try {
       }
     }
   }
-  console.log(`Registered sample oracle: six site layouts, same-route sibling rejection, and ${completed} desktop/mobile normal variants passed before runtime; original article, purchase link, comments and controls preserved while ads and sidebars stay hidden.`);
+  console.log(`Short-title discovery: 13 allowed-prefix/negative cases passed. Registered sample oracle: six site layouts, same-route sibling rejection, and ${completed} desktop/mobile normal variants passed before runtime; original article, purchase link, comments and controls preserved while ads and sidebars stay hidden.`);
 } finally {
   await browser.close();
 }
