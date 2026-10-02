@@ -52,6 +52,51 @@ try {
   assert.equal(await page.evaluate(()=>globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state),'ready');
   assert.equal(await page.locator('#publisher-clone-widget [data-hotdeal-focus-keep]').count(),0);
   assert.equal(await page.evaluate(()=>getComputedStyle(document.querySelector('#publisher-clone-widget')).visibility),'hidden');
+  await page.close();
+  const delayedPage=await context.newPage();
+  const delayedBodyHtml=fixtureHtml.replace('<head>', '<head><style id="publisher-late-body">#D_ article > .rhymix_content { display:none; }</style>');
+  await delayedPage.route('**/*',r=>r.fulfill({status:200,contentType:'text/html; charset=utf-8',body:delayedBodyHtml}));
+  await delayedPage.addInitScript(({source,control})=>{
+   globalThis.__preflightMeasurementCount=0;
+   new MutationObserver(records=>{
+    globalThis.__preflightMeasurementCount+=records.filter(record=>record.type==='attributes'&&record.attributeName==='data-hotdeal-focus-measure').length;
+   }).observe(document,{subtree:true,attributes:true});
+   (0,eval)(control);(0,eval)(source);
+  },{source,control:PREAUTHORIZED_ADGUARD_CONTROL_SOURCE});
+  await delayedPage.goto('https://eomisae.co.kr/os/99000001');
+  await delayedPage.waitForTimeout(125);
+  assert.equal(await delayedPage.locator('html').getAttribute('data-hotdeal-focus-lock'),'1');
+  const measurementCount=await delayedPage.evaluate(()=>globalThis.__preflightMeasurementCount);
+  assert.ok(measurementCount<=8,`Preflight must not observe and retry its own visibility measurement: ${measurementCount}`);
+  await delayedPage.evaluate(()=>document.querySelector('#publisher-late-body').remove());
+  await delayedPage.waitForFunction(()=>document.documentElement.getAttribute('data-hotdeal-focus-state')==='ready'&&!document.documentElement.hasAttribute('data-hotdeal-focus-lock'),null,{timeout:5000});
+  assert.match(await delayedPage.locator('#D_ article').innerText(),/모바일 본문/);
+  await delayedPage.close();
+  const emptyPage=await context.newPage();
+  const unrelatedRows=[99000003,99000004,99000005].map(id=>`<tr><td class="title"><a href="/os/${id}">다른 상품 글</a><a href="/os/${id}#C_">댓글 2</a></td><td>작성자</td></tr>`).join('');
+  const emptyCommentsHtml=fixtureHtml.replace(/<div id="C_">[\s\S]*?<aside>/,`<div id="C_"><div class="_hd" id="comment"><span>댓글 <b>0</b></span></div><br><center>게시판 공지와 광고</center><div class="_ft">댓글 쓰기 권한이 없습니다.</div></div><div id="L_"><div class="_hd">다른 게시글 목록 댓글순 제목 검색</div><div class="_bd"><table class="_listA"><tbody>${unrelatedRows}</tbody></table></div></div><aside>`);
+  await emptyPage.route('**/*',r=>r.fulfill({status:200,contentType:'text/html; charset=utf-8',body:emptyCommentsHtml}));
+  await emptyPage.addInitScript(({source,control})=>{(0,eval)(control);(0,eval)(source);},{source,control:PREAUTHORIZED_ADGUARD_CONTROL_SOURCE});
+  await emptyPage.goto('https://eomisae.co.kr/os/99000001');
+  await emptyPage.waitForFunction(()=>document.documentElement.getAttribute('data-hotdeal-focus-state')==='ready'&&!document.documentElement.hasAttribute('data-hotdeal-focus-lock'),null,{timeout:2500});
+  assert.match(await emptyPage.locator('#D_ article').innerText(),/모바일 본문/);
+  assert.equal(await emptyPage.locator('[data-hotdeal-focus-role="comment-item"]').count(),0);
+  assert.equal(await emptyPage.evaluate(()=>getComputedStyle(document.querySelector('#L_')).visibility),'hidden');
+  await emptyPage.close();
+  const mobileListPage=await context.newPage();
+  const mobileRows=[99000003,99000004,99000005].map(id=>`<div class="lst_nm"><div class="lst_wrap"><a class="title pjax" href="/os/${id}">다른 상품 글</a></div><div class="lst_reply_wrap"><div class="reply"><a href="/os/${id}#C_">2</a></div></div></div>`).join('');
+  const imageUri='data:image/svg+xml,'+encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="blue"/></svg>');
+  const imageOnlyBody=`<p><a href="${imageUri}" style="width:100%;height:100%"><img src="${imageUri}" alt="상품 사진 1"></a></p><p><img src="${imageUri}" alt="상품 사진 2"></p><p>&nbsp;</p>`;
+  const mobileEmptyHtml=emptyCommentsHtml.replace(`<table class="_listA"><tbody>${unrelatedRows}</tbody></table>`,`<div id="bd_lst" class="bd_lst">${mobileRows}</div>`).replace('<p><a href="https://shop.invalid/product">https://shop.invalid/product</a></p><p>상품 정보와 구매 링크를 그대로 보존하는 모바일 본문입니다.</p>',imageOnlyBody).replace('<article>','<article><div class="vote _ft"><button>추천 6</button><button>샀어요 2</button><button>스크랩</button></div>');
+  await mobileListPage.route('**/*',r=>r.fulfill({status:200,contentType:'text/html; charset=utf-8',body:mobileEmptyHtml}));
+  await mobileListPage.addInitScript(({source,control})=>{(0,eval)(control);(0,eval)(source);},{source,control:PREAUTHORIZED_ADGUARD_CONTROL_SOURCE});
+  await mobileListPage.goto('https://eomisae.co.kr/os/99000001');
+  await mobileListPage.waitForFunction(()=>document.documentElement.getAttribute('data-hotdeal-focus-state')==='ready'&&!document.documentElement.hasAttribute('data-hotdeal-focus-lock'),null,{timeout:2500});
+  assert.equal(await mobileListPage.locator('[data-hotdeal-focus-role="body"]').evaluate(e=>e.tagName),'DIV');
+  assert.equal(await mobileListPage.evaluate(()=>getComputedStyle(document.querySelector('.vote')).visibility),'hidden');
+  assert.equal(await mobileListPage.locator('[data-hotdeal-focus-role="body"] img').count(),2);
+  assert.equal(await mobileListPage.locator('.et_vars a').getAttribute('href'),'https://shop.invalid/product');
+  await mobileListPage.close();
  } finally {await context.close();}
 } finally {await browser.close();}
 console.log('Eomisae mobile comment context menu and original body regression passed');

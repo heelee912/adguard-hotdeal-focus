@@ -1,13 +1,13 @@
 {
   "artifacts": {
     "hotdeal-focus.user.js": {
-      "bytes": 394731,
-      "canonicalTextSha256": "4fcf8c435b82e2f01134dd289bc0c42ab9efb109c2cf89c0128ee0fb897b4afb",
-      "sha256": "1f2745022b88374cf96fb3c7ad53ff9afc0e250378b76f13fbd7bec4f5fa2b8f",
-      "version": "0.6.67"
+      "bytes": 397795,
+      "canonicalTextSha256": "da87836993c589702feb2285e892244e82776305ec59909690c3325e23626a7c",
+      "sha256": "3eb4fcd1e9d2b715120b22cf74b9e1989808f74cc4fd3e24fa6e4f0ee4bf0644",
+      "version": "0.6.72"
     }
   },
-  "configSha256": "15a7ee2f8879b139b257738cf4d765267d1c53c312e8840f44d683f0051ede50",
+  "configSha256": "ebc5e07c16311c52b035c70fa0971fb92597dad910a100bc97a1fbc9c0f400b8",
   "coverage": {
     "approvedVariantCount": 0,
     "contractCount": 9,
@@ -212,35 +212,35 @@
       }
     ]
   },
-  "generatorVersion": "0.6.67",
+  "generatorVersion": "0.6.72",
   "installUrl": "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
   "promotion": null,
   "protocolVersion": 2,
-  "releaseVersion": "0.6.67",
+  "releaseVersion": "0.6.72",
   "rollback_of": null,
   "schemaVersion": 2,
   "sourceIntegrity": {
     "config/sites.json": {
       "bytes": 23418,
-      "sha256": "15a7ee2f8879b139b257738cf4d765267d1c53c312e8840f44d683f0051ede50"
+      "sha256": "ebc5e07c16311c52b035c70fa0971fb92597dad910a100bc97a1fbc9c0f400b8"
     },
     "filter-static.txt": {
       "bytes": 8447,
-      "sha256": "f65a9549ea0f371b8229efa67923814dbdc38ebf210ef1c6da8ac21bdb9c6f4c"
+      "sha256": "129ff461f7f6675b260c3c749910b161477ac6f676d5c0c520a836306ada8c0e"
     },
     "package-lock.json": {
       "bytes": 1828,
-      "sha256": "b3c4133c4c5225590507c425dc063cce3959cec3dd579b2a454e9dc749b7d41a"
+      "sha256": "0f5f55c69055de746239c67c445e257092d86b9868a0523a6d4a601973ed9325"
     },
     "package.json": {
       "bytes": 2185,
-      "sha256": "2749c6e62bb146726aff4d5628b9affdcd160eb42d3f59a6088beb7165344427"
+      "sha256": "8421f6dd8aaa81906a056d600cbee62909df82ea2958f11d88162dc466e7f789"
     },
     "state/release-high-water.json": {
-      "bytes": 17162,
+      "bytes": 19197,
       "mode": "append-only-prefix-v1",
-      "recordCount": 42,
-      "sha256": "98e9d0ee9f65037b330f38d6ad2486548ea2cc23fad0272ad6f83446f64e0c98"
+      "recordCount": 47,
+      "sha256": "1d8211ff325308990d06ff052b6b4ac7421bfc626cd511370bd49b8bf5e7598c"
     },
     "tests/fixtures/behavior-baseline.json": {
       "bytes": 3561,

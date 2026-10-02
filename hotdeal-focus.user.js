@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.67
+// @version      0.6.72
 // @description  Fail-closed semantic reader gate for Algumon hot-deal destinations.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
@@ -41,7 +41,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.6.67";
+  const GENERATOR_VERSION = "0.6.72";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -3872,6 +3872,40 @@
     });
   }
 
+  function independentArticleListRoots(document, layout, bodyNode) {
+    const contract = findSiteContract(document.location?.hostname || "");
+    const currentIdentity = contract && articleIdentity(document.location, contract.id);
+    if (!currentIdentity) return [];
+    const mounts = queryAllSafe(document, layout.hints.comments || []);
+    const roots = [];
+    for (const table of document.querySelectorAll(
+      "table, ul, ol, [role='list'], [role='feed'], [class*='list'], [class*='lst'], [id*='list'], [id*='lst']",
+    )) {
+      const tokens = semanticTokenText(table);
+      if (!/(?:^|\s)(?:list|lst|board|articles|posts)(?:\s|$)/iu.test(tokens) ||
+          COMMENT_TOKEN_PATTERN.test(tokens) ||
+          nodesOverlap(table, bodyNode) || mounts.some(mount => nodesOverlap(table, mount))) continue;
+      const identities = new Set();
+      for (const link of table.querySelectorAll("a[href]")) {
+        try {
+          const target = new URL(link.getAttribute("href"), document.baseURI);
+          if (findSiteContract(target.hostname)?.id !== contract.id) continue;
+          const identity = articleIdentity(target, contract.id);
+          if (identity && identity !== currentIdentity) identities.add(identity);
+        } catch (_error) {}
+        if (identities.size >= 2) break;
+      }
+      if (identities.size < 2) continue;
+      let root = table;
+      while (root.parentElement && !nodesOverlap(root.parentElement, bodyNode) &&
+          !mounts.some(mount => nodesOverlap(root.parentElement, mount))) {
+        root = root.parentElement;
+      }
+      roots.push(root);
+    }
+    return uniqueElements(roots);
+  }
+
   function collectExactDocumentCommentEvidence(document, layout, bodyNode, seed, jsonLd) {
     const layouts = [layout];
     const explicitEvidence = explicitCommentEvidence(document, layouts);
@@ -3880,6 +3914,9 @@
     const itemHints = roleHints(layouts, "commentItems");
     const controlHints = roleHints(layouts, "commentControls");
     const ignoredHints = roleHints(layouts, "commentIgnored");
+    // Other article lists may advertise their own comment counts. They are
+    // not evidence that the current article has missing comments.
+    const articleLists = independentArticleListRoots(document, layout, bodyNode);
     const collection = collectBoundedCandidateElements(
       document,
       "[role='feed'], [role='list'], section, div, ol, ul",
@@ -3887,6 +3924,7 @@
       function plausibleEvidenceMount(element) {
         if (
           element === bodyNode ||
+          insideAnyRoot(element, articleLists) ||
           element.contains(bodyNode) ||
           bodyNode.contains(element) ||
           !followsNode(element, bodyNode) ||
@@ -6469,7 +6507,9 @@
     const visibleCommentTotal = visibleCommentTotalEvidence(
       commentMount,
       pageRoot,
-      classifiedCommentRoots,
+      // A classified header/control can be the native authoritative total.
+      // Exclude item text and noise, not the real "comments 0" header.
+      commentItems.concat(commentIgnored),
     );
     if (!visibleCommentTotal.ok) {
       return { ok: false, role: "comments", reason: "count-evidence-conflict" };
@@ -6879,7 +6919,7 @@
         const visibleTotal = visibleCommentTotalEvidence(
           projection.comments,
           projection.commonRoot,
-          commentItems.concat(commentControls, commentIgnored),
+          commentItems.concat(commentIgnored),
         );
         if (
           !visibleTotal.ok ||
@@ -9676,11 +9716,19 @@
     };
     const attempt = function attemptSemanticPreflight() {
       attemptScheduled = false;
+      let observationPaused = false;
       try {
         if (stopped || !document.documentElement || !document.body) return false;
         // Never mark a partial parser tree. Publisher DOMContentLoaded
         // handlers must see their original markup, before our scheduled proof.
         if (document.readyState === "loading") return false;
+        // Measuring publisher styles temporarily changes our root attributes
+        // and inline lock. Do not feed those synchronous writes back into the
+        // preflight observer when the article is not yet resolvable.
+        if (observer) {
+          observer.disconnect();
+          observationPaused = true;
+        }
         // Preflight runs outside the synchronous publisher measurement. A
         // page-supplied copy of our private measurement flag is not proof of
         // an active measurement and must not poison all later attempts.
@@ -9702,7 +9750,14 @@
         const resolution = approvedResolution.ok
           ? approvedResolution
           : resolveIndependentSemanticDocument(document, layouts);
-        if (!resolution.ok) return false;
+        if (!resolution.ok) {
+          const failure = approvedResolution.ok ? resolution : approvedResolution;
+          const reason = `locked-preflight-${failure.role || "semantic"}-${failure.reason || "unresolved"}`;
+          if (document.documentElement.getAttribute(ATTR.status) !== reason) {
+            document.documentElement.setAttribute(ATTR.status, reason);
+          }
+          return false;
+        }
         const entryAuthority = readerEntryAuthority(browserRoot.location, document.referrer);
         if (!entryAuthority) return false;
         const candidateResolution = Object.freeze({
@@ -9719,6 +9774,15 @@
         // The presentation remains sealed; later DOM mutations may still
         // supply a complete exact or independently proven projection.
         return false;
+      } finally {
+        if (observationPaused && !stopped && observer) {
+          observer.observe(document, {
+            subtree: true,
+            childList: true,
+            characterData: true,
+            attributes: true,
+          });
+        }
       }
     };
     const scheduleAttempt = function scheduleSemanticPreflight() {

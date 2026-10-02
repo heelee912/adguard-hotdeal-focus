@@ -891,7 +891,8 @@ class SemanticContractTests(unittest.TestCase):
             "resolveIndependentSemanticDocument(document, layouts)",
             preflight,
         )
-        self.assertIn("if (!resolution.ok) return false", preflight)
+        self.assertIn("if (!resolution.ok) {", preflight)
+        self.assertIn('`locked-preflight-${failure.role || "semantic"}-${failure.reason || "unresolved"}`', preflight)
         self.assertIn(
             '`${entryAuthority}-independent-semantic-tuple`',
             preflight,
@@ -899,7 +900,8 @@ class SemanticContractTests(unittest.TestCase):
         self.assertNotIn("resolveDocumentFromSeedCandidates", preflight)
         self.assertNotIn("navigationSeeds", preflight)
         self.assertNotIn("claimBootstrapLock", preflight)
-        self.assertNotIn("setAttribute(", preflight)
+        self.assertEqual(preflight.count("setAttribute("), 1)
+        self.assertIn("document.documentElement.setAttribute(ATTR.status, reason)", preflight)
         start_offset = self.source.index("function start(browserRoot)")
         start = self.source[
             start_offset:
