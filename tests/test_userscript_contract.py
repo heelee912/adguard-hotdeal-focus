@@ -819,8 +819,12 @@ class SemanticContractTests(unittest.TestCase):
 
         ruli = sites["ruliweb"]["layouts"][0]["comment_contract"]["items"]
         self.assertEqual(
-            [".comment_view.normal > table.comment_table > tbody > tr.comment_element"],
+            [".comment_view.normal > table.comment_table > tbody > tr.comment_element:not(:has(> td.comment > .nbp_container))"],
             ruli,
+        )
+        self.assertIn(
+            ".comment_view.normal > table.comment_table > tbody > tr.comment_element:has(> td.comment > .nbp_container)",
+            sites["ruliweb"]["layouts"][0]["comment_contract"]["ignored"],
         )
 
         quasar = {

@@ -12,7 +12,9 @@ try {
     const context = await browser.newContext({ viewport: { width: mobile ? 390 : 1280, height: 844 }, isMobile: mobile });
     try {
       const page = await context.newPage();
+      const publisherAdRow = '<tr class="comment_element normal child"><td class="user"><span class="nick">파워링크 광고</span></td><td class="comment" colspan="2"><div class="nbp_container nbp_common nbp_container_2" data-item="1" data-type="2"><a href="https://ads.invalid/">sponsored powerlink</a></div></td></tr>';
       const body = fixture.body_html.replace('source_url box_line_with_shadow', 'source_url')
+        .replace('<tbody>', `<tbody>${publisherAdRow}`)
         .replace('</article>', '<aside class="popular-posts">인기글 추천글 광고</aside></article>');
       await page.route('**/*', route => route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: `<!doctype html><html><head><meta property="og:title" content="DOM regression fixture"></head><body>${body}</body></html>` }));
       await page.addInitScript(({ source, control }) => { (0, eval)(control); (0, eval)(source); }, { source, control: PREAUTHORIZED_ADGUARD_CONTROL_SOURCE });
@@ -23,6 +25,15 @@ try {
       assert.equal(await page.locator('.source_url a').isVisible(), true);
       assert.match(await page.locator('.view_content').innerText(), /Second content paragraph/);
       assert.equal(await page.locator('[data-hotdeal-focus-role="comment-item"]').count(), 3);
+      assert.equal(await page.locator('.nbp_container a').isVisible(), false);
+      assert.equal(await page.locator('tr:has(.nbp_container)').getAttribute('data-hotdeal-focus-role'), null);
+      await page.evaluate(publisherAdRow => {
+        document.querySelector('.comment_view.normal tbody').insertAdjacentHTML('beforeend', publisherAdRow);
+      }, publisherAdRow);
+      await page.waitForTimeout(100);
+      assert.equal(await page.locator('[data-hotdeal-focus-role="comment-item"]').count(), 3);
+      assert.equal(await page.locator('.nbp_container a').nth(1).isVisible(), false);
+      assert.equal(await page.locator('html').getAttribute('data-hotdeal-focus-state'), 'ready');
       assert.equal(await page.evaluate(() => getComputedStyle(document.querySelector('.popular-posts')).visibility), 'hidden');
     } finally { await context.close(); }
   }

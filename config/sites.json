@@ -3,7 +3,7 @@
   "metadata": {
     "title": "AdGuard Hotdeal Focus",
     "description": "Shows only the hot-deal title, purchase information, article body, and comments.",
-    "version": "0.6.66",
+    "version": "0.6.67",
     "expires_hours": 12,
     "license": "MIT",
     "rollback_of": null
@@ -332,7 +332,7 @@
               "#cmt.comment_wrapper"
             ],
             "items": [
-              ".comment_view.normal > table.comment_table > tbody > tr.comment_element"
+              ".comment_view.normal > table.comment_table > tbody > tr.comment_element:not(:has(> td.comment > .nbp_container))"
             ],
             "controls": [
               ".comment_view.normal .comment_more",
@@ -343,7 +343,8 @@
               "#cmt.comment_wrapper > input",
               "#cmt.comment_wrapper > .comment_count_wrapper",
               "#cmt.comment_wrapper > .comment_disable",
-              "#cmt.comment_wrapper > br"
+              "#cmt.comment_wrapper > br",
+              ".comment_view.normal > table.comment_table > tbody > tr.comment_element:has(> td.comment > .nbp_container)"
             ],
             "allow_empty": true
           }
