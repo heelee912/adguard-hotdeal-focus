@@ -21,7 +21,18 @@ foreach ($statement in $ast.EndBlock.Statements) {
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
 $script:MaximumSourceBytes = 8MB
 $script:ReaderGateProtocolVersion = 2
-$script:ReaderGateGrants = @('GM_addElement', 'window.onurlchange')
+$script:ReaderGateGrants = @(
+    'GM_addElement', 'window.onurlchange'
+)
+$script:ReaderGateMatches = @(
+    'https://*.clien.net/*',
+    'https://*.ppomppu.co.kr/*',
+    'https://*.ruliweb.com/*',
+    'https://*.quasarzone.com/*',
+    'https://*.eomisae.co.kr/*',
+    'https://*.zod.kr/*',
+    'https://*.arca.live/*'
+)
 $script:ReleaseUserscriptUrl = ('https://heelee912.github.io/' +
     'adguard-hotdeal-focus/hotdeal-focus.user.js')
 $script:FreshInstallGmProperties = '{}'
@@ -58,7 +69,6 @@ try {
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
 // @version      2.1.0
-// @match        https://www.algumon.com/*
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
 // @match        https://*.ruliweb.com/*
@@ -99,8 +109,10 @@ GM_addElement(document.documentElement, "style", {
         $validUserscriptPath, $validUserscriptText, $script:Utf8NoBom)
     $userscript = Get-UserscriptSource -Source $validUserscriptPath
     Assert-Contract ($userscript.ProtocolVersion -eq 2) 'Reader protocol was not parsed as 2'
+    Assert-Contract (Test-ExactStringSequence -Left $userscript.Matches `
+        -Right $script:ReaderGateMatches) 'Reader matches were not exact'
     Assert-Contract (Test-ExactStringSequence -Left $userscript.Grants `
-            -Right @('GM_addElement', 'window.onurlchange')) 'Reader grants were not exact'
+        -Right @('GM_addElement', 'window.onurlchange')) 'Reader grants were not exact'
     Assert-Contract ($userscript.InstallUrl -ceq $script:ReleaseUserscriptUrl) `
         'Reader install URL was not exact'
 
@@ -120,6 +132,46 @@ GM_addElement(document.documentElement, "style", {
                     '// @grant        GM_addElement').Replace(
                     '// @grant        __FIRST__',
                     '// @grant        window.onurlchange')
+                Pattern = '*exact ordered grants*'
+            },
+            [pscustomobject]@{
+                Name = 'algumon-match'
+                Text = $validUserscriptText.Replace(
+                    '// @match        https://*.clien.net/*',
+                    ("// @match        https://www.algumon.com/*`n" +
+                        '// @match        https://*.clien.net/*'))
+                Pattern = '*seven ordered target-domain matches*'
+            },
+            [pscustomobject]@{
+                Name = 'algumon-include'
+                Text = $validUserscriptText.Replace(
+                    '// @match        https://*.clien.net/*',
+                    ("// @include      https://www.algumon.com/*`n" +
+                        '// @match        https://*.clien.net/*'))
+                Pattern = '*no @include*'
+            },
+            [pscustomobject]@{
+                Name = 'legacy-get-grant'
+                Text = $validUserscriptText.Replace(
+                    '// @grant        window.onurlchange',
+                    ("// @grant        GM_getValue`n" +
+                        '// @grant        window.onurlchange'))
+                Pattern = '*exact ordered grants*'
+            },
+            [pscustomobject]@{
+                Name = 'legacy-set-grant'
+                Text = $validUserscriptText.Replace(
+                    '// @grant        window.onurlchange',
+                    ("// @grant        GM_setValue`n" +
+                        '// @grant        window.onurlchange'))
+                Pattern = '*exact ordered grants*'
+            },
+            [pscustomobject]@{
+                Name = 'legacy-delete-grant'
+                Text = $validUserscriptText.Replace(
+                    '// @grant        window.onurlchange',
+                    ("// @grant        GM_deleteValue`n" +
+                        '// @grant        window.onurlchange'))
                 Pattern = '*exact ordered grants*'
             },
             [pscustomobject]@{

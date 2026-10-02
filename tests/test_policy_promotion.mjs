@@ -5,6 +5,8 @@ import {
   assertAuditConfig,
   classifyAlgumonInventorySnapshot,
   commentLowerBoundConsistency,
+  exactSignedAlgumonDealUrl,
+  signedRelayAcquisitionEvidence,
   selectStableDiscoveryGroups,
 } from "../scripts/audit_pages.mjs";
 
@@ -50,6 +52,93 @@ const exactInventory = classifyAlgumonInventorySnapshot({
   cards: [validInventoryCard],
 });
 assert.equal(exactInventory.status, "ok");
+const currentRelayUrl = "https://www.algumon.com/n/d/123456" +
+  "?v=0123456789abcdef0123456789abcdef&t=1784520000000" +
+  "&enc=v1.ryqcQ5lFYPJIkWIN.aLjGCXx5YJWwQBCJLhF0eA.DXaAJTmx2-oCHTcROqXiljh3lxfXotEaqKXD1XoXhYe8zPoLRSv0y3L--88tVNAeP43o";
+assert.equal(exactSignedAlgumonDealUrl(validInventoryCard.hrefs[0], "123456")?.href,
+  validInventoryCard.hrefs[0]);
+assert.equal(exactSignedAlgumonDealUrl(currentRelayUrl, "123456")?.href, currentRelayUrl);
+assert.equal(signedRelayAcquisitionEvidence(currentRelayUrl, "123456", 1784520000100).ageMs, 100);
+const currentInventory = classifyAlgumonInventorySnapshot({
+  response: inventoryResponse,
+  dropdowns: [exactSevenLabels],
+  cards: [{
+    ...validInventoryCard,
+    hrefs: [currentRelayUrl],
+    iconUrls: ["https://cdn.algumon.com/site-icon/clien.png?d=16x16"],
+    dataSiteTypes: [],
+    title: "쌀",
+  }],
+});
+assert.equal(currentInventory.status, "ok");
+assert.equal(currentInventory.links[0].href, currentRelayUrl);
+assert.equal(currentInventory.links[0].title, "쌀");
+const sourcePickerNotRendered = classifyAlgumonInventorySnapshot({
+  response: inventoryResponse,
+  dropdowns: [],
+  cards: [{ ...validInventoryCard, hrefs: [currentRelayUrl] }],
+});
+assert.equal(sourcePickerNotRendered.status, "ok");
+assert.equal(sourcePickerNotRendered.sourceInventoryMode, "source-picker-unavailable");
+assert.deepEqual(sourcePickerNotRendered.observedLabels, []);
+assert.deepEqual(sourcePickerNotRendered.observedSiteTypes, ["clien"]);
+for (const labels of [[...exactSevenLabels, "새 사이트"], [...exactSevenLabels, "클리앙"], ["알 수 없는 사이트"]]) {
+  const invalidPicker = classifyAlgumonInventorySnapshot({
+    response: inventoryResponse,
+    dropdowns: [labels],
+    cards: [validInventoryCard],
+  });
+  assert.equal(invalidPicker.status, "inventory-contract-failure");
+}
+const unknownSourceWithoutPicker = classifyAlgumonInventorySnapshot({
+  response: inventoryResponse,
+  dropdowns: [],
+  cards: [{
+    ...validInventoryCard,
+    hrefs: [currentRelayUrl],
+    sourceLabels: ["새 사이트"],
+    iconUrls: ["https://cdn.algumon.com/site-icon/newsite.png"],
+    dataSiteTypes: [],
+  }],
+});
+assert.equal(unknownSourceWithoutPicker.status, "inventory-contract-failure");
+assert.equal(unknownSourceWithoutPicker.links.length, 0);
+assert.equal(classifyAlgumonInventorySnapshot({
+  response: inventoryResponse,
+  dropdowns: [],
+  cards: [validInventoryCard],
+}, "ruliweb").status, "inventory-contract-failure");
+for (const [reason, invalidUrl] of [
+  ["wrong host", currentRelayUrl.replace("www.algumon.com", "evil.example")],
+  ["host suffix", currentRelayUrl.replace("www.algumon.com", "www.algumon.com.evil.example")],
+  ["credentials", currentRelayUrl.replace("https://", "https://user@")],
+  ["nondefault port", currentRelayUrl.replace(".com/", ".com:444/")],
+  ["insecure transport", currentRelayUrl.replace("https:", "http:")],
+  ["fragment", `${currentRelayUrl}#forged`],
+  ["mismatching ID", currentRelayUrl.replace("/123456?", "/123457?")],
+  ["unregistered route", currentRelayUrl.replace("/n/d/", "/n/deal/")],
+  ["missing signature", currentRelayUrl.replace("v=0123456789abcdef0123456789abcdef&", "")],
+  ["bad signature", currentRelayUrl.replace("v=0123", "v=z123")],
+  ["missing encrypted target", currentRelayUrl.split("&enc=")[0]],
+  ["duplicate signature", `${currentRelayUrl}&v=0123456789abcdef0123456789abcdef`],
+  ["duplicate timestamp", `${currentRelayUrl}&t=1784520000000`],
+  ["duplicate encrypted target", `${currentRelayUrl}&enc=v1.a.b.c`],
+  ["unknown query", `${currentRelayUrl}&target=https://evil.example`],
+  ["unknown encryption version", currentRelayUrl.replace("enc=v1.", "enc=v2.")],
+  ["malformed encryption", currentRelayUrl.replace(/&enc=.*$/u, "&enc=v1.a.b")],
+  ["encoded target URL", currentRelayUrl.replace(/&enc=.*$/u, "&enc=https%3A%2F%2Fevil.example")],
+  ["oversized encryption", currentRelayUrl.replace(/&enc=.*$/u, `&enc=v1.a.b.${"c".repeat(4096)}`)],
+  ["legacy route cannot carry new query", currentRelayUrl.replace("/n/d/", "/l/d/")],
+]) {
+  assert.equal(exactSignedAlgumonDealUrl(invalidUrl, "123456"), null, reason);
+}
+const contradictedCurrentSource = classifyAlgumonInventorySnapshot({
+  response: inventoryResponse,
+  dropdowns: [exactSevenLabels],
+  cards: [{ ...validInventoryCard, hrefs: [currentRelayUrl], sourceLabels: ["루리웹"] }],
+});
+assert.equal(contradictedCurrentSource.status, "inventory-contract-failure");
+assert.ok(contradictedCurrentSource.failures.includes("card-0:contradictory-source-identity"));
 const expandedInventory = classifyAlgumonInventorySnapshot({
   response: inventoryResponse,
   dropdowns: [[...exactSevenLabels, "새 사이트"]],
@@ -102,7 +191,7 @@ function baseConfig(productCardinality) {
           requiredProduct ? ["product"] : [],
         ),
         role_projection: {
-          title: { mode: "seeded-shallow" },
+          title: { mode: "metadata-shallow" },
           body: { mode: "atomic-boundary", ignored: [] },
           product: requiredProduct
             ? {

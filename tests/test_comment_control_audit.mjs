@@ -4,7 +4,42 @@ import {
   commentControlProjectionFailures,
   commentControlSelectorDigest,
   commentControlSelectorDigestsForUrl,
+  validateDiagnostics,
 } from "../scripts/audit_pages.mjs";
+
+const readyDiagnostics = {
+  protocolVersion: 2,
+  state: "ready",
+  targetReason: "algumon-referrer-known-route",
+  roles: Object.fromEntries(["title", "body", "comments"].map((role) =>
+    [role, { count: 1, score: 1, signalCount: 1, margin: 1 }])),
+  layoutAliases: ["hotdeal"],
+  semanticProjectionCount: 1,
+  standaloneCascadeProof: {
+    authority: "userscript-runtime-style", frameCount: 2, nonceBound: true, unownedHidden: true,
+  },
+  commentControlProjection: null,
+  visibleLeakCount: 0,
+  reconciliationFailure: null,
+};
+const requiredDiagnosticRoles = ["title", "body", "comments"];
+assert.deepEqual(validateDiagnostics(readyDiagnostics, requiredDiagnosticRoles), []);
+assert.deepEqual(validateDiagnostics({
+  ...readyDiagnostics,
+  reconciliationFailure: { role: "body", reason: "unsafe-projection" },
+}, requiredDiagnosticRoles), []);
+for (const reconciliationFailure of [
+  "unsafe-projection", [], { role: "body", reason: "https://example.com/private" },
+  { role: "unknown", reason: "role-root" },
+  { role: "body", reason: "role-root", extra: "uncontracted" },
+]) {
+  assert.ok(validateDiagnostics({ ...readyDiagnostics, reconciliationFailure }, requiredDiagnosticRoles)
+    .includes("diagnostics.reconciliationFailure is not an exact bounded role failure"));
+}
+assert.ok(validateDiagnostics({ ...readyDiagnostics, arbitraryDebugData: "unexpected" }, requiredDiagnosticRoles)
+  .some((failure) => failure.includes("non-contract keys")));
+assert.ok(validateDiagnostics({ ...readyDiagnostics, visibleLeakCount: 1 }, requiredDiagnosticRoles)
+  .some((failure) => failure.includes("visibleLeakCount")));
 
 const selectors = [".more-comments", ".reply-toggle"];
 const selectorDigest = commentControlSelectorDigest(selectors);

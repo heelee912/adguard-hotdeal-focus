@@ -201,6 +201,12 @@ class CspProbeSourceContractTests(unittest.TestCase):
             "'csp-probe-inspect'", "'csp-probe-install'", "'csp-probe-restore'"
         ):
             self.assertIn(command, self.ps_source)
+        csp_command_start = self.python_source.index("def _command_adguard_csp_probe")
+        csp_command_end = self.python_source.index(
+            "def command_adguard(", csp_command_start
+        )
+        csp_command = self.python_source[csp_command_start:csp_command_end]
+        self.assertNotIn("args.approve_exclusive_target_migration", csp_command)
 
 
 class CspProbeOrchestrationTests(unittest.TestCase):

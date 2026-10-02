@@ -116,6 +116,7 @@ const results = cases.map((item) => ({
     item.algumon,
     item.visible,
     { articleHeadlines: item.metadata?.schema ?? [] },
+    item.knownLayout === true,
   ),
 }));
 process.stdout.write(JSON.stringify(results));
@@ -192,7 +193,10 @@ class UserscriptMetadataTests(unittest.TestCase):
 
     def test_document_start_metadata_and_update_placeholders(self) -> None:
         self.assertEqual(
-            ["GM_addElement", "window.onurlchange"],
+            [
+                "GM_addElement",
+                "window.onurlchange",
+            ],
             metadata_values(self.source, "grant"),
         )
         self.assertEqual(["document-start"], metadata_values(self.source, "run-at"))
@@ -212,11 +216,10 @@ class UserscriptMetadataTests(unittest.TestCase):
         ):
             self.assertNotIn(placeholder, self.source)
 
-    def test_algumon_and_all_seven_target_domains_have_https_matches(self) -> None:
+    def test_only_the_seven_target_domains_have_https_matches(self) -> None:
         matches = set(metadata_values(self.source, "match"))
         self.assertEqual(
             {
-                "https://www.algumon.com/*",
                 "https://*.clien.net/*",
                 "https://*.ppomppu.co.kr/*",
                 "https://*.ruliweb.com/*",
@@ -227,6 +230,14 @@ class UserscriptMetadataTests(unittest.TestCase):
             },
             matches,
         )
+        self.assertNotIn("https://www.algumon.com/*", matches)
+        for removed_storage_api in (
+            "GM_getValue",
+            "GM_setValue",
+            "GM_deleteValue",
+        ):
+            with self.subTest(removed_storage_api=removed_storage_api):
+                self.assertNotIn(removed_storage_api, self.source)
 
     def test_release_code_has_no_remote_execution_or_network_api(self) -> None:
         forbidden_patterns = {
@@ -238,106 +249,168 @@ class UserscriptMetadataTests(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertIsNone(re.search(pattern, self.source))
 
-    def test_algumon_capture_uses_only_the_normal_user_navigation(self) -> None:
+    def test_registered_hotdeal_activation_survives_missing_publisher_referrer(self) -> None:
+        cases = [
+            {
+                "id": "exact-without-gm",
+                "referrer": "https://www.algumon.com/n/deal?sort=latest#card",
+                "omitGm": True,
+            },
+            {
+                "id": "exact-with-unrelated-gm-storage",
+                "referrer": "https://www.algumon.com/",
+                "omitGm": False,
+            },
+            {"id": "direct-empty", "referrer": "", "omitGm": False},
+            {
+                "id": "target-self-referrer",
+                "referrer": "https://www.clien.net/service/board/jirum/19230509",
+                "omitGm": False,
+            },
+            {
+                "id": "http-algumon",
+                "referrer": "http://www.algumon.com/n/deal",
+                "omitGm": False,
+            },
+            {
+                "id": "apex-algumon",
+                "referrer": "https://algumon.com/n/deal",
+                "omitGm": False,
+            },
+            {
+                "id": "suffix-spoof",
+                "referrer": "https://www.algumon.com.attacker.example/n/deal",
+                "omitGm": False,
+            },
+            {
+                "id": "userinfo-spoof",
+                "referrer": "https://attacker@www.algumon.com/n/deal",
+                "omitGm": False,
+            },
+        ]
+        encoded = base64.b64encode(
+            json.dumps(cases, ensure_ascii=False).encode("utf-8")
+        ).decode("ascii")
         javascript = r"""
 const fs = require("fs");
 const vm = require("vm");
 const moduleRecord = { exports: {} };
-const calls = { fetch: 0, xhr: 0, beacon: 0, domWrites: 0, prevented: 0 };
-const listeners = {};
-const documentRecord = {
-  location: { href: "https://www.algumon.com/deals" },
-  addEventListener(type, listener) { listeners[type] = listener; },
-  createElement() { calls.domWrites += 1; return {}; },
-};
-let navigationName = "";
-const browserRoot = {
-  document: documentRecord,
-  location: { hostname: "www.algumon.com" },
-  crypto: {
-    getRandomValues(words) {
-      for (let index = 0; index < words.length; index += 1) words[index] = index + 1;
-      return words;
-    },
-  },
-  btoa(value) { return Buffer.from(value, "binary").toString("base64"); },
-  atob(value) { return Buffer.from(value, "base64").toString("binary"); },
-  fetch() { calls.fetch += 1; throw new Error("unexpected fetch"); },
-  XMLHttpRequest: function unexpectedXhr() { calls.xhr += 1; },
-  navigator: { sendBeacon() { calls.beacon += 1; return false; } },
-  get name() { return navigationName; },
-  set name(value) { navigationName = String(value); },
-};
 const sandbox = {
   module: moduleRecord, URL, Set, Map, WeakMap, WeakSet, Object, Array, String,
   Number, RegExp, JSON, Date, Math, encodeURIComponent, decodeURIComponent,
-  escape, unescape, Uint32Array, Buffer,
+  escape, unescape, Uint8Array, Uint32Array, Reflect, Buffer,
 };
 vm.runInNewContext(fs.readFileSync("hotdeal-focus.user.js", "utf8"), sandbox);
 const api = moduleRecord.exports;
-api.start(browserRoot);
-const title = { textContent: "Normal user navigation deal", getAttribute() { return null; } };
-const card = {
-  getAttribute(name) { return name === "data-site-type" ? "clien" : null; },
-  querySelector(selector) {
-    return selector.includes("data-title") ? title : null;
-  },
-  querySelectorAll() { return []; },
-};
-const anchor = {
-  nodeType: 1,
-  ownerDocument: documentRecord,
-  textContent: "Normal user navigation deal",
-  getAttribute(name) {
-    if (name === "href") {
-      return "https://www.algumon.com/l/d/123?v=" + "a".repeat(32) + "&t=" + Date.now();
-    }
-    return null;
-  },
-  closest(selector) { return selector === "a[href]" ? anchor : card; },
-  setAttribute() { calls.domWrites += 1; },
-  removeAttribute() { calls.domWrites += 1; },
-};
-listeners.click({
-  type: "click", isTrusted: true, defaultPrevented: false, button: 0,
-  ctrlKey: false, metaKey: false, shiftKey: false, altKey: false, target: anchor,
-  preventDefault() { calls.prevented += 1; },
+const cases = JSON.parse(Buffer.from(process.argv[1], "base64").toString("utf8"));
+
+function publisherRoot(calls) {
+  const attributes = new Map([["class", "publisher-original"]]);
+  return {
+    textContent: "Original publisher article",
+    style: {
+      setProperty() { calls.domWrites += 1; },
+      removeProperty() { calls.domWrites += 1; },
+      getPropertyValue() { return ""; },
+      getPropertyPriority() { return ""; },
+    },
+    classList: {
+      add() { calls.domWrites += 1; },
+      remove() { calls.domWrites += 1; },
+      contains() { return false; },
+    },
+    getAttribute(name) { return attributes.get(name) ?? null; },
+    hasAttribute(name) { return attributes.has(name); },
+    setAttribute(name, value) {
+      calls.domWrites += 1;
+      attributes.set(name, String(value));
+    },
+    removeAttribute(name) {
+      calls.domWrites += 1;
+      attributes.delete(name);
+    },
+    querySelectorAll() { return []; },
+  };
+}
+
+const results = cases.map((item) => {
+  const calls = {
+    gmGet: 0, gmSet: 0, gmDelete: 0, domWrites: 0,
+    observers: 0, timers: [], clearedTimers: [],
+  };
+  const originalRoot = publisherRoot(calls);
+  const documentRecord = {
+    referrer: item.referrer,
+    documentElement: null,
+    body: null,
+    title: "Destination title deliberately unrelated to any Algumon card",
+    querySelectorAll() { return []; },
+  };
+  class PassiveMutationObserver {
+    constructor() { calls.observers += 1; }
+    observe() {}
+    disconnect() {}
+  }
+  const browserRoot = {
+    document: documentRecord,
+    location: {
+      hostname: "www.clien.net",
+      href: "https://www.clien.net/service/board/jirum/19230509",
+      pathname: "/service/board/jirum/19230509",
+      search: "",
+    },
+    MutationObserver: PassiveMutationObserver,
+    setTimeout(_callback, delay) {
+      calls.timers.push(delay);
+      return calls.timers.length;
+    },
+    clearTimeout(timeoutId) { calls.clearedTimers.push(timeoutId); },
+  };
+  documentRecord.defaultView = browserRoot;
+  if (!item.omitGm) {
+    browserRoot.GM_getValue = function unexpectedGet(_key, fallback) {
+      calls.gmGet += 1;
+      return fallback;
+    };
+    browserRoot.GM_setValue = function unexpectedSet() { calls.gmSet += 1; };
+    browserRoot.GM_deleteValue = function unexpectedDelete() {
+      calls.gmDelete += 1;
+    };
+  }
+  const result = api.start(browserRoot);
+  return {
+    id: item.id,
+    mode: result.mode,
+    calls,
+    originalClass: originalRoot.getAttribute("class"),
+    originalText: documentRecord.body?.textContent ?? null,
+  };
 });
-process.stdout.write(JSON.stringify({ calls, navigationName, listenerCount: Object.keys(listeners).length }));
+process.stdout.write(JSON.stringify(results));
 """
         completed = subprocess.run(
-            ["node", "-e", javascript],
+            ["node", "-e", javascript, encoded],
             cwd=PROJECT_ROOT,
             check=True,
             capture_output=True,
             text=True,
             encoding="utf-8",
         )
-        result = json.loads(completed.stdout)
-        self.assertEqual(3, result["listenerCount"])
-        self.assertEqual(
-            {"fetch": 0, "xhr": 0, "beacon": 0, "domWrites": 0, "prevented": 0},
-            result["calls"],
-        )
-        self.assertTrue(result["navigationName"].startswith("hdf-provenance:"))
-        capture = self.source[
-            self.source.index("function installAlgumonSeedCapture"):
-            self.source.index("function createRunNonce")
-        ]
-        for forbidden in (
-            ".setAttribute(",
-            ".removeAttribute(",
-            ".appendChild(",
-            "createNativeMutationObserver",
-            "GM_addElement",
-            "preventDefault",
-            "stopImmediatePropagation",
-            ".fetch(",
-            "XMLHttpRequest",
-            "sendBeacon",
-        ):
-            with self.subTest(forbidden=forbidden):
-                self.assertNotIn(forbidden, capture)
+        results = {
+            item["id"]: item for item in json.loads(completed.stdout)
+        }
+
+        for case_id in (item["id"] for item in cases):
+            with self.subTest(case_id=case_id):
+                result = results[case_id]
+                self.assertEqual("reader-gate", result["mode"])
+                self.assertEqual(0, result["calls"]["gmGet"])
+                self.assertEqual(0, result["calls"]["gmSet"])
+                self.assertEqual(0, result["calls"]["gmDelete"])
+
+                self.assertEqual(0, result["calls"]["domWrites"])
+                self.assertEqual("publisher-original", result["originalClass"])
+
 
     def test_protocol_markers_and_no_text_diagnostics_are_explicit(self) -> None:
         for token in (
@@ -360,9 +433,19 @@ process.stdout.write(JSON.stringify({ calls, navigationName, listenerCount: Obje
         self.assertNotIn("resolvedTitle:", diagnostics_function)
 
     def test_core_dom_identity_is_not_replaced_or_recreated(self) -> None:
+        # The script-created toolbar may repair its own three links. This is
+        # not permission to replace the publisher's article or comments.
+        ui_repair = self.source[
+            self.source.index("  function repairReaderUi(document, state) {"):
+            self.source.index("  function markerShapeMatches(")
+        ]
+        self.assertIn("READER_UI.get(document) !== ui", ui_repair)
+        self.assertEqual(self.source.count(".replaceChildren("), 2)
+        self.assertEqual(ui_repair.count(".replaceChildren("), 2)
+        self.assertIn("entry.link.replaceChildren(entry.text)", ui_repair)
+        self.assertIn("ui.root.replaceChildren(...ui.links.map(", ui_repair)
         for forbidden in (
             ".replaceWith(",
-            ".replaceChildren(",
             ".innerHTML =",
             ".outerHTML =",
             'createElement("span")',
@@ -439,7 +522,7 @@ class SemanticContractTests(unittest.TestCase):
         self.assertIn("pageRoots.length !== 1", resolver)
         self.assertIn("titleCandidates.length !== 1", resolver)
         self.assertIn("bodyCandidates.length !== 1", resolver)
-        self.assertIn("commentCandidates.length !== 1", resolver)
+        self.assertIn("nestedCommentCandidates.length !== 1", resolver)
         self.assertIn("projectionClasses.length !== 1", resolver)
         self.assertIn(
             "containsSemanticNoise(bodyNode, structuralNoiseCache, bodyIgnored)",
@@ -544,16 +627,18 @@ class SemanticContractTests(unittest.TestCase):
                 self.assertIn("ignored", layout["comment_contract"])
         self.assertIn("roles.commentItems.forEach", self.source)
         self.assertIn("roles.commentControls.forEach", self.source)
-        self.assertIn("seed-item-mismatch", self.source)
+        self.assertIn('provenCommentCountSource = "exact-dom-zero"', self.source)
         resolver = self.source[
             self.source.index("function resolveApprovedLayout"):
             self.source.index("function resolveDocument")
         ]
         self.assertIn("commentItems.concat(commentControls, commentIgnored)", resolver)
-        self.assertIn(
+        self.assertNotIn(
             "hasUnclassifiedCommentContent(commentMount, classifiedCommentRoots)",
             resolver,
         )
+        self.assertIn('reason: "evidence-outside-items"', resolver)
+        self.assertIn('reason: "evidence-outside-items"', resolver)
         self.assertNotIn(
             "commentItems.length === 0 &&\n      hasUnclassifiedCommentContent",
             resolver,
@@ -569,14 +654,23 @@ class SemanticContractTests(unittest.TestCase):
             self.source.index("function installNavigationRevalidation")
         ]
         self.assertIn("!isRendered(state.roles.comments)", verifier)
-        self.assertIn("!isRendered(item)", verifier)
+        self.assertIn("!state.ownedElements.has(item)", verifier)
+        self.assertIn("synchronizeCommentItemVisibility", observer)
+        self.assertIn('roleClass("comment-dormant")', observer)
         self.assertIn("!isRendered(control)", verifier)
-        self.assertIn("withPublisherVisibilityMeasurement(", observer)
-        self.assertIn('if (!isRendered(added)) return "hidden-comment-addition"', observer)
+        self.assertIn("withPublisherVisibilityMeasurement(", verifier)
+        self.assertIn(
+            "publisherHiddenBeforeProjection || !renderedAddition",
+            observer,
+        )
+        self.assertIn('classification === "control" &&', observer)
+        self.assertIn("!renderedAddition && approvedDormantCommentControl(added, state)", observer)
+        self.assertIn("const additionFailure = !dormantControl && !dormantItem &&", observer)
+        self.assertIn('"hidden-comment-addition"', observer)
         self.assertIn("if (additionFailure)", observer)
         self.assertIn("failureReason = additionFailure", observer)
 
-    def test_known_comment_total_requires_all_individual_items_loaded(self) -> None:
+    def test_known_comment_total_preserves_approved_pagination(self) -> None:
         resolver = self.source[
             self.source.index("function resolveApprovedLayoutWithPublisherStyles"):
             self.source.index("function resolveProjectionClasses")
@@ -585,8 +679,9 @@ class SemanticContractTests(unittest.TestCase):
             self.source.index("function verifyOwnedStateWithPublisherStyles"):
             self.source.index("function paintLockSelectors")
         ]
-        self.assertIn("commentItems.length < provenCommentCount", resolver)
-        self.assertIn('reason: "partial-comment-set"', resolver)
+        self.assertIn("let provenCommentCount = commentItems.length", resolver)
+        self.assertIn('reason: "evidence-outside-items"', resolver)
+        self.assertNotIn('reason: "partial-comment-set"', resolver)
         self.assertIn(
             "currentCommentItems.length !== state.acceptedCommentCount",
             verifier,
@@ -601,8 +696,10 @@ class SemanticContractTests(unittest.TestCase):
         self.assertIn("COMMENT_CONTINUATION_PATTERN", self.source)
         self.assertIn("isCommentContinuationControl", self.source)
         self.assertIn("hasVisibleCommentContinuationControl", resolver)
-        self.assertIn('reason: "incomplete-comment-control"', resolver)
-        self.assertIn("knownCommentTotal", resolver)
+        self.assertIn('provenCommentCountSource = "exact-dom-paginated"', resolver)
+        self.assertNotIn('reason: "incomplete-comment-control"', resolver)
+        self.assertNotIn("knownCommentTotal", resolver)
+        self.assertNotIn("seedCommentCount", resolver)
 
     def test_projection_noise_metadata_is_bounded_and_canonicalized(self) -> None:
         noise = self.source[
@@ -620,7 +717,7 @@ class SemanticContractTests(unittest.TestCase):
     def test_shadow_and_top_layer_guards_register_and_unsubscribe_native_events(self) -> None:
         native = self.source[
             self.source.index("const NATIVE = Object.freeze"):
-            self.source.index("const CSSOM_MUTATION_LISTENERS")
+            self.source.index("const SHADOW_TRACKERS")
         ]
         observer = self.source[
             self.source.index("function installIntegrityObserver"):
@@ -638,7 +735,28 @@ class SemanticContractTests(unittest.TestCase):
         self.assertIn('target?.matches?.("[popover], dialog")', observer)
         self.assertIn("NATIVE.removeEventListener", observer)
         self.assertIn("runtime.unsubscribeProjectionEvents", stop)
-        self.assertIn("initializeShadowTracker", self.source)
+        shadow_tracker = self.source[
+            self.source.index("function initializeShadowTracker"):
+            self.source.index("function createNativeMutationObserver")
+        ]
+        terminal = self.source[
+            self.source.index("runtime.enterTerminal = function enterTerminal"):
+            self.source.index("function attemptResolution")
+        ]
+        self.assertIn("SHADOW_TRACKERS = new WeakMap()", self.source)
+        self.assertIn("function uninstallShadowTracker()", shadow_tracker)
+        self.assertIn('NATIVE.defineProperty(prototype, "attachShadow"', shadow_tracker)
+        self.assertIn("SHADOW_TRACKERS.delete(browserRoot)", shadow_tracker)
+        self.assertIn("return prototype.attachShadow === nativeAttachShadow", shadow_tracker)
+        self.assertIn("runtime.shadowTracker?.uninstall?.()", terminal)
+        self.assertIn("runtime.shadowTracker.uninstall()", stop)
+        tracker_activation = self.source.index(
+            "activeShadowTracker = initializeShadowTracker(browserRoot)"
+        )
+        verified_activation = self.source.index("function beginVerifiedTargetActivation")
+        runtime_creation = self.source.index("activeRuntime = createReaderRuntime(")
+        self.assertGreater(tracker_activation, verified_activation)
+        self.assertLess(tracker_activation, runtime_creation)
         self.assertIn("containsUnprovenShadowBoundary", self.source)
 
     def test_publisher_visibility_measurement_keeps_the_root_no_paint(self) -> None:
@@ -718,8 +836,12 @@ class SemanticContractTests(unittest.TestCase):
 
         ruli = sites["ruliweb"]["layouts"][0]["comment_contract"]["items"]
         self.assertEqual(
-            [".comment_view.normal > table.comment_table > tbody > tr.comment_element"],
+            [".comment_view.normal > table.comment_table > tbody > tr.comment_element:not(:has(> td.comment > .nbp_container))"],
             ruli,
+        )
+        self.assertIn(
+            ".comment_view.normal > table.comment_table > tbody > tr.comment_element:has(> td.comment > .nbp_container)",
+            sites["ruliweb"]["layouts"][0]["comment_contract"]["ignored"],
         )
 
         quasar = {
@@ -728,13 +850,15 @@ class SemanticContractTests(unittest.TestCase):
         self.assertEqual(["desktop"], quasar["market"]["applicable_profiles"])
         self.assertEqual(".left-con-wrap", quasar["market"]["page_root"])
         self.assertEqual(
-            ["#ajax-reply-list > li[id^='comment']"],
+            ["#ajax-reply-list > li[id^='comment']",
+             "#ajax-reply-list > ul.common-reply-list > li[id^='comment']"],
             quasar["market"]["comment_contract"]["items"],
         )
         self.assertEqual(["mobile"], quasar["market-mobile"]["applicable_profiles"])
         self.assertEqual("#con-body", quasar["market-mobile"]["page_root"])
         self.assertEqual(
-            ["#ajax-reply-list > .commnet-main[id^='comment']"],
+            ["#ajax-reply-list > .commnet-main[id^='comment']",
+             "#ajax-reply-list > ul.common-reply-list > li[id^='comment']"],
             quasar["market-mobile"]["comment_contract"]["items"],
         )
 
@@ -772,35 +896,77 @@ class SemanticContractTests(unittest.TestCase):
             set(raw_layout_paths(ruli["layouts"][0])),
         )
 
-    def test_seed_is_short_lived_public_and_never_a_solo_trusted_signal(self) -> None:
-        self.assertIn("SEED_MAX_AGE_MS = 10 * 60 * 1000", self.source)
-        self.assertIn("SEED_MAX_BYTES = 1024", self.source)
-        self.assertIn('SEED_WINDOW_NAME_PREFIX = "hdf-provenance:"', self.source)
-        self.assertIn("function encodeSeedCarrier", self.source)
-        self.assertIn("function decodeSeedCarrier", self.source)
-        self.assertIn("function readAndClearSeed", self.source)
-        self.assertIn('document.addEventListener("auxclick"', self.source)
-        self.assertIn('document.addEventListener("keydown"', self.source)
-        self.assertIn('event.key === "Enter"', self.source)
-        self.assertIn('browserRoot.name = ""', self.source)
-        self.assertIn("staysInCurrentBrowsingContext", self.source)
-        self.assertNotIn("event.preventDefault()", self.source[
-            self.source.index("function installAlgumonSeedCapture"):
-            self.source.index("function createRunNonce")
-        ])
-        self.assertIn('"seed-title-match"', self.source)
-        self.assertIn('"seed-count-match"', self.source)
-        self.assertIn("UNTRUSTED_SIGNALS", self.source)
-        self.assertNotRegex(self.source, r"seed\.(?:body|content|html|user|email|token)")
-        extractor = self.source[
-            self.source.index("function extractAlgumonSeed"):
-            self.source.index("function installAlgumonSeedCapture")
+    def test_semantic_preflight_restores_readability_while_waiting_for_unique_proof(
+        self,
+    ) -> None:
+        preflight = self.source[
+            self.source.index("function waitForVerifiedTargetSemanticProof"):
+            self.source.index("function start(browserRoot)")
         ]
-        self.assertIn("data-source-comment-count", extractor)
-        self.assertIn("data-origin-comment-count", extractor)
-        self.assertNotIn('"data-comment-count"', extractor)
-        self.assertNotIn("countMatch", extractor)
-        self.assertNotIn("cardText.match", extractor)
+        self.assertIn("resolveDocument(document, layouts, null)", preflight)
+        self.assertIn(
+            "resolveIndependentSemanticDocument(document, layouts)",
+            preflight,
+        )
+        self.assertIn("if (!resolution.ok) {", preflight)
+        self.assertIn('`recovery-preflight-${failure.role || "semantic"}-${failure.reason || "unresolved"}`', preflight)
+        self.assertIn('recoverOnce(reason)', preflight)
+        self.assertIn('recoverOnce("semantic-preflight-timeout")', preflight)
+        self.assertIn(
+            '`${entryAuthority}-independent-semantic-tuple`',
+            preflight,
+        )
+        self.assertNotIn("resolveDocumentFromSeedCandidates", preflight)
+        self.assertNotIn("navigationSeeds", preflight)
+        self.assertNotIn("claimBootstrapLock", preflight)
+        self.assertEqual(preflight.count("setAttribute("), 1)
+        self.assertIn("document.documentElement.setAttribute(ATTR.status, reason)", preflight)
+        start_offset = self.source.index("function start(browserRoot)")
+        start = self.source[
+            start_offset:
+            self.source.index("\n  return Object.freeze({", start_offset)
+        ]
+        self.assertLess(
+            start.index("lockWhenHtmlExists(document"),
+            start.index("waitForVerifiedTargetSemanticProof("),
+        )
+
+    def test_runtime_consumes_the_verified_preflight_once_without_rediscovery(self) -> None:
+        runtime = self.source[
+            self.source.index("function createReaderRuntime"):
+            self.source.index("function lockWhenHtmlExists")
+        ]
+        attempt = runtime[
+            runtime.index("function attemptResolution"):
+            runtime.index("runtime.beginDiscovery = function beginDiscovery")
+        ]
+        begin = runtime[
+            runtime.index("runtime.beginDiscovery = function beginDiscovery"):
+            runtime.index("runtime.stop = function stopRuntime")
+        ]
+        self.assertIn(
+            "const candidateResolution = runtime.verifiedTargetProof",
+            attempt,
+        )
+        self.assertIn(
+            "candidateResolution?.ok || !candidateResolution.resolution?.ok",
+            attempt,
+        )
+        self.assertNotIn("resolveDocument(", attempt)
+        self.assertIn("attemptResolution()", begin)
+        self.assertNotIn("createNativeMutationObserver", begin)
+        self.assertNotIn(".observe(", begin)
+        self.assertNotIn("scheduleAttempt", runtime)
+        self.assertNotIn("runtime.discoveryObserver.observe", runtime)
+
+    def test_dynamic_comment_marker_commit_includes_ancestor_closure(self) -> None:
+        remember = self.source[
+            self.source.index("function rememberAuthorizedMarkerTree"):
+            self.source.index("function verifyOwnedState")
+        ]
+        self.assertIn("root.parentElement", remember)
+        self.assertIn("ancestor = ancestor.parentElement", remember)
+        self.assertIn("uniqueElements(markerClosure)", remember)
 
     def test_navigation_identity_normalizes_only_proven_approved_article_aliases(
         self,
@@ -957,7 +1123,7 @@ class SemanticContractTests(unittest.TestCase):
             cascade.index("const exposesUnowned")
         ]
         self.assertLess(
-            pre_ready.index('if (runtime.releasePhase !== "released")'),
+            pre_ready.index('if (!["released", "frozen"].includes(runtime.releasePhase))'),
             pre_ready.index("pendingElements.add(element)"),
         )
         self.assertIn("pendingElements.clear()", pre_ready)
@@ -977,11 +1143,22 @@ class SemanticContractTests(unittest.TestCase):
         ]
         self.assertIn("if (fullScanRequired)", release_verification)
         self.assertIn("releaseCandidates = collectBoundedFullScan()", release_verification)
-        self.assertIn("exposesUnowned(releaseCandidates)", release_verification)
+        self.assertIn("cascadeLeakRemains(releaseCandidates)", release_verification)
+        self.assertIn("exposesUnowned(elements)", cascade)
+        self.assertIn("quarantineUnownedCascadeLeaks", cascade)
+        sentinel = cascade[
+            cascade.index("const verifyCascade"):
+            cascade.index("const observer =", cascade.index("const verifyCascade"))
+        ]
+        self.assertIn('!["released", "frozen"].includes(runtime.releasePhase)', sentinel)
+        self.assertLess(
+            sentinel.index('!["released", "frozen"].includes(runtime.releasePhase)'),
+            sentinel.index("collectBoundedFullScan()"),
+        )
 
         attempt = self.source[
             self.source.index("function attemptResolution"):
-            self.source.index("function scheduleAttempt")
+            self.source.index("runtime.beginDiscovery = function beginDiscovery")
         ]
         prepare = attempt.index("runtime.prepareCascadeRelease()")
         authorize = attempt.index("runtime.authorizedReady = true")
@@ -1008,10 +1185,8 @@ class SemanticContractTests(unittest.TestCase):
             cascade.index("const verifyCascade")
         ]
         self.assertIn("collectBoundedFullScan()", unlocked_verification)
-        self.assertIn("verifyOwnedState(document, runtime.projectionState)", unlocked_verification)
-        self.assertIn("exposesRootPaint()", unlocked_verification)
-        self.assertIn("exposesTopLayer()", unlocked_verification)
-        self.assertIn("exposesUnowned(releaseCandidates)", unlocked_verification)
+        self.assertIn("!runtimeGateStyleIntact(styleElement, runtime)", unlocked_verification)
+        self.assertIn("cascadeLeakRemains(releaseCandidates)", unlocked_verification)
         self.assertIn('runtime.enterTerminal("cascade-visible-leak")', unlocked_verification)
 
         release_proof = self.source[
@@ -1035,34 +1210,13 @@ class SemanticContractTests(unittest.TestCase):
         self.assertLess(same_identity_return, runtime_stop)
         self.assertIn('terminalNavigationBlock("navigation-identity")', activation)
 
-    def test_post_ready_changes_relock_or_terminal_by_mutation_class(self) -> None:
+    def test_post_ready_changes_are_contained_or_terminal_by_mutation_class(self) -> None:
         runtime = self.source[
             self.source.index("function createReaderRuntime"):
             self.source.index("function lockWhenHtmlExists")
         ]
-        relock = runtime[
-            runtime.index("runtime.relockForReprojection"):
-            runtime.index("function attemptResolution")
-        ]
-        self.assertIn('runtime.releasePhase = "relocking"', relock)
-        self.assertIn('document.documentElement.classList.add(CLASS.lock)', relock)
-        self.assertIn('document.documentElement.setAttribute(ATTR.lock, "1")', relock)
-        self.assertIn("writeRuntimeGateStyle(styleElement, null, runtime)", relock)
-        self.assertIn("clearProtocolState(document)", relock)
-        self.assertIn("claimBootstrapLock(document, false)", relock)
-        self.assertIn("runtime.beginDiscovery()", relock)
-        self.assertLess(
-            relock.index('document.documentElement.classList.add(CLASS.lock)'),
-            relock.index("writeRuntimeGateStyle(styleElement, null, runtime)"),
-        )
-        self.assertLess(
-            relock.index("writeRuntimeGateStyle(styleElement, null, runtime)"),
-            relock.index("clearProtocolState(document)"),
-        )
-        self.assertLess(
-            relock.index("clearProtocolState(document)"),
-            relock.index("runtime.beginDiscovery()"),
-        )
+        self.assertNotIn("relockForReprojection", runtime)
+        self.assertNotIn("reprojectionReason", runtime)
 
         cascade = self.source[
             self.source.index("function installCascadeGuard"):
@@ -1072,15 +1226,18 @@ class SemanticContractTests(unittest.TestCase):
             cascade.index("function keepGateStyleLast"):
             cascade.index("let stylesheetChanged")
         ]
-        self.assertIn('runtime.releasePhase === "released"', mutation_guard)
-        self.assertIn("runtime.relockForReprojection(", mutation_guard)
-        self.assertIn('"post-ready-stylesheet"', mutation_guard)
-        self.assertIn('"post-ready-dom"', mutation_guard)
-        self.assertIn('"post-ready-cssom"', cascade)
-        self.assertIn("subscribeAdoptedStyleSheetMutations", cascade)
-        self.assertIn('"post-ready-adopted-stylesheet"', cascade)
-        self.assertIn("subscribeStyleSheetStateMutations", cascade)
-        self.assertIn('"post-ready-stylesheet-state"', cascade)
+        self.assertNotIn('runtime.releasePhase === "released"', mutation_guard)
+        self.assertNotIn('"post-ready-stylesheet"', cascade)
+        self.assertNotIn('"post-ready-cssom"', cascade)
+        self.assertNotIn("subscribeAdoptedStyleSheetMutations", cascade)
+        self.assertNotIn("subscribeStyleSheetStateMutations", cascade)
+        self.assertIn("stylesheetIntroducesPublisherPaint", cascade)
+        self.assertIn("quarantinePublisherPaintStylesheet", cascade)
+        self.assertIn(
+            'runtime.enterTerminal("projection-publisher-invariant-uncontained")',
+            cascade,
+        )
+        self.assertIn('runtime.enterTerminal("runtime-style-tamper-cascade-pre")', cascade)
         self.assertIn("runtime.discardCascadeRecords", cascade)
         self.assertIn('"open", "popover"', cascade)
 
@@ -1090,6 +1247,8 @@ class SemanticContractTests(unittest.TestCase):
         ]
         self.assertIn("COMMENT_CONTROL_STATE_ATTRIBUTES.has(name)", integrity)
         self.assertIn("commentProjectionChanged = true", integrity)
+        self.assertIn("reconcileAtomicRole", integrity)
+        self.assertIn("quarantineAtomicProjectionRoot", integrity)
         self.assertIn("terminalBlock(failureReason)", integrity)
         self.assertIn('runtime.enterTerminal("role-projection-top-layer-activation")', integrity)
 
@@ -1097,19 +1256,17 @@ class SemanticContractTests(unittest.TestCase):
             self.source.index("function activateCurrentLocation"):
             self.source.index("activateCurrentLocation();")
         ]
-        self.assertIn(
-            'activeRuntime.relockForReprojection("same-article-navigation")',
-            navigation,
-        )
-        self.assertIn("characterData: true", runtime)
-        self.assertIn("attributes: true", runtime)
+        self.assertNotIn("relockForReprojection", navigation)
+        self.assertIn("characterData: true", integrity)
+        self.assertIn("attributes: true", integrity)
 
         resolver = self.source[
             self.source.index("function resolveApprovedLayoutWithPublisherStyles"):
             self.source.index("function resolveProjectionClasses")
         ]
         self.assertIn("hasVisibleCommentContinuationControl(commentControls)", resolver)
-        self.assertIn('reason: "incomplete-comment-control"', resolver)
+        self.assertIn('provenCommentCountSource = "exact-dom-paginated"', resolver)
+        self.assertNotIn('reason: "incomplete-comment-control"', resolver)
 
         stylesheet = self.source[
             self.source.index("function gateStyleText"):
@@ -1125,9 +1282,10 @@ class SemanticContractTests(unittest.TestCase):
         )
 
     def test_first_terminal_navigation_reason_is_immutable(self) -> None:
+        start_offset = self.source.index("function start(browserRoot)")
         start = self.source[
-            self.source.index("function start(browserRoot)"):
-            self.source.index('return { mode: "reader-gate"')
+            start_offset:
+            self.source.index("\n  return Object.freeze({", start_offset)
         ]
         terminal = start[
             start.index("function terminalNavigationBlock"):
@@ -1357,6 +1515,20 @@ class SemanticContractTests(unittest.TestCase):
                 "evidence_ok": True,
             },
             {
+                "id": "ruliweb-punctuation-invariant-metadata",
+                "algumon": "",
+                "visible": (
+                    "[카카오] 미쯔황치즈6p+미쯔6p+촉촉한초코칩16p/11,600원"
+                ),
+                "metadata": {
+                    "og": [
+                        "카카오 미쯔황치즈6p미쯔6p촉촉한초코칩16p11600원"
+                    ]
+                },
+                "core_ok": False,
+                "evidence_ok": True,
+            },
+            {
                 "id": "eomisae-bounded-unit-price-expansion",
                 "algumon": "더바디샵 바디 미스트, 핑크 그레이프 프룻",
                 "visible": "국내 더바디샵 바디 미스트, 핑크 그레이프 프룻, 100ml, 11,760원",
@@ -1379,6 +1551,63 @@ class SemanticContractTests(unittest.TestCase):
                     self.assertGreaterEqual(
                         result["evidence"]["metadata"]["sourceCount"], 1
                     )
+
+    def test_short_title_accepts_exact_publisher_metadata_without_loosening_fuzzy_match(self) -> None:
+        visible = "듀얼센스 (64,000원/무료)"
+        cases = [
+            {"algumon": None, "visible": visible, "metadata": {"og": [visible + " - 핫딜 채널"]}},
+            {"algumon": None, "visible": "듀얼센스", "metadata": {"og": ["듀얼센스 - 핫딜 채널"]}},
+            {"algumon": None, "visible": visible, "metadata": {"og": ["듀얼쇼크 (64,000원/무료) - 핫딜 채널"]}},
+            {"algumon": None, "visible": visible, "metadata": {"og": ["듀얼센스 (69,000원/무료) - 핫딜 채널"]}},
+            {"algumon": None, "visible": visible, "metadata": {"og": [visible + " - 핫딜 채널", "다른 상품"]}},
+            {"algumon": None, "visible": visible, "metadata": {"og": [visible + " - 핫딜 채널"], "twitter": ["듀얼쇼크 (64,000원/무료)"]}},
+            {"algumon": None, "visible": "무료 (0원/무료)", "metadata": {"og": ["무료 (0원/무료) - 핫딜 채널"]}},
+        ]
+        for index, result in enumerate(evaluate_title_cases(cases)):
+            with self.subTest(case=index):
+                self.assertEqual(index in (0, 1, 6), result["evidence"]["ok"], result)
+
+    def test_exact_titles_have_no_word_or_character_minimum(self) -> None:
+        titles = ["쌀", "우유", "라면컵", "A", "IT", "DOOM", "0", "무료", "🎮"]
+        cases = [
+            {"algumon": title, "visible": title, "metadata": {"og": [title + " - 핫딜 채널"]}}
+            for title in titles
+        ]
+        for title, result in zip(titles, evaluate_title_cases(cases), strict=True):
+            with self.subTest(title=title):
+                self.assertTrue(result["core"]["ok"], result)
+                self.assertTrue(result["evidence"]["ok"], result)
+
+    def test_known_article_title_is_not_gated_by_absent_or_stale_social_metadata(self) -> None:
+        cases = [
+            {"algumon": None, "visible": "쌀", "metadata": {}},
+            {"algumon": None, "visible": "우유", "metadata": {"twitter": ["우유"]}},
+            {"algumon": None, "visible": "DOOM", "metadata": {"og": ["DOOM"], "twitter": ["예전 제목"]}},
+            {"algumon": "수정 전 상품", "visible": "상품 수정 후", "metadata": {"og": ["수정 전 상품"]}},
+            {"algumon": None, "visible": "무료", "metadata": {"og": ["이전 제목", "무료"]}},
+        ]
+        for result in evaluate_title_cases([dict(case, knownLayout=True) for case in cases]):
+            self.assertTrue(result["evidence"]["ok"], result)
+            self.assertEqual("known-layout-visible-title", result["evidence"]["mode"])
+            self.assertEqual("optional-publisher-metadata", result["evidence"]["metadata"]["reason"])
+        for result in evaluate_title_cases(cases):
+            self.assertFalse(result["evidence"]["ok"], result)
+
+    def test_normal_article_media_and_purchase_link_are_not_noise_by_name_only(self) -> None:
+        strong_noise = self.source[
+            self.source.index("function isStrongProjectionNoiseNode"):
+            self.source.index("function collectJsonLd")
+        ]
+        autonomous_noise = self.source[
+            self.source.index("function isAutonomousProjectionNoiseRoot"):
+            self.source.index("function containsSemanticNoise")
+        ]
+        self.assertNotIn('getAttribute("rel")', strong_noise)
+        self.assertNotIn('getAttribute("rel")', autonomous_noise)
+        self.assertNotIn("normalizeProjectionTokenText(resources)", strong_noise)
+        self.assertNotIn("normalizeProjectionTokenText(resources)", autonomous_noise)
+        self.assertIn("AD_NETWORK_RESOURCE_PATTERN.test(resources)", strong_noise)
+        self.assertIn("isRendered(item) && hasApprovedContent(item)", self.source)
 
     def test_title_evidence_rejects_numeric_model_drift_and_metadata_ambiguity(self) -> None:
         negative_cases = [
@@ -1444,7 +1673,7 @@ class SemanticContractTests(unittest.TestCase):
             with self.subTest(case=index):
                 self.assertFalse(result["evidence"]["ok"])
 
-    def test_seed_validation_preserves_protected_title_punctuation(self) -> None:
+    def test_referrer_projection_title_keeps_protected_punctuation(self) -> None:
         javascript = r"""
 const fs = require("fs");
 const vm = require("vm");
@@ -1456,35 +1685,10 @@ const sandbox = {
 };
 vm.runInNewContext(fs.readFileSync("hotdeal-focus.user.js", "utf8"), sandbox);
 const api = moduleRecord.exports;
-const now = 1784532000000;
 const rawTitle = "Synthetic PS5/NS2 marker-style-tamper";
-const seed = api.validateSeed({
-  v: 1,
-  siteType: "clien",
-  dealId: "99999000",
-  title: rawTitle,
-  commentCount: null,
-  ts: now,
-  relayV: "0".repeat(32),
-  relayT: String(now),
-  navigationNonce: `hdf-${"a".repeat(28)}`,
-  destinationUrl: "https://www.clien.net/service/board/jirum/99999000",
-}, now, true);
-const carrierSeed = api.validateSeed({
-  v: 1,
-  siteType: "clien",
-  dealId: "99999000",
-  title: rawTitle,
-  commentCount: null,
-  ts: now,
-  relayV: "0".repeat(32),
-  relayT: String(now),
-  navigationNonce: `hdf-${"a".repeat(28)}`,
-}, now, true);
 process.stdout.write(JSON.stringify({
-  title: seed?.title ?? null,
-  evidence: seed ? api.titleConsistency(seed.title, rawTitle) : null,
-  carrierNavigation: Boolean(carrierSeed?.navigationNonce) && carrierSeed.destinationUrl === null,
+  title: rawTitle,
+  evidence: api.titleConsistency(rawTitle, rawTitle),
 }));
 """
         completed = subprocess.run(
@@ -1498,7 +1702,6 @@ process.stdout.write(JSON.stringify({
         result = json.loads(completed.stdout)
         self.assertEqual("Synthetic PS5/NS2 marker-style-tamper", result["title"])
         self.assertTrue(result["evidence"]["ok"], result)
-        self.assertTrue(result["carrierNavigation"], result)
 
     def test_tamper_and_spa_revalidation_contracts_exist(self) -> None:
         for token in (
@@ -1509,8 +1712,6 @@ process.stdout.write(JSON.stringify({
             "installNavigationRevalidation",
             "discoverSemanticContract",
             "__HOTDEAL_FOCUS_AUDIT__",
-            '"pushState"',
-            '"replaceState"',
             '"urlchange"',
             '"hashchange"',
             '"popstate"',
@@ -1526,48 +1727,79 @@ process.stdout.write(JSON.stringify({
         self.assertIn("runtimeGateStyleFailure", bootstrap)
         self.assertIn("runtime.releasePhase", bootstrap)
         self.assertIn("rootShapeIntact", bootstrap)
-        self.assertIn("canonicalRuntimeCssRules", self.source)
-        self.assertIn("installPersistentTerminalGuardian", self.source)
+        self.assertIn("function runtimeGateStyleFailure", self.source)
+        self.assertNotIn("installPersistentTerminalGuardian", self.source)
         navigation_start = self.source.index("function activateCurrentLocation")
         navigation = self.source[
             navigation_start:
             self.source.index("installNavigationRevalidation", navigation_start)
         ]
         self.assertIn("activeRuntime.terminallyBlocked", navigation)
-        self.assertIn('setAttribute(ATTR.status, "terminal-tamper")', navigation)
+        self.assertNotIn('setAttribute(ATTR.status, "terminal-tamper")', navigation)
         self.assertIn("event.persisted === true", self.source)
+        self.assertNotIn("historyPushState", self.source)
+        self.assertNotIn("historyReplaceState", self.source)
+        self.assertNotIn('"pushState"', self.source)
+        self.assertNotIn('"replaceState"', self.source)
         navigation_guard = self.source[
             self.source.index("function installNavigationRevalidation"):
             self.source.index("function start(browserRoot)")
         ]
-        self.assertIn('["urlchange", revalidate, true]', navigation_guard)
-        self.assertIn('["hashchange", revalidate, true]', navigation_guard)
-        self.assertIn("urlchange event remains the authoritative SPA trigger", navigation_guard)
-        self.assertIn("return true", navigation_guard)
+        self.assertIn('subscribe("urlchange", revalidateSafely)', navigation_guard)
+        self.assertIn('subscribe("hashchange", revalidateSafely)', navigation_guard)
+        self.assertIn('subscribe("popstate", revalidateSafely)', navigation_guard)
+        self.assertIn("const scheduleUrlPoll", navigation_guard)
+        self.assertIn("currentHref !== observedHref", navigation_guard)
+        self.assertIn(
+            "nativeTimeout(browserRoot, scheduleUrlPoll, 500)",
+            navigation_guard,
+        )
+        self.assertIn("return Object.freeze({ stop })", navigation_guard)
 
-        terminal_guardian = self.source[
-            self.source.index("function installPersistentTerminalGuardian"):
-            self.source.index("function publishDiagnostics")
+        terminal_runtime = self.source[
+            self.source.index("function freezeVerifiedProjection"):
+            self.source.index("function attemptResolution")
         ]
-        self.assertIn(
-            'html.style.getPropertyValue("opacity") !== "0"',
-            terminal_guardian,
+        freeze = terminal_runtime[
+            :terminal_runtime.index(
+                "runtime.enterTerminal = function enterTerminal"
+            )
+        ]
+        terminal = terminal_runtime[
+            terminal_runtime.index(
+                "runtime.enterTerminal = function enterTerminal"
+            ):
+        ]
+        terminal_entry = terminal[
+            terminal.index("runtime.enterTerminal = function enterTerminal"):
+        ]
+        self.assertIn("runtime.verifiedTargetProof?.resolution", freeze)
+        self.assertIn("applyRoleMarkers(", freeze)
+        self.assertIn("writeRuntimeGateStyle(styleElement, nonce, runtime)", freeze)
+        self.assertIn("verifyOwnedMarkerState(document, state)", freeze)
+        self.assertIn('runtime.releasePhase = "frozen"', freeze)
+        self.assertIn('html.setAttribute(ATTR.ready, "1")', freeze)
+        freeze_call = terminal_entry.index(
+            "const projectionFrozen = freezeVerifiedProjection(reason)"
         )
-        self.assertIn(
-            'html.style.getPropertyValue("pointer-events") !== "none"',
-            terminal_guardian,
+        frozen_return = terminal_entry.index("if (projectionFrozen)")
+        content_recovery = terminal_entry.index(
+            'restoreReaderContent(browserRoot, contract, reason, styleElement, runtime.bootstrapLock)'
         )
-        self.assertIn("styleElement?.sheet?.disabled", terminal_guardian)
-        self.assertIn("styleElement.sheet.disabled = false", terminal_guardian)
-        self.assertIn("html.removeAttribute(ATTR.measure)", terminal_guardian)
-        for exact_terminal_lock in (
-            'html.style.getPropertyValue("transition") !== "none"',
-            'html.style.getPropertyValue("animation") !== "none"',
-            'html.style.getPropertyValue("content-visibility") !== "hidden"',
-            'html.style.getPropertyValue("clip-path") !== "inset(50%)"',
-            'html.style.getPropertyValue("caret-color") !== "transparent"',
-        ):
-            self.assertIn(exact_terminal_lock, terminal_guardian)
+        self.assertLess(freeze_call, frozen_return)
+        self.assertLess(frozen_return, content_recovery)
+        self.assertIn(
+            "runtime.rollbackComplete = true",
+            terminal_entry[frozen_return:content_recovery],
+        )
+        self.assertIn("return", terminal_entry[frozen_return:content_recovery])
+        self.assertIn(
+            'runtime.releasePhase = "recovery"',
+            terminal_entry,
+        )
+        self.assertIn("restorePublisherPage(", terminal_entry)
+        self.assertNotIn('html.setAttribute(ATTR.lock, "1")', terminal_entry)
+        self.assertNotIn("installPersistentTerminalGuardian", terminal)
 
     def test_runtime_projection_is_nonce_bound_and_ready_is_committed_last(self) -> None:
         style = self.source[
@@ -1601,7 +1833,7 @@ process.stdout.write(JSON.stringify({
             self.assertNotIn(geometry_breaker, lock_rule)
         attempt = self.source[
             self.source.index("function attemptResolution"):
-            self.source.index("function scheduleAttempt")
+            self.source.index("runtime.beginDiscovery = function beginDiscovery")
         ]
         self.assertLess(
             attempt.index("writeRuntimeGateStyle(styleElement, nonce, runtime)"),
@@ -1618,22 +1850,32 @@ process.stdout.write(JSON.stringify({
 
     def test_reader_gate_v2_uses_only_standalone_gm_style_authority(self) -> None:
         self.assertEqual(
-            ["GM_addElement", "window.onurlchange"],
+            [
+                "GM_addElement",
+                "window.onurlchange",
+            ],
             metadata_values(self.source, "grant"),
         )
-        self.assertEqual(1, self.source.count('GM_addElement(parent, "style", {'))
+        self.assertEqual(3, self.source.count('GM_addElement(parent, "style", {'))
         install = self.source[
             self.source.index("function installRuntimeGateStyle"):
-            self.source.index("function canonicalRuntimeCssRules")
+            self.source.index("function publisherVisualRecoveryStyleText")
         ]
+        recovery = self.source[
+            self.source.index("function installPublisherVisualRecoveryStyle"):
+            self.source.index("function writeRuntimeGateStyle")
+        ]
+        self.assertEqual(1, install.count('GM_addElement(parent, "style", {'))
+        self.assertEqual(2, recovery.count('GM_addElement(parent, "style", {'))
         self.assertIn('"data-hotdeal-focus-runtime-style": "2"', install)
         self.assertNotIn("createElement", install)
+        self.assertIn('state: "recovery"', recovery)
         self.assertNotIn('"nonce"', install)
         self.assertNotIn('"data-source"', install)
 
         integrity = self.source[
             self.source.index("function runtimeGateStyleIntact"):
-            self.source.index("function installPersistentTerminalGuardian")
+            self.source.index("function publishDiagnostics")
         ]
         proof = self.source[
             self.source.index("function proveStandaloneCascadeRelease"):
@@ -1694,44 +1936,182 @@ process.stdout.write(JSON.stringify({
 
         attempt = self.source[
             self.source.index("function attemptResolution"):
-            self.source.index("function scheduleAttempt")
+            self.source.index("runtime.beginDiscovery = function beginDiscovery")
         ]
         marker = attempt.index("applyRoleMarkers(")
         ready_protocol = attempt.index("setAttribute(ATTR.protocol, PROTOCOL_VERSION)")
         ready_class = attempt.index("classList.add(CLASS.ready)")
         remove_lock_attribute = attempt.index("removeAttribute(ATTR.lock)")
         remove_lock_class = attempt.index("classList.remove(CLASS.lock)")
+        referrer_commit = attempt.index("onResolved(resolution)")
+        cascade_proof = attempt.index("proveStandaloneCascadeRelease(")
+        release_callback = attempt.index("function releaseProvedProjection()")
+        unlocked_verification = attempt.index("runtime.verifyUnlockedCascadeRelease()")
+        integrity_observer = attempt.index("installIntegrityObserver(")
         self.assertLess(marker, ready_protocol)
         self.assertLess(ready_protocol, ready_class)
+        self.assertLess(ready_class, cascade_proof)
+        self.assertLess(cascade_proof, release_callback)
+        self.assertLess(release_callback, remove_lock_attribute)
         self.assertLess(ready_class, remove_lock_attribute)
         self.assertLess(remove_lock_attribute, remove_lock_class)
+        self.assertLess(remove_lock_class, unlocked_verification)
+        self.assertLess(unlocked_verification, integrity_observer)
+        self.assertLess(integrity_observer, referrer_commit)
+        self.assertNotIn("candidateResolution.seed", attempt)
         self.assertEqual(
             remove_lock_class,
             attempt.rindex("classList.remove(CLASS.lock)"),
         )
 
+    def test_locked_activation_deadline_survives_the_armed_release_proof(self) -> None:
+        runtime = self.source[
+            self.source.index("function createReaderRuntime"):
+            self.source.index("function lockWhenHtmlExists")
+        ]
+        timeout_guard = runtime[
+            runtime.index("function armLockedActivationDeadline"):
+            runtime.index("runtime.publishReadyProjectionDiagnostics")
+        ]
+        self.assertIn("nativeClearTimeout(browserRoot, runtime.lockedActivationTimeoutId)", timeout_guard)
+        self.assertIn("LOCKED_ACTIVATION_TIMEOUT_MS", timeout_guard)
+        self.assertIn("locked-activation-timeout-${runtime.releasePhase}", timeout_guard)
+        self.assertIn("${runtime.releaseProofStage}", timeout_guard)
+        self.assertIn("samples-${runtime.releaseProofSampleCount}", timeout_guard)
+        self.assertRegex(
+            timeout_guard,
+            r'runtime\.releasePhase\s*!==\s*"released"',
+        )
+        self.assertNotIn("!runtime.authorizedReady", timeout_guard)
+
+        attempt = runtime[
+            runtime.index("function attemptResolution"):
+            runtime.index("runtime.beginDiscovery = function beginDiscovery")
+        ]
+        self.assertLess(
+            attempt.index("runtime.readyDiagnostics = Object.freeze"),
+            attempt.index("armLockedActivationDeadline();"),
+        )
+        self.assertLess(
+            attempt.index("armLockedActivationDeadline();"),
+            attempt.index("proveStandaloneCascadeRelease("),
+        )
+        discovery = runtime[
+            runtime.index("runtime.beginDiscovery = function beginDiscovery"):
+            runtime.index("runtime.stop = function stopRuntime")
+        ]
+        self.assertLess(
+            discovery.index("armLockedActivationDeadline();"),
+            discovery.index("attemptResolution();"),
+        )
+        release_callback = attempt[
+            attempt.index("function releaseProvedProjection()"):
+        ]
+        self.assertLess(
+            release_callback.index("installIntegrityObserver("),
+            release_callback.index("nativeClearTimeout(browserRoot, runtime.lockedActivationTimeoutId)"),
+        )
+
+    def test_secure_nonce_failure_enters_terminal_reconciliation(
+        self,
+    ) -> None:
+        nonce = self.source[
+            self.source.index("function createRunNonce"):
+            self.source.index("function addSignal")
+        ]
+        self.assertIn("NATIVE.cryptoGetRandomValues", nonce)
+        self.assertIn("try {", nonce)
+        self.assertIn("getRandomValues(words)", nonce)
+        self.assertIn("} catch (_error) {", nonce)
+        self.assertIn("return null", nonce)
+
+        attempt = self.source[
+            self.source.index("function attemptResolution"):
+            self.source.index("runtime.beginDiscovery = function beginDiscovery")
+        ]
+        self.assertIn('runtime.enterTerminal("secure-nonce")', attempt)
+
     def test_release_probe_is_cleaned_on_terminal_stop_and_spa_revalidation(self) -> None:
         self.assertIn("releaseProbe: null", self.source)
-        cleanup = "if (runtime.releaseProbe?.isConnected) runtime.releaseProbe.remove();"
-        self.assertGreaterEqual(self.source.count(cleanup), 2)
+        self.assertGreaterEqual(self.source.count("runtime.releaseProbe?.isConnected"), 2)
+        self.assertGreaterEqual(self.source.count("runtime.releaseProbe = null"), 2)
+        terminal = self.source[
+            self.source.index("runtime.enterTerminal = function enterTerminal"):
+            self.source.index("function attemptResolution")
+        ]
+        stop = self.source[
+            self.source.index("runtime.stop = function stopRuntime"):
+            self.source.index("installBootstrapGuard", self.source.index("runtime.stop = function stopRuntime"))
+        ]
+        self.assertIn("runtime.shadowTracker?.uninstall?.()", terminal)
+        self.assertIn("runtime.shadowTracker.uninstall()", stop)
         navigation = self.source[
             self.source.index("function activateCurrentLocation"):
             self.source.index("installNavigationRevalidation", self.source.index("function activateCurrentLocation"))
         ]
         self.assertIn("activeRuntime.stop()", navigation)
-        self.assertIn("html.classList.remove(CLASS.ready)", navigation)
-
-    def test_path_drift_probe_requires_initial_algumon_navigation_evidence(self) -> None:
-        start = self.source[
-            self.source.index("function start(browserRoot)"):
-            self.source.index("return { mode: \"reader-gate\"")
+        terminal_navigation = self.source[
+            self.source.index("function terminalNavigationBlock"):
+            self.source.index("function activateCurrentLocation")
         ]
-        self.assertIn("const initialSeed = readAndClearSeed(browserRoot)", start)
-        self.assertIn("layouts.length === 0", start)
+        runtime_terminal = terminal_navigation.index(
+            "activeRuntime.enterTerminal(navigationTerminalReason)"
+        )
+        runtime_return = terminal_navigation.index("return true", runtime_terminal)
+        pre_runtime_restore = terminal_navigation.index(
+            "restoreReaderContent(browserRoot, contract, navigationTerminalReason, activeStyle, activeBootstrapLock)"
+        )
+        self.assertLess(runtime_terminal, runtime_return)
+        self.assertLess(runtime_return, pre_runtime_restore)
+
+    def test_path_drift_probe_requires_referrer_and_independent_semantic_proof(
+        self,
+    ) -> None:
+        start_offset = self.source.index("function start(browserRoot)")
+        start = self.source[
+            start_offset:
+            self.source.index("\n  return Object.freeze({", start_offset)
+        ]
+        self.assertIn(
+            "function configureTargetWithReferrerProof(initialVerifiedProof)",
+            start,
+        )
+        self.assertIn("waitForVerifiedTargetSemanticProof(", start)
+        self.assertIn("verifiedProof = initialVerifiedProof", start)
+        self.assertIn("verifiedProof?.ok !== true", start)
+        self.assertIn('"algumon-referrer-proof-required"', start)
+        self.assertIn(
+            "readerEntryAuthority(browserRoot.location, document.referrer)",
+            start,
+        )
         self.assertIn("isInitialActivation", start)
-        self.assertIn('terminalNavigationBlock("route-unapproved")', start)
+        self.assertIn(
+            "const layouts = routeLayouts.length ? routeLayouts : contract.layouts",
+            start,
+        )
+        self.assertIn("referrerScopedArticleIdentity(", start)
+        self.assertIn('`${entryAuthority}-independent-route`', start)
         self.assertIn("const evaluationLayouts = layouts", start)
-        self.assertNotIn("contract.layouts", start)
+        for removed_seed_api in (
+            "findTargetNavigationSeeds",
+            "consumeTargetNavigationSeed",
+            "captureAlgumonNavigationSeed",
+            "configureTargetWithNavigationSeeds",
+        ):
+            with self.subTest(removed_seed_api=removed_seed_api):
+                self.assertNotIn(removed_seed_api, self.source)
+
+    def test_projection_rechecks_atomic_role_visibility_and_external_controls(self) -> None:
+        paint_risk = self.source[
+            self.source.index("function projectionHasPublisherPaintRiskWithPublisherStyles"):
+            self.source.index("function projectionHasPublisherPaintRisk(document, state)")
+        ]
+        self.assertIn("!isRendered(root)", paint_risk)
+        self.assertIn("state.commentControlScope", paint_risk)
+        self.assertIn("function insideCommentProjection", self.source)
+        self.assertIn("commentControlMutationRoots", self.source)
+        self.assertIn("queryAllSafe(pageRoot, controlHints)", self.source)
+        self.assertIn("commentControlScope: pageRoot", self.source)
 
 
 class CandidatePromotionContractTests(unittest.TestCase):
@@ -1756,7 +2136,7 @@ class CandidatePromotionContractTests(unittest.TestCase):
                 "title": [".post_subject_v2"],
             },
             "roleProjection": {
-                "title": {"mode": "seeded-shallow"},
+                "title": {"mode": "metadata-shallow"},
                 "body": {"mode": "atomic-boundary", "ignored": []},
                 "product": {
                     "mode": "absent",

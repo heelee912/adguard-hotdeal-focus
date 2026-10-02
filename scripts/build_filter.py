@@ -33,7 +33,7 @@ _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _BASE_ROLE_NAMES = frozenset({"title", "body", "comments"})
 _ALLOWED_ROLE_NAMES = frozenset({"title", "product", "body", "comments"})
 _ALLOWED_PROFILES = frozenset({"desktop", "mobile"})
-_ROLE_PROJECTION_TITLE_MODE = "seeded-shallow"
+_ROLE_PROJECTION_TITLE_MODE = "metadata-shallow"
 _ROLE_PROJECTION_CONTENT_MODE = "atomic-boundary"
 _ROLE_PROJECTION_COMMENTS_MODE = "classified-children"
 _PRODUCT_CARDINALITIES = frozenset({"zero", "required", "optional"})
@@ -244,7 +244,7 @@ def _validate_role_projection(
         )
     title = _expect_mapping(projection["title"], f"{location}.title")
     if title != {"mode": _ROLE_PROJECTION_TITLE_MODE}:
-        raise ConfigError(f"{location}.title must use seeded-shallow mode")
+        raise ConfigError(f"{location}.title must use metadata-shallow mode")
     comments = _expect_mapping(projection["comments"], f"{location}.comments")
     if comments != {"mode": _ROLE_PROJECTION_COMMENTS_MODE}:
         raise ConfigError(f"{location}.comments must use classified-children mode")
@@ -1342,7 +1342,7 @@ def _validate_route_evidence(
             parsed_entry = urlsplit(entry_url)
             if (
                 (parsed_entry.hostname or "").lower() not in {"algumon.com", "www.algumon.com"}
-                or parsed_entry.path != f"/l/d/{deal_id}"
+                or parsed_entry.path not in {f"/l/d/{deal_id}", f"/n/d/{deal_id}"}
             ):
                 raise ConfigError(f"{sample_location}.algumonEntryUrl does not match its deal id")
             final_url = _validate_absolute_https_url(

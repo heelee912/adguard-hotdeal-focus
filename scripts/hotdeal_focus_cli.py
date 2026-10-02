@@ -55,10 +55,18 @@ GATE_LOCK_RULE_COUNT = 91
 READER_GATE_NAME = "AdGuard Hotdeal Focus Reader Gate"
 MARKER_GATE_NAME = "AdGuard Hotdeal Focus Marker Gate"
 READER_GATE_PROTOCOL_VERSION = 2
-READER_GATE_GRANTS = ("GM_addElement", "window.onurlchange")
-READER_GATE_REQUIRED_HOSTS = (
-    "algumon.com", "clien.net", "ppomppu.co.kr", "ruliweb.com",
-    "quasarzone.com", "eomisae.co.kr", "zod.kr", "arca.live",
+READER_GATE_GRANTS = (
+    "GM_addElement",
+    "window.onurlchange",
+)
+READER_GATE_MATCHES = (
+    "https://*.clien.net/*",
+    "https://*.ppomppu.co.kr/*",
+    "https://*.ruliweb.com/*",
+    "https://*.quasarzone.com/*",
+    "https://*.eomisae.co.kr/*",
+    "https://*.zod.kr/*",
+    "https://*.arca.live/*",
 )
 READER_GATE_REQUIRED_ATTRIBUTES = (
     "data-hotdeal-focus-lock", "data-hotdeal-focus-ready",
@@ -774,13 +782,28 @@ def _reader_gate_v2_contract(script_bytes: bytes) -> int:
         raise IntegrityFailure("Reader Gate userscript metadata block is not exact")
     metadata, code = text.split(end_marker, 1)
     metadata += end_marker
-    grants = re.findall(r"(?m)^//\s+@grant\s+(\S+)\s*$", metadata)
+    matches = re.findall(r"(?m)^//[ \t]+@match[ \t]+(\S+)[ \t]*$", metadata)
+    match_directives = re.findall(r"(?m)^//[ \t]+@match\b[^\r\n]*$", metadata)
+    include_directives = re.findall(
+        r"(?m)^//[ \t]+@include\b[^\r\n]*$", metadata
+    )
+    grants = re.findall(r"(?m)^//[ \t]+@grant[ \t]+(\S+)[ \t]*$", metadata)
+    grant_directives = re.findall(r"(?m)^//[ \t]+@grant\b[^\r\n]*$", metadata)
     download_urls = re.findall(r"(?m)^//\s+@downloadURL\s+(\S+)\s*$", metadata)
     update_urls = re.findall(r"(?m)^//\s+@updateURL\s+(\S+)\s*$", metadata)
     run_at = re.findall(r"(?m)^//\s+@run-at\s+(\S+)\s*$", metadata)
     noframes = re.findall(r"(?m)^//\s+@noframes\s*$", metadata)
     names = re.findall(r"(?m)^//\s+@name\s+(.+?)\s*$", metadata)
-    if grants != list(READER_GATE_GRANTS):
+    if (
+        len(match_directives) != len(matches)
+        or matches != list(READER_GATE_MATCHES)
+    ):
+        raise IntegrityFailure(
+            "Reader Gate v2 must declare exactly the seven ordered target-domain matches"
+        )
+    if include_directives:
+        raise IntegrityFailure("Reader Gate v2 must not declare @include")
+    if len(grant_directives) != len(grants) or grants != list(READER_GATE_GRANTS):
         raise IntegrityFailure(
             "Reader Gate v2 must declare the exact ordered grants "
             "GM_addElement and window.onurlchange"
@@ -797,9 +820,6 @@ def _reader_gate_v2_contract(script_bytes: bytes) -> int:
         )
     if names != [READER_GATE_NAME]:
         raise IntegrityFailure("Reader Gate userscript name is not exact")
-    for host in READER_GATE_REQUIRED_HOSTS:
-        if host not in metadata:
-            raise IntegrityFailure(f"Reader Gate userscript scope is missing: {host}")
 
     protocol_matches = re.findall(
         r'(?m)^\s*const\s+PROTOCOL_VERSION\s*=\s*"([0-9]+)";\s*$', code
@@ -1933,6 +1953,7 @@ def _required_branch_ruleset_contracts() -> dict[str, dict[str, Any]]:
                         "dismiss_stale_reviews_on_push": False,
                         "required_reviewers": [],
                         "require_code_owner_review": False,
+                        "require_extra_approval_for_unattributed_changes": True,
                         "require_last_push_approval": False,
                         "required_review_thread_resolution": True,
                         "allowed_merge_methods": ["squash", "rebase"],
@@ -2247,7 +2268,7 @@ def _generated_automation_push_identity(repo: str) -> Iterator[dict[str, Any]]:
         generated = _capture_command(
             (
                 "ssh-keygen", "-q", "-t", "ed25519", "-N", "",
-                "-C", f"hotdeal-focus-automation@{repo}",
+                "-C", "",
                 "-f", str(private_path),
             ),
             label="generate-automation-push-ed25519",
@@ -5945,8 +5966,6 @@ def _run_csp_browser_probe(script_path: Path) -> dict[str, Any]:
 def _command_adguard_csp_probe(args: argparse.Namespace, ps_cli: Path) -> dict[str, Any]:
     if args.backup_path:
         raise UsageFailure("adguard csp-probe does not accept --backup-path")
-    if args.approve_exclusive_target_migration:
-        raise UsageFailure("adguard csp-probe does not accept migration approval")
     powershell_base = (
         "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
         "-File", str(ps_cli),

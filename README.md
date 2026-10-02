@@ -4,130 +4,152 @@
 
 ## 한국어
 
-AdGuard Hotdeal Focus는 알구몬에서 핫딜 글로 이동했을 때 **제목, 구매 정보, 본문, 전체 댓글과 답글만 원래 DOM 그대로 남기는** fail-closed 리더 게이트입니다. 광고, 헤더, 푸터, 사이드바, 인기글, 추천글, 다른 게시물, 회원 위젯 등 나머지는 모두 공개하지 않습니다.
+**핫딜만 보러 갔다가 인기글로 새지 않도록.** 핫딜 글에서 광고·사이드바·인기글·추천글·다른 글 목록을 숨기고, 상품 정보와 본문·댓글을 읽는 데 필요한 화면만 남기는 유저스크립트입니다.
 
-지원 대상은 PC·모바일의 클리앙, 뽐뿌, 루리웹, 퀘이사존, 어미새, ZOD, 아카라이브입니다.
+- 가격·구매 링크·사진·영상·댓글·대댓글은 원래 페이지 그대로 보존합니다.
+- **알구몬으로 돌아가기 · 본문 · 댓글** 버튼으로 필요한 곳에 바로 이동합니다.
+- 클리앙·뽐뿌·루리웹·퀘이사존·어미새·ZOD·아카라이브의 지원 핫딜 글에 적용됩니다. 일반 게시판과 목록은 바꾸지 않습니다.
+- 알구몬에서 열거나 같은 글 주소로 직접 들어가도 동작합니다.
 
-### 설치 — URL 하나
+### 설치
 
-AdGuard의 **확장 프로그램 / Userscripts / URL로 추가**에서 다음 URL 하나만 설치하고 활성화하십시오.
+**Windows 또는 Android용 AdGuard 앱**에서 아래 주소를 유저스크립트로 추가하면 됩니다. 브라우저에 설치하는 AdGuard 확장 프로그램이나 사용자 필터 목록에 넣는 주소가 아닙니다.
 
 ```text
 https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ```
 
-사용자 필터나 별도 사용자 규칙은 필요하지 않습니다. `filter.txt`, `filter-static.txt`, 과거 `gate-v2.0.2` URL은 설치하지 마십시오. `gate-v2.0.2`는 구버전 구독자를 깨뜨리지 않기 위해 원격에만 보존된 레거시 증거이며 현재 릴리스·업데이트·검증 권위가 아닙니다.
+1. AdGuard 앱에서 추가 메뉴를 엽니다.
+   - **Windows:** 확장 프로그램 → 확장 프로그램 추가 → 파일 또는 URL에서 가져오기
+   - **Android:** 설정 → 필터링 → 확장 프로그램 → 확장 프로그램 추가 → 파일 또는 URL에서 가져오기
+2. 위 주소를 붙여넣어 설치하고 스크립트를 켭니다.
+3. 이미 열어 둔 핫딜 글은 새로고침합니다.
 
-구버전 Hotdeal Focus 규칙을 이미 쓰고 있다면 새 Userscript를 먼저 검증한 뒤 그 **7개 대상 전용 구버전 규칙만** 비활성화하거나 제거하십시오. 두 방식을 함께 실행하면 과거 CSS·scriptlet이 본문과 댓글을 다시 훼손할 수 있습니다. 새 설치에는 Userscript 외 항목이 없습니다.
+스크립트 하나만 설치하면 됩니다. 이전 핫딜 전용 필터 목록을 사용 중이면 해당 목록을 제거하고 이 스크립트만 사용해 주세요.
 
-AdGuard 공식 문서는 Windows·Android·Mac의 Userscript, `@downloadURL`, `@updateURL`, `GM_addElement`, `window.onurlchange` 지원과 URL 설치 방식을 설명합니다: [AdGuard Extensions](https://adguard.com/kb/general/extensions/).
+메뉴가 다르면 [AdGuard 공식 유저스크립트 안내](https://adguard.com/kb/general/extensions/#userscripts)와 [Android 확장 프로그램 안내](https://adguard.com/kb/adguard-for-android/features/settings/#extensions)를 확인해 주세요.
 
-Userscript의 `@downloadURL`과 `@updateURL`은 위 설치 URL과 동일합니다. 기기가 켜진 뒤 AdGuard가 확장 업데이트를 확인하면 더 높은 `@version`을 자동으로 받습니다.
+### 사용
 
-알구몬 광고를 DNS에서 살리고 다른 사이트에서는 계속 차단하려면 [ALGUMON_ADS_NETWORK_POLICY.md](ALGUMON_ADS_NETWORK_POLICY.md)를 따르십시오. NextDNS의 전역 DNS 허용과 $domain=algumon.com AdGuard 웹 예외를 의도적으로 분리하며, Reader Gate 설치 항목을 늘리지 않습니다.
+평소처럼 핫딜 링크를 열면 자동으로 적용됩니다. 글 위쪽에 **알구몬으로 돌아가기 · 본문 · 댓글** 버튼이 보이면 적용된 상태입니다. 잠시 끄려면 AdGuard의 확장 프로그램 목록에서 이 스크립트를 끄고 글을 새로고침하면 됩니다.
 
-### 동작 원리
+### 동작 범위와 업데이트
 
-- `document-start`에서 페이지 전체를 먼저 잠가 초기 노출을 막습니다.
-- 알구몬의 서명된 relay 응답, 공개 단기 seed, 현재 글 ID·제목·메타데이터를 함께 검증하며 seed 하나만 신뢰하지 않습니다.
-- 사이트·경로·레이아웃 variant 하나가 정확히 결정되고 제목·구매정보·본문·댓글 경계가 완전할 때만 해당 원본 노드를 공개합니다.
-- 댓글 mount 안의 의미 있는 모든 노드는 댓글/답글, 허용된 조작부, 숨김 chrome 중 하나로 완전히 분류되어야 합니다.
-- DOM, CSSOM, shadow DOM, top layer, pseudo-content 또는 SPA URL이 바뀌면 다시 검증합니다. 불명확하거나 변조되면 같은 task에서 즉시 전체를 다시 잠급니다.
-- 휴리스틱 fallback이나 부분 공개는 없습니다. 모르면 빈 화면으로 닫힙니다.
+페이지가 로딩된 뒤 추가되거나 위치가 바뀐 요소도 다시 검사합니다. 일부 구조 변경은 자동으로 대응하고, 수정된 새 버전은 AdGuard의 업데이트 설정에 따라 같은 설치 주소에서 받습니다. 사이트가 크게 바뀌면 추가 수정이 필요할 수 있으며, 모든 미래의 변경을 자동으로 해결한다고 보장하지는 않습니다. 구조를 확정하지 못한 경우에는 본문·댓글이 사라지지 않도록 원래 내용을 복구합니다.
 
-### PC가 꺼져 있어도 자동 대응
+Windows의 실제 Chrome과 모바일 화면 폭으로 확인합니다. **Android 실기기 동작은 아직 검증하지 않았습니다.**
 
-GitHub Actions가 매주 월요일 03:17 KST(일요일 18:17 UTC)에 알구몬의 정확한 7개 사이트 inventory를 한 번만 다시 수집합니다. 이 원본 수집은 global inventory 1회, 사이트 문서 7회, 사이트별 서명 relay 3회로 **최대 29회 시작**하도록 하드 캡이 걸려 있습니다. 후보 증명과 승격 재검증은 봉인된 source snapshot만 재사용하므로 알구몬을 다시 방문하지 않으며, 워크플로가 자기 자신을 재호출하지도 않습니다. 공유 레이아웃은 PC와 모바일 각각 최신 relay 표본 3개 이상이 동일한 semantic shape를 증명해야 승격됩니다. 후보는 과거 fixture, 현재 live DOM, zero-leak, 변조, 네트워크 충실도 테스트를 통과한 뒤에만 one-parent fast-forward 커밋으로 `main`에 승격됩니다.
+적용되지 않으면 스크립트가 켜져 있는지, 사용하는 브라우저에 AdGuard 보호와 HTTPS 필터링이 적용되는지 확인해 주세요. 내용이 잘리거나 불필요한 요소가 남으면 [문제 제보](https://github.com/heelee912/adguard-hotdeal-focus/issues)에 **글 주소·사용 기기·브라우저**를 알려 주세요.
 
-Pages 배포 전에는 현재 공개 버전보다 낮거나 같은 버전의 다른 바이트를 거부합니다. 배포 후에는 cache-busting HTTPS 요청으로 실제 Userscript와 manifest 바이트가 예상 SHA-256과 같아질 때까지 확인합니다. PC가 꺼져 있어도 이 감지·검증·승격·배포는 GitHub에서 계속됩니다.
-
-### Windows 자동 설치·검증
-
-관리자 PowerShell에서 저장소 CLI를 실행하면 공개 manifest의 해시를 검증하고 Userscript 하나만 백업 가능한 transaction으로 설치합니다. 일반 User filter와 모든 비대상 필터 구독은 읽기 전·후 바이트/규칙 해시가 같아야 성공합니다.
-
-```powershell
-$releaseBase = 'https://heelee912.github.io/adguard-hotdeal-focus'
-$manifest = Invoke-RestMethod "$releaseBase/release-manifest.json"
-.\scripts\adguard_windows_cli.ps1 deploy `
-  -UserscriptSource $manifest.installUrl `
-  -ReleaseManifestSource "$releaseBase/release-manifest.json" `
-  -ExpectedUserscriptSha256 $manifest.artifacts.'hotdeal-focus.user.js'.canonicalTextSha256 `
-  -Apply
-```
-
-JSON-only 통합 CLI와 복구 명령은 [CLI.md](CLI.md), 경계와 자동 승격 설계는 [ARCHITECTURE.md](ARCHITECTURE.md)를 참고하십시오.
-
-### 개발과 검증
-
-Python 3.10+, Node.js 20+가 필요합니다.
-
-```bash
-npm ci --ignore-scripts --no-audit --no-fund
-npx playwright install chromium
-npm run build
-npm run verify
-npm run test:behavior
-```
-
-공개 Pages artifact는 `hotdeal-focus.user.js`와 감사용 `release-manifest.json` 두 파일뿐입니다. `filter-static.txt`는 내부 분석 산출물이며 구독 대상이 아닙니다. 롤백도 이전 버전으로 내리지 않고, 현재 live 검증을 다시 통과한 마지막 정상 내용을 더 높은 버전으로 재발행합니다.
+개발·복구 명령은 [CLI.md](CLI.md), 자동 점검과 설계는 [ARCHITECTURE.md](ARCHITECTURE.md)에 정리되어 있습니다.
 
 ## English
 
-AdGuard Hotdeal Focus is a fail-closed reader gate for links opened from Algumon. It preserves the original DOM for the **title, purchase information, article body, and every comment/reply**, while withholding ads, headers, footers, sidebars, recommendations, popular posts, unrelated posts, and account widgets.
+**Read the deal without getting sidetracked by popular posts.** This userscript hides ads, sidebars, recommendations, and unrelated post lists on supported hot-deal articles. It preserves the original prices, purchase links, photos, videos, comments, and replies. It supports hot-deal article routes on Clien, Ppomppu, Ruliweb, Quasarzone, Eomisae, ZOD, and Arca Live, both through Algumon links and direct visits. Ordinary boards and list pages are unchanged.
 
-It covers desktop and mobile layouts for Clien, Ppomppu, Ruliweb, Quasarzone, Eomisae, ZOD, and Arca Live.
+### Install
 
-### Install one URL
-
-Add and enable this single URL under **AdGuard → Extensions / Userscripts → Add by URL**:
+Use the **AdGuard app for Windows or Android**. This is a userscript, not a filter-list subscription, and the AdGuard browser extension alone does not install it.
 
 ```text
 https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ```
 
-No custom filter or user rule is required. Do not install `filter.txt`, `filter-static.txt`, or the old `gate-v2.0.2` URL. The old remote gate remains immutable only for existing subscribers and is not part of the current release, update, or verification authority.
+1. Open the app's import menu:
+   - **Windows:** Extensions → Add extension → Import from file or URL
+   - **Android:** Settings → Filtering → Extensions → Add extension → Import from file or URL
+2. Paste the URL, install the script, and enable it.
+3. Reload any already-open deal articles.
 
-When upgrading from old Hotdeal Focus rules, verify the new Userscript first, then disable or remove only the old rules scoped to these seven targets. Running both authorities can let obsolete CSS or scriptlets damage the article or comments. Fresh installations contain only the Userscript.
+Only this script is needed. If an older hot-deal filter list is installed, remove that list and use this script instead.
 
-The Userscript locks the document at `document-start`, proves one exact semantic projection, then reveals only owned original nodes. DOM/CSSOM/shadow/top-layer/SPA changes are revalidated. Any ambiguity or tamper synchronously returns the page to a terminal blank state; there is no heuristic fallback or partial reveal.
+See the [AdGuard userscript guide](https://adguard.com/kb/general/extensions/#userscripts) and [Android extension settings](https://adguard.com/kb/adguard-for-android/features/settings/#extensions) if the menu differs.
 
-For the separate policy that permits the needed Algumon ad DNS hosts while web filtering still blocks them on other sites, see [ALGUMON_ADS_NETWORK_POLICY.md](ALGUMON_ADS_NETWORK_POLICY.md). It deliberately separates global NextDNS resolution from $domain=algumon.com AdGuard web exceptions and adds no Reader Gate runtime.
+### Use
 
-GitHub Actions runs once each Monday at 03:17 KST (Sunday 18:17 UTC) without a local PC. The one source collection has a hard cap of **29 starts**: one global inventory, seven source documents, and three signed relays per source. Candidate proof and promotion retest reuse a sealed source snapshot and make zero additional Algumon requests; no workflow self-dispatches another Algumon audit. A shared layout requires at least three fresh Algumon relay proofs for **each** applicable desktop and mobile profile. Historical fixtures, current live DOM, zero-leak, tamper, and network-fidelity tests must all pass before a one-parent fast-forward promotion. Pages rejects downgrade or same-version byte replacement and verifies the live HTTPS bytes after deployment.
+Open deal links normally. The **Return to Algumon · Body · Comments** controls above the article indicate that reader mode is active (displayed in Korean). To turn it off, disable this script in AdGuard and reload the page.
 
-The Windows command shown in the Korean section installs only the Userscript and requires all unrelated User-filter and subscription hashes to remain unchanged. See [CLI.md](CLI.md) and [ARCHITECTURE.md](ARCHITECTURE.md) for machine-readable operations and the trust model.
+### Scope and updates
+
+The script rechecks elements that appear or move after loading and can accommodate some structural changes. New versions arrive from the same URL according to AdGuard's update settings. Major site changes can still need a fix; automatic handling of every future change is not guaranteed. If the article structure cannot be confirmed, original content is restored so the article and comments remain accessible.
+
+Checks use real Chrome on Windows and mobile-width layouts. **Android device behavior has not yet been verified.**
+
+If it does not apply, check that the script is enabled and that AdGuard protection and HTTPS filtering cover the browser. For missing content or remaining clutter, [report the article URL, device, and browser](https://github.com/heelee912/adguard-hotdeal-focus/issues).
+
+Developer commands: [CLI.md](CLI.md). Automated checks and design: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## 日本語
 
-AdGuard Hotdeal Focus は、Algumon から開いた特価記事で **タイトル、購入情報、本文、すべてのコメント／返信だけ**を元の DOM のまま表示する fail-closed リーダーゲートです。広告、ヘッダー、フッター、サイドバー、人気記事、関連記事などは表示しません。
+**セール情報を見に来たのに、人気記事を読み続けてしまう。その寄り道を減らします。** 対応するホットディール記事の広告・サイドバー・おすすめ記事・ほかの記事一覧を隠し、価格・購入リンク・写真・動画・本文・コメント・返信は元のページのまま保持します。Clien、Ppomppu、Ruliweb、Quasarzone、Eomisae、ZOD、Arca Live の対応する記事で、Algumon のリンクからでも直接アクセスでも動作します。通常の掲示板や一覧は変更しません。
 
-AdGuard の **拡張機能 / Userscripts / URL から追加**で、次の URL だけをインストールして有効化してください。
+### インストール
+
+**Windows または Android 用の AdGuard アプリ**で追加してください。フィルタリストではなく、ブラウザー用 AdGuard 拡張機能だけではインストールできません。
 
 ```text
 https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ```
 
-カスタムフィルターは不要です。`filter.txt`、`filter-static.txt`、旧 `gate-v2.0.2` はインストールしないでください。Userscript は `document-start` でページを先にロックし、PC・モバイル双方の意味的境界を完全に証明できた場合だけ元ノードを公開します。不明確な変更や改変を検出すると即座に全体を再ロックし、部分表示や推測 fallback は行いません。
+1. アプリでインポート画面を開きます。
+   - **Windows:** 拡張機能 → 拡張機能を追加 → ファイルまたは URL からインポート
+   - **Android:** 設定 → フィルタリング → 拡張機能 → 拡張機能を追加 → ファイルまたは URL からインポート
+2. URL を貼り付け、インストールして有効にします。
+3. 開いている記事を再読み込みします。
 
-旧 Hotdeal Focus ルールから移行する場合は、新 Userscript の検証後にこの7対象専用の旧ルールだけを無効化または削除してください。新規インストールは Userscript 1個だけです。
+このスクリプト一つで利用できます。旧ホットディール専用フィルタリストを使用している場合は、そのリストを削除して置き換えてください。
 
-GitHub Actions は毎週月曜日 03:17 KST（日曜日 18:17 UTC）に一度だけ監視・検証・昇格・Pages 配布を実行するため、PC がオフでも自動対応は継続します。Algumon の原本収集は最大 29 開始に固定され、候補証明と再検証は封印済み snapshot を再利用して Algumon を再訪しません。ワークフロー自身の再起動も行いません。
+メニューが異なる場合は [AdGuard のユーザースクリプト案内](https://adguard.com/kb/general/extensions/#userscripts)と [Android の拡張機能設定](https://adguard.com/kb/adguard-for-android/features/settings/#extensions)をご確認ください。
+
+### 使い方
+
+いつもどおり記事を開くだけで適用されます。記事上部の **Algumon に戻る・本文・コメント**への移動ボタンが動作中の目印です（韓国語表示）。停止するには、AdGuard でこのスクリプトを無効にして記事を再読み込みしてください。
+
+### 動作範囲と更新
+
+読み込み後に追加・移動された要素も再確認し、一部の構造変更には自動対応します。修正版は AdGuard の更新設定に従って同じ URL から取得します。大幅な変更には修正が必要になることがあり、今後のすべての変更への自動対応は保証しません。構造を確認できない場合は、本文とコメントを読めるよう元の内容を復元します。
+
+検証は Windows の実際の Chrome とモバイル幅で行っています。**Android 実機での動作は未検証です。**
+
+適用されない場合は、スクリプトが有効で、ブラウザーに AdGuard の保護と HTTPS フィルタリングが適用されているかご確認ください。内容の欠落や不要な表示は、[記事 URL・端末・ブラウザーを添えてご報告ください](https://github.com/heelee912/adguard-hotdeal-focus/issues)。
+
+開発用コマンドは [CLI.md](CLI.md)、自動検査と設計は [ARCHITECTURE.md](ARCHITECTURE.md)をご覧ください。
 
 ## 简体中文
 
-AdGuard Hotdeal Focus 是一个 fail-closed 阅读门控脚本。通过 Algumon 打开优惠文章时，它只保留原始 DOM 中的**标题、购买信息、正文以及全部评论/回复**；广告、页眉页脚、侧栏、热门文章、推荐文章和其他噪声均不公开。
+**看优惠，不再被热门帖子带跑。** 这个用户脚本隐藏支持的优惠文章中的广告、侧栏、推荐内容和其他帖子列表，保留原网页的价格、购买链接、图片、视频、正文、评论和回复。支持 Clien、Ppomppu、Ruliweb、Quasarzone、Eomisae、ZOD、Arca Live 的指定文章路径，从 Algumon 打开或直接访问都适用；不改动普通论坛和列表页。
 
-请在 **AdGuard → 扩展 / Userscripts → 通过 URL 添加**中只安装并启用以下地址：
+### 安装
+
+请使用 **Windows 或 Android 版 AdGuard 应用**。这是用户脚本，不是过滤列表订阅；仅安装 AdGuard 浏览器扩展无法完成此安装。
 
 ```text
 https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ```
 
-无需自定义过滤器。请勿安装 `filter.txt`、`filter-static.txt` 或旧的 `gate-v2.0.2`。Userscript 在 `document-start` 阶段先锁住整页，只有在桌面端和移动端的语义边界都得到完整证明后才显示原始节点。遇到未知结构或篡改时会立即重新锁定整页，不进行猜测式 fallback，也不会部分显示。
+1. 在应用中打开导入菜单：
+   - **Windows：**扩展 → 添加扩展 → 从文件或 URL 导入
+   - **Android：**设置 → 过滤 → 扩展 → 添加扩展 → 从文件或 URL 导入
+2. 粘贴地址，安装并启用脚本。
+3. 刷新已经打开的优惠文章。
 
-从旧版 Hotdeal Focus 规则升级时，请先验证新 Userscript，再仅禁用或删除作用于这七个目标站点的旧规则。全新安装只有一个 Userscript。
+只需安装这个脚本。使用旧版优惠专用过滤列表的用户，请移除该列表并改用本脚本。
 
-GitHub Actions 每周一 03:17 KST（周日 18:17 UTC）仅在云端执行一次监测、验证、自动晋升和 Pages 发布，因此即使本地电脑关机，自动响应仍会继续运行。Algumon 源采集硬性限制为最多 29 次启动；候选证明和复验只复用密封 snapshot，不会再次访问 Algumon，工作流也不会自行再次调度。
+菜单不同时，可查看 [AdGuard 用户脚本说明](https://adguard.com/kb/general/extensions/#userscripts)和 [Android 扩展设置](https://adguard.com/kb/adguard-for-android/features/settings/#extensions)。
+
+### 使用
+
+照常打开优惠链接即可。文章上方出现**返回 Algumon、正文、评论**三个导航按钮，表示阅读模式已生效（韩文显示）。临时停用时，在 AdGuard 中关闭本脚本并刷新页面。
+
+### 范围与更新
+
+脚本会重新检查加载后新增或移动的元素，并自动适应部分结构变化。新版本根据 AdGuard 的更新设置从同一地址获取。网站大幅改版仍可能需要修复，不保证自动处理所有未来变化。无法确认文章结构时，会恢复原始内容，让正文和评论保持可读。
+
+目前使用 Windows 上的真实 Chrome 和移动屏幕宽度检查。**尚未验证 Android 实机行为。**
+
+未生效时，请检查脚本是否开启，以及 AdGuard 保护和 HTTPS 过滤是否作用于所用浏览器。发现内容缺失或多余元素时，请[提供文章地址、设备和浏览器](https://github.com/heelee912/adguard-hotdeal-focus/issues)。
+
+开发命令见 [CLI.md](CLI.md)，自动检查和设计见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ## License
 

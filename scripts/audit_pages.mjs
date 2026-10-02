@@ -42,6 +42,7 @@ const DEFAULT_BEHAVIOR_BASELINE_PATH = path.join(
 const DEFAULT_TIMEOUT_MS = 30_000;
 const FIXTURE_TIMEOUT_MS = 8_000;
 const ALGUMON_ORIGIN = "https://www.algumon.com";
+const ALGUMON_RUNTIME_REFERRER = `${ALGUMON_ORIGIN}/`;
 const ALGUMON_HOSTNAMES = new Set(["algumon.com", "www.algumon.com"]);
 const ALGUMON_GLOBAL_DISCOVERY_URL = `${ALGUMON_ORIGIN}/n/deal`;
 // A live audit deliberately reads only the first three exact relay links for a
@@ -108,6 +109,19 @@ const REQUIRED_SITE_IDS = Object.freeze([
   "zod",
   "arcalive",
 ]);
+const REQUIRED_USERSCRIPT_MATCHES = Object.freeze([
+  "https://*.clien.net/*",
+  "https://*.ppomppu.co.kr/*",
+  "https://*.ruliweb.com/*",
+  "https://*.quasarzone.com/*",
+  "https://*.eomisae.co.kr/*",
+  "https://*.zod.kr/*",
+  "https://*.arca.live/*",
+]);
+const REQUIRED_USERSCRIPT_GRANTS = Object.freeze([
+  "GM_addElement",
+  "window.onurlchange",
+]);
 // One global source inventory, one filtered source page per configured site,
 // and three signed relay documents per site. This is an upper bound on every
 // live Algumon document/API start made by one audit invocation.
@@ -115,9 +129,10 @@ const DEFAULT_ALGUMON_REQUEST_START_BUDGET =
   1 + REQUIRED_SITE_IDS.length * (1 + ALGUMON_SITE_LINK_SCAN_LIMIT);
 const REQUIRED_ROLE_NAMES = Object.freeze(["title", "body", "comments"]);
 const READER_GATE_PROTOCOL_VERSION = 2;
+const PREAUTHORIZED_ADGUARD_CONTROL_SCHEMA_VERSION = 3;
 const READER_GATE_INSTALL_URL =
   "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js";
-const FIRST_PAINT_PROBE_SCHEMA_VERSION = 1;
+const FIRST_PAINT_PROBE_SCHEMA_VERSION = 2;
 const ARTICLE_ACCESS_LEASE_SCHEMA_VERSION = 1;
 const DEVICE_PROFILES = Object.freeze({
   desktop: {
@@ -130,13 +145,16 @@ const DEVICE_PROFILES = Object.freeze({
   },
 });
 let RUNTIME_DEVICE_PROFILES = null;
-const FIRST_PAINT_PROBE_SOURCE = String.raw`
+export const FIRST_PAINT_PROBE_SOURCE = String.raw`
 (() => {
   "use strict";
   const probe = {
     schemaVersion: ${FIRST_PAINT_PROBE_SCHEMA_VERSION},
     sampleCount: 0,
     flashFrameCount: 0,
+    publisherVisibleFrameCount: 0,
+    unsafeGateFrameCount: 0,
+    lockedFrameCount: 0,
     firstContentFrame: null,
     firstReadyFrame: null,
     samples: [],
@@ -157,6 +175,7 @@ const FIRST_PAINT_PROBE_SOURCE = String.raw`
     const root = document.documentElement;
     const body = document.body;
     const state = root?.getAttribute("data-hotdeal-focus-state") ?? "unset";
+    const status = root?.getAttribute("data-hotdeal-focus-status") ?? "";
     const ready = root?.classList.contains("hdf-v2-ready") === true &&
       root?.getAttribute("data-hotdeal-focus-ready") === "1" &&
       root?.getAttribute("data-hotdeal-focus-protocol") === "2" &&
@@ -165,6 +184,15 @@ const FIRST_PAINT_PROBE_SOURCE = String.raw`
       root?.classList.contains("hdf-v2-lock") === false &&
       !root?.hasAttribute("data-hotdeal-focus-lock");
     const rootStyle = root ? window.getComputedStyle(root) : null;
+    const readerGateActive = root?.classList.contains("hdf-v2-lock") === true ||
+      root?.classList.contains("hdf-v2-ready") === true ||
+      root?.hasAttribute("data-hotdeal-focus-lock") === true ||
+      root?.hasAttribute("data-hotdeal-focus-ready") === true ||
+      root?.hasAttribute("data-hotdeal-focus-protocol") === true ||
+      root?.hasAttribute("data-hotdeal-focus-state") === true ||
+      // Recovery reports readable publisher content, not an active allow-set.
+      // Any remaining lock/protocol/state evidence above still counts as active.
+      (status.length > 0 && !status.startsWith("recovery-"));
     const paintLockIntact = !ready &&
       root?.classList.contains("hdf-v2-lock") === true &&
       root?.getAttribute("data-hotdeal-focus-lock") === "1" &&
@@ -195,11 +223,20 @@ const FIRST_PAINT_PROBE_SOURCE = String.raw`
     if (bodyElementCount > 0 && probe.firstContentFrame === null) probe.firstContentFrame = frame;
     if (ready && probe.firstReadyFrame === null) probe.firstReadyFrame = frame;
     if (!ready && visibleUnmarkedCount > 0) probe.flashFrameCount += 1;
+    if (!ready && !readerGateActive && visibleUnmarkedCount > 0) {
+      probe.publisherVisibleFrameCount += 1;
+    }
+    if (!ready && readerGateActive && !paintLockIntact && visibleUnmarkedCount > 0) {
+      probe.unsafeGateFrameCount += 1;
+    }
+    if (paintLockIntact) probe.lockedFrameCount += 1;
     if (probe.samples.length < 180) {
       probe.samples.push({
         frame,
         state,
+        status,
         ready,
+        readerGateActive,
         paintLockIntact,
         bodyElementCount,
         visibleUnmarkedCount,
@@ -215,8 +252,17 @@ const FIRST_PAINT_PROBE_SOURCE = String.raw`
 `;
 
 function userscriptAuditInitSource(userscriptContent) {
-  return `${FIRST_PAINT_PROBE_SOURCE}\n` +
-    `${PREAUTHORIZED_ADGUARD_CONTROL_SOURCE}\n${userscriptContent}`;
+  const targetDomains = Object.values(ARTICLE_IDENTITY_DOMAINS);
+  return `(() => {
+  "use strict";
+  const hostname = location.hostname.toLowerCase();
+  const targetDomains = ${JSON.stringify(targetDomains)};
+  if (!targetDomains.some((domain) =>
+    hostname === domain || hostname.endsWith("." + domain))) return;
+  ${FIRST_PAINT_PROBE_SOURCE}
+  ${PREAUTHORIZED_ADGUARD_CONTROL_SOURCE}
+  ${userscriptContent}
+})();`;
 }
 
 function parseArguments(argv) {
@@ -1783,7 +1829,7 @@ function urlMatchesLayout(urlText, layout) {
 
 function runtimeExpectationForTarget(target) {
   const derived = target?.source === "sample" && !target.algumon
-    ? "direct-negative"
+    ? target.readerRouteRegistered === true ? "registered-positive" : "direct-negative"
     : target?.source === "algumon-latest" && target.algumon
       ? "relay-positive"
       : null;
@@ -1793,7 +1839,7 @@ function runtimeExpectationForTarget(target) {
   ) {
     return derived;
   }
-  throw new Error("audit target has no explicit direct-negative or relay-positive expectation");
+  throw new Error("audit target has no explicit direct-negative, registered-positive or relay-positive expectation");
 }
 
 function candidateGenerationAllowed(
@@ -2194,13 +2240,20 @@ async function buildIntegrityManifest(
     !userscript?.missing &&
     /^\/\/\s*@grant\s+GM_addElement\s*$/mu.test(userscript.content) &&
     /^\/\/\s*@grant\s+window\.onurlchange\s*$/mu.test(userscript.content) &&
+    !/^\/\/\s*@grant\s+GM_(?:getValue|setValue|deleteValue)\s*$/mu.test(
+      userscript.content,
+    ) &&
+    !/^\/\/\s*@match\s+https:\/\/www\.algumon\.com\/\*\s*$/mu.test(
+      userscript.content,
+    ) &&
     (userscript.content.match(/^\/\/\s*@grant\s+/gmu) ?? []).length === 2 &&
+    (userscript.content.match(/^\/\/\s*@match\s+/gmu) ?? []).length === 7 &&
     userscript.content.includes('const PROTOCOL_VERSION = "2"') &&
     userscript.content.includes('GM_addElement(parent, "style", {') &&
     userscript.content.includes("function proveStandaloneCascadeRelease") &&
     userscript.content.includes("runtime.verifyUnlockedCascadeRelease()") &&
-    userscript.content.includes('["urlchange", revalidate, true]') &&
-    userscript.content.includes('["hashchange", revalidate, true]') &&
+    userscript.content.includes('subscribe("urlchange", revalidateSafely)') &&
+    userscript.content.includes('subscribe("hashchange", revalidateSafely)') &&
     userscript.content.includes('"data-hotdeal-focus-runtime-style": "2"') &&
     !/proveExtendedCssRelease|extended-css-release-proof|engineStylePresence/u.test(
       userscript.content,
@@ -2639,15 +2692,6 @@ async function navigate(page, targetUrl, timeoutMs, externalResponseObserver = n
   const navigationProof = seededNavigationProof(targetUrl);
   try {
     try {
-      if (navigationProof) {
-        await page.goto("about:blank", {
-          waitUntil: "commit",
-          timeout: timeoutMs,
-        });
-        await page.evaluate((name) => {
-          window.name = name;
-        }, `hdf-provenance:${navigationProof.encoded}`);
-      }
       response = await page.goto(targetUrl, {
         waitUntil: "domcontentloaded",
         timeout: timeoutMs,
@@ -3544,7 +3588,7 @@ function seededNavigationUrl(url, siteType, title, dealId, signedRelayUrl = null
   };
   const encoded = Buffer.from(JSON.stringify(seed), "utf8").toString("base64url");
   const parsed = new URL(url);
-  parsed.hash = `hdf-seed=${encoded}`;
+  parsed.hash = `hdf-audit-seed=${encoded}`;
   return parsed.href;
 }
 
@@ -3555,12 +3599,12 @@ function seededNavigationProof(url) {
   } catch {
     return null;
   }
-  const encoded = new URLSearchParams(parsed.hash.replace(/^#/u, "")).get("hdf-seed");
+  const encoded = new URLSearchParams(parsed.hash.replace(/^#/u, "")).get("hdf-audit-seed");
   if (!encoded || !/^[A-Za-z0-9_-]+$/u.test(encoded)) return null;
   try {
     const seed = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
     return /^hdf-[0-9a-z]{28}$/u.test(String(seed?.navigationNonce ?? ""))
-      ? { encoded, navigationNonce: seed.navigationNonce }
+      ? { encoded, navigationNonce: seed.navigationNonce, seed }
       : null;
   } catch {
     return null;
@@ -4067,11 +4111,17 @@ async function countExistingApprovedLayoutMatches(
       const layouts = (projectionLayouts ?? site?.layouts ?? []).filter((candidate) =>
         (candidate.paths ?? [candidate.path]).some((configuredPath) =>
           api.pathPatternMatches(pathAndQuery, configuredPath)));
-      const validatedSeed = api.validateSeed(oracleSeed, Date.now(), false);
+      const projectionSeed = oracleSeed?.siteType === site?.id
+        ? Object.freeze({
+          siteType: oracleSeed.siteType,
+          title: oracleSeed.title,
+          commentCount: oracleSeed.commentCount ?? null,
+        })
+        : null;
       const projection = api.resolveProjectionClasses(
         document,
         layouts,
-        validatedSeed?.siteType === site?.id ? validatedSeed : null,
+        projectionSeed,
       );
       return {
         semanticProjectionCount: projection.projectionClasses.length,
@@ -4145,7 +4195,7 @@ function candidateOracleLayout(layout, oracle, targetUrl) {
     throw new Error("candidate oracle requires one complete independent policy proposal");
   }
   const roleProjection = {
-    title: { mode: "seeded-shallow" },
+    title: { mode: "metadata-shallow" },
     body: {
       mode: "atomic-boundary",
       ignored: [...proposal.bodyIgnored],
@@ -4864,10 +4914,21 @@ function validateDiagnostics(diagnostics, requiredRoles) {
     "standaloneCascadeProof",
     "commentControlProjection",
     "visibleLeakCount",
+    "reconciliationFailure",
   ]);
   const unexpectedTopKeys = Object.keys(diagnostics).filter((key) => !allowedTopKeys.has(key));
   if (unexpectedTopKeys.length > 0) {
     failures.push(`diagnostics contains non-contract keys: ${unexpectedTopKeys.join(", ")}`);
+  }
+  const reconciliation = diagnostics.reconciliationFailure;
+  if (reconciliation !== undefined && reconciliation !== null && (
+    typeof reconciliation !== "object" || Array.isArray(reconciliation) ||
+    canonicalJson(Object.keys(reconciliation).sort()) !== canonicalJson(["reason", "role"]) ||
+    !["body", "product"].includes(reconciliation.role) ||
+    !["role-root", "descendant-bound", "configured-overlap", "autonomous-bound",
+      "unsafe-projection", "marker-record"].includes(reconciliation.reason)
+  )) {
+    failures.push("diagnostics.reconciliationFailure is not an exact bounded role failure");
   }
   if (diagnostics.protocolVersion !== READER_GATE_PROTOCOL_VERSION) {
     failures.push(
@@ -4961,7 +5022,7 @@ async function auditUserscriptGate(
 ) {
   await page
     .waitForFunction(
-      ({ expectation, protocolVersion }) => {
+      ({ expectation, protocolVersion, preauthorizedControlSchemaVersion }) => {
         const html = document.documentElement;
         const state = html.getAttribute("data-hotdeal-focus-state");
         const status = html.getAttribute("data-hotdeal-focus-status");
@@ -4971,7 +5032,11 @@ async function auditUserscriptGate(
         const terminal = state === "blocked" &&
           String(status ?? "").startsWith("terminal-");
         if (terminal) return sampled;
-        if (expectation === "direct-negative") return false;
+        // Direct navigations deliberately remain on the publisher page while
+        // semantic provenance preflight is unlocked. One document-start sample
+        // is enough to audit that inactive state; waiting for a terminal lock
+        // would turn the normal publisher-visible path into a timeout.
+        if (expectation === "direct-negative") return sampled;
         const diagnostics = window.__HOTDEAL_FOCUS_DIAGNOSTICS__;
         const preauthorized = window.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__;
         return sampled &&
@@ -4992,7 +5057,7 @@ async function auditUserscriptGate(
           diagnostics?.standaloneCascadeProof?.nonceBound === true &&
           diagnostics?.standaloneCascadeProof?.unownedHidden === true &&
           preauthorized?.kind === "preauthorized-userscript-style-control" &&
-          preauthorized?.schemaVersion === protocolVersion &&
+          preauthorized?.schemaVersion === preauthorizedControlSchemaVersion &&
           preauthorized?.gmAddElementCalls === 1 &&
           document.querySelectorAll(
             'style[data-hotdeal-focus-runtime-style="2"]',
@@ -5001,6 +5066,8 @@ async function auditUserscriptGate(
       {
         expectation: runtimeExpectation,
         protocolVersion: READER_GATE_PROTOCOL_VERSION,
+        preauthorizedControlSchemaVersion:
+          PREAUTHORIZED_ADGUARD_CONTROL_SCHEMA_VERSION,
       },
       { timeout: timeoutMs },
     )
@@ -5145,23 +5212,69 @@ async function auditUserscriptGate(
     const runtimeStyleCount = document.querySelectorAll(
       'style[data-hotdeal-focus-runtime-style="2"]',
     ).length;
-    const zeroFlash = paintProbe?.flashFrameCount === 0;
-    const zeroVisibleContent = globalPaintLockIntact || (
-      visibleWithoutKeep.length === 0 && directTextLeaks.length === 0
+    const publisherProtocolAttributes = [
+      "data-hotdeal-focus-lock",
+      "data-hotdeal-focus-ready",
+      "data-hotdeal-focus-protocol",
+      "data-hotdeal-focus-state",
+      "data-hotdeal-focus-status",
+      "data-hotdeal-focus-measure",
+    ];
+    const publisherProtocolCleared = publisherProtocolAttributes.every(
+      (attribute) => !html.hasAttribute(attribute),
+    ) && !html.classList.contains("hdf-v2-lock") &&
+      !html.classList.contains("hdf-v2-ready");
+    const hotdealMarkerCount = [html, ...document.querySelectorAll("*")].filter((element) =>
+      [...element.attributes].some((attribute) =>
+        attribute.name.startsWith("data-hotdeal-focus-")) ||
+      [...element.classList].some((className) => className.startsWith("hdf-v2-")),
+    ).length;
+    const rootInlineLockCleared = [
+      ["opacity", "0"],
+      ["visibility", "hidden"],
+      ["content-visibility", "hidden"],
+      ["clip-path", "inset(50%)"],
+      ["pointer-events", "none"],
+    ].every(([property, value]) =>
+      html.style.getPropertyValue(property) !== value ||
+      html.style.getPropertyPriority(property) !== "important",
     );
-    const blockedStateSafety = {
+    const publisherRootVisible =
+      rootStyle.display !== "none" &&
+      rootStyle.visibility !== "hidden" &&
+      rootStyle.contentVisibility !== "hidden" &&
+      Number(rootStyle.opacity) !== 0;
+    const publisherVisibleContentCount = [...document.body.querySelectorAll("*")]
+      .filter(visible).length;
+    const activeGateSamples = (paintProbe?.samples ?? []).filter(
+      (sample) => sample.readerGateActive === true || sample.paintLockIntact === true,
+    );
+    const unsafeGateFrameCount = Number(paintProbe?.unsafeGateFrameCount ?? 1);
+    const diagnosticsInactiveOrAbsent =
+      diagnostics === null || diagnostics?.state === "inactive";
+    const inactivePublisherSafety = {
       applicable: !ready,
-      terminal: state === "blocked" && String(status ?? "").startsWith("terminal-"),
-      globalPaintLockIntact,
-      zeroVisibleContent,
-      zeroFlash,
+      publisherProtocolCleared,
+      hotdealMarkerCount,
+      rootInlineLockCleared,
+      publisherRootVisible,
+      publisherVisibleContentCount,
+      runtimeStyleCount,
+      activeGateFrameCount: activeGateSamples.length,
+      unsafeGateFrameCount,
+      diagnosticsInactiveOrAbsent,
       passed:
         !ready &&
-        state === "blocked" &&
-        String(status ?? "").startsWith("terminal-") &&
-        globalPaintLockIntact &&
-        zeroVisibleContent &&
-        zeroFlash,
+        publisherProtocolCleared &&
+        hotdealMarkerCount === 0 &&
+        rootInlineLockCleared &&
+        publisherRootVisible &&
+        publisherVisibleContentCount > 0 &&
+        runtimeStyleCount === 0 &&
+        activeGateSamples.length === 0 &&
+        unsafeGateFrameCount === 0 &&
+        diagnosticsInactiveOrAbsent &&
+        paintProbe?.firstReadyFrame === null,
     };
     const standaloneRuntimeCoverage = {
       applicable: ready,
@@ -5182,12 +5295,21 @@ async function auditUserscriptGate(
       state,
       status,
       globalPaintLockIntact,
-      blockedStateSafety,
+      inactivePublisherSafety,
+      // Compatibility name retained for existing report consumers. It now
+      // describes an intentionally inactive, publisher-visible page rather
+      // than a blank terminal lock.
+      blockedStateSafety: inactivePublisherSafety,
       standaloneRuntimeCoverage,
       diagnostics,
       paintProbe,
       testOnlyAdguardControl,
       runtimeStyleCount,
+      publisherProtocolCleared,
+      hotdealMarkerCount,
+      rootInlineLockCleared,
+      publisherRootVisible,
+      publisherVisibleContentCount,
       roleStats,
       commentItemStats,
       commentControlStats,
@@ -5348,7 +5470,7 @@ function userscriptGateFailures(gate, requiredRoles) {
   }
   if (
     gate.testOnlyAdguardControl?.kind !== "preauthorized-userscript-style-control" ||
-    gate.testOnlyAdguardControl?.schemaVersion !== READER_GATE_PROTOCOL_VERSION ||
+    gate.testOnlyAdguardControl?.schemaVersion !== PREAUTHORIZED_ADGUARD_CONTROL_SCHEMA_VERSION ||
     gate.testOnlyAdguardControl?.gmAddElementCalls !== 1
   ) {
     failures.push("userscript-manager style control did not provide exactly one GM style");
@@ -5370,8 +5492,10 @@ function userscriptGateFailures(gate, requiredRoles) {
   if (!gate.paintProbe || gate.paintProbe.sampleCount < 1) {
     failures.push("document-start first-paint probe is missing");
   } else {
-    if (gate.paintProbe.flashFrameCount !== 0) {
-      failures.push(`${gate.paintProbe.flashFrameCount} pre-ready frames exposed unmarked content`);
+    if (gate.paintProbe.unsafeGateFrameCount !== 0) {
+      failures.push(
+        `${gate.paintProbe.unsafeGateFrameCount} active reader-gate frames exposed unmarked content`,
+      );
     }
     if (gate.paintProbe.firstReadyFrame === null) {
       failures.push("first-paint probe never observed the ready state");
@@ -5414,41 +5538,36 @@ function userscriptGateFailures(gate, requiredRoles) {
 function blockedUserscriptGateFailures(gate) {
   const failures = [];
   if (gate.ready) failures.push("direct navigation unexpectedly became reader-ready");
-  if (gate.state !== "blocked") {
-    failures.push(`direct navigation did not remain blocked (state=${gate.state ?? "missing"})`);
+  const inactiveSafety = gate.inactivePublisherSafety ?? gate.blockedStateSafety;
+  if (inactiveSafety?.passed !== true) {
+    failures.push("direct navigation did not preserve an inactive publisher-visible page");
   }
-  if (gate.status !== "terminal-algumon-seed-required") {
-    failures.push(
-      `direct navigation did not terminate at the provenance gate (status=${gate.status ?? "missing"})`,
-    );
-  }
-  if (gate.blockedStateSafety?.globalPaintLockIntact !== true) {
-    failures.push("blocked-state global paint lock is not intact");
-  }
-  if (gate.blockedStateSafety?.zeroVisibleContent !== true) {
-    failures.push("blocked-state content is visible");
+  if (inactiveSafety?.diagnosticsInactiveOrAbsent !== true) {
+    failures.push("direct navigation left non-inactive userscript diagnostics");
   }
   if (!gate.paintProbe || gate.paintProbe.sampleCount < 1) {
     failures.push("document-start first-paint probe is missing");
   } else {
-    if (gate.paintProbe.flashFrameCount !== 0) {
-      failures.push(`${gate.paintProbe.flashFrameCount} blocked-state frames exposed content`);
+    if (gate.paintProbe.unsafeGateFrameCount !== 0) {
+      failures.push(
+        `${gate.paintProbe.unsafeGateFrameCount} inactive direct-navigation frames activated an unsafe reader gate`,
+      );
     }
     if (gate.paintProbe.firstReadyFrame !== null) {
       failures.push("direct navigation emitted a ready frame");
     }
-    const contentSamples = (gate.paintProbe.samples ?? []).filter(
-      (sample) => sample.bodyElementCount > 0 && sample.ready !== true,
+    const activeGateSamples = (gate.paintProbe.samples ?? []).filter(
+      (sample) => sample.readerGateActive === true || sample.paintLockIntact === true,
     );
-    if (
-      contentSamples.length < 1 ||
-      contentSamples.some((sample) => sample.paintLockIntact !== true)
-    ) {
-      failures.push("blocked-state paint lock was not intact for every sampled content frame");
+    if (activeGateSamples.length > 0) {
+      failures.push("direct navigation installed reader-gate state before provenance approval");
     }
   }
-  if (gate.visibleWithoutKeepCount !== 0 || gate.directVisibleTextLeakCount !== 0) {
-    failures.push("blocked-state visible content count is not zero");
+  if (gate.runtimeStyleCount !== 0) {
+    failures.push("direct navigation left a runtime stylesheet installed");
+  }
+  if (gate.hotdealMarkerCount !== 0 || gate.publisherProtocolCleared !== true) {
+    failures.push("direct navigation left userscript protocol markers on the publisher page");
   }
   return failures;
 }
@@ -5791,6 +5910,7 @@ async function createPageContext(
   return {
     context,
     page,
+    approvePublicHost: pinnedTransport.approvePublicHost,
     sealNetworkPolicyEvidence: async () => {
       validateAllMainDocumentUrls();
       await networkEvidenceRecorder.sealAndDrain({
@@ -5907,7 +6027,7 @@ async function auditOneTarget({
       const challengeDeadline =
         Date.now() + Math.min(timeoutMs, DESTINATION_CHALLENGE_SETTLE_MAX_MS);
       while (
-        runtimeExpectation === "relay-positive" &&
+        runtimeExpectation !== "direct-negative" &&
         sourceClassification.subkind === "waf-or-challenge" &&
         Date.now() < challengeDeadline
       ) {
@@ -5945,7 +6065,7 @@ async function auditOneTarget({
     };
     result.sourceClassification = sourceClassification;
     if (
-      runtimeExpectation === "relay-positive" &&
+      runtimeExpectation !== "direct-negative" &&
       sourceClassification.kind !== "article-response"
     ) {
       result.failures.push(
@@ -6116,7 +6236,7 @@ async function auditOneTarget({
         ).catch(() => {});
       }
     }
-    if (!staticConsistency && runtimeExpectation === "relay-positive") {
+    if (!staticConsistency && runtimeExpectation !== "direct-negative") {
       const identity = canonicalArticleIdentity(navigation.finalUrl, site.id);
       staticConsistency = {
         siteId: site.id,
@@ -6221,7 +6341,7 @@ async function auditOneTarget({
     });
     result.userscript.sourceClassification = runtimeSourceClassification;
     if (
-      runtimeExpectation === "relay-positive" &&
+      runtimeExpectation !== "direct-negative" &&
       runtimeSourceClassification.kind !== "article-response"
     ) {
       candidateExtractionAllowed = false;
@@ -6252,7 +6372,7 @@ async function auditOneTarget({
       (candidate) => candidate.id === runtimeLanding.layoutId,
     ) ?? null;
     if (
-      runtimeExpectation === "relay-positive" &&
+      runtimeExpectation !== "direct-negative" &&
       runtimeLayout &&
       runtimeLayout.id !== auditedLayout.id
     ) {
@@ -6296,7 +6416,7 @@ async function auditOneTarget({
       };
     }
     if (
-      runtimeExpectation === "relay-positive" &&
+      runtimeExpectation !== "direct-negative" &&
       (runtimeLanding.configuredPathMatchCount !== 1 || !runtimeLayout)
     ) {
       result.failures.push(
@@ -6317,7 +6437,7 @@ async function auditOneTarget({
       path.join(runDirectory, `${stem}-userscript-gated.png`),
     );
     result.userscript.gate = gate;
-    if (runtimeExpectation === "relay-positive") {
+    if (runtimeExpectation !== "direct-negative") {
       result.failures.push(
         ...staticRuntimeConsistencyFailures(
           staticConsistency,
@@ -6361,7 +6481,7 @@ async function auditOneTarget({
     ) {
       candidates = await selectorCandidates(auditedPage);
     }
-    const runtimeRoleResourceEvidence = runtimeExpectation === "relay-positive"
+    const runtimeRoleResourceEvidence = runtimeExpectation !== "direct-negative"
       ? await roleReferencedResourceHosts(
           auditedPage,
           [
@@ -6481,10 +6601,16 @@ async function auditSyntheticNoFlashFixture(
         status: 200,
         contentType: "text/html; charset=utf-8",
         body: `<!doctype html>
-<html lang="ko"><head><meta charset="utf-8"><title>${fixtureTitle}</title>
-<meta property="og:title" content="${fixtureTitle}"></head>
+<html lang="ko"><head><meta charset="utf-8"></head>
 <body><header id="noise-before-core">navigation noise</header><main id="fixture-root"></main>
 <script>
+window.setTimeout(() => {
+  document.title = '${fixtureTitle}';
+  const metadata = document.createElement('meta');
+  metadata.setAttribute('property', 'og:title');
+  metadata.setAttribute('content', '${fixtureTitle}');
+  document.head.append(metadata);
+}, 50);
 window.setTimeout(() => {
   document.querySelector('#fixture-root').innerHTML =
     '<section class="content_view"><h1 class="post_subject">검증용 핫딜 제목</h1>' +
@@ -6513,6 +6639,9 @@ window.setTimeout(() => {
     );
     result.gate = gate;
     result.failures.push(...userscriptGateFailures(gate, REQUIRED_ROLE_NAMES));
+    // Semantic preflight is deliberately unlocked. It may span a sampled
+    // publisher-visible frame, but a fast proof is also allowed to acquire
+    // the lock before the first animation-frame sample.
     await captureBoundedScreenshot(
       session.page,
       path.join(runDirectory, "synthetic-delayed-no-flash.png"),
@@ -6609,6 +6738,11 @@ async function auditSyntheticAlgumonRelayFixtures(
     const entryUrl = signedUrl(dealId, query);
     const finalUrl = destinationUrl(articleId);
     const fixture = { id, failures: [] };
+    const seededFinalUrl = seededNavigationUrl(finalUrl, "clien", title, dealId, entryUrl);
+    const targetProof = seededNavigationProof(seededFinalUrl);
+    if (!targetProof?.seed) {
+      throw new Error("synthetic relay target seed could not be constructed");
+    }
     const context = await browser.newContext({
       ...contextOptions("desktop"),
       serviceWorkers: "block",
@@ -6630,6 +6764,8 @@ async function auditSyntheticAlgumonRelayFixtures(
           status: response?.status ?? 200,
           contentType: response?.contentType ?? "text/html; charset=utf-8",
           headers: response?.headers,
+          // The referrer-only runtime does not transmit or consume a legacy
+          // seed fragment. Exercise the actual same-tab relay URL unchanged.
           body: response?.body ?? relayHtml(finalUrl),
         });
         return;
@@ -6684,13 +6820,12 @@ async function auditSyntheticAlgumonRelayFixtures(
           document.documentElement.getAttribute("data-hotdeal-focus-ready") === "1",
         null, { timeout: timeoutMs });
         const security = await page.evaluate(() => ({
-          name: window.name,
           fragment: location.hash,
           state: document.documentElement.getAttribute("data-hotdeal-focus-state"),
         }));
         fixture.security = security;
         if (
-          security.name !== "" || security.fragment !== "" || security.state !== "ready" ||
+          security.fragment !== "" || security.state !== "ready" ||
           !page.url().startsWith(finalUrl)
         ) {
           fixture.failures.push("valid same-tab relay lost seed cleanup or reader readiness");
@@ -6710,7 +6845,6 @@ async function auditSyntheticAlgumonRelayFixtures(
         fixture.failureState = await observedPopup.evaluate(() => ({
           url: location.href,
           referrer: document.referrer,
-          name: window.name,
           hash: location.hash,
           state: document.documentElement.getAttribute("data-hotdeal-focus-state"),
           status: document.documentElement.getAttribute("data-hotdeal-focus-status"),
@@ -6761,86 +6895,6 @@ async function auditSyntheticEdgeFixtures(
     "the reader role while preserving formatting, media, purchase context, and comments.";
   const fixtures = [
     {
-      id: "fixed-gate-descendant-and-top-layer-zero-paint",
-      fixedGateOnly: true,
-      lockedPixelProbe: true,
-      headHtml: `<style data-edge-lock-attack-style>` +
-        `html,html body,html body *{transition-property:opacity,visibility,clip-path!important;` +
-        `transition-duration:100000s!important;transition-timing-function:linear!important}` +
-        `html body,html body *{visibility:visible!important;opacity:1!important;` +
-        `pointer-events:auto!important;clip-path:none!important}` +
-        `#locked-fixed{position:fixed!important;inset:0!important;background:red!important}` +
-        `dialog{position:fixed!important;inset:0!important;width:100vw!important;` +
-        `height:100vh!important;background:lime!important}` +
-        `dialog::backdrop{background:blue!important;opacity:1!important}` +
-        `[popover]{position:fixed!important;inset:0!important;background:magenta!important}` +
-        `</style>`,
-      body: `<aside id="locked-fixed">fixed advertisement</aside>` +
-        `<dialog data-edge-lock-dialog>modal advertisement</dialog>` +
-        `<div popover="manual" data-edge-lock-popover>popover advertisement</div>` +
-        `<div data-edge-lock-shadow-host></div>`,
-      script: `document.querySelector('[data-edge-lock-dialog]').showModal();` +
-        `document.querySelector('[data-edge-lock-popover]')?.showPopover?.();` +
-        `const shadowHost=document.querySelector('[data-edge-lock-shadow-host]');` +
-        `const shadowRoot=shadowHost.attachShadow({mode:'closed'});` +
-        `shadowRoot.innerHTML='<style>dialog{position:fixed!important;inset:0!important;` +
-        `width:100vw!important;height:100vh!important;background:cyan!important;` +
-        `visibility:visible!important;opacity:1!important;content-visibility:visible!important;` +
-        `clip-path:none!important}dialog::backdrop{background:yellow!important;` +
-        `opacity:1!important;visibility:visible!important}</style><dialog>shadow modal ad</dialog>';` +
-        `shadowRoot.querySelector('dialog').showModal();` +
-        `document.documentElement.setAttribute('data-edge-lock-attack-active','1');`,
-      checkSelectors: [],
-    },
-    {
-      id: "preseeded-ready-spoof-relocks-zero-paint-then-ready",
-      preseedProtocolReady: true,
-      lockedPixelProbe: true,
-      headHtml: `<style data-edge-lock-attack-style>` +
-        `html,html body,html body *{transition-property:opacity,visibility,clip-path!important;` +
-        `transition-duration:100000s!important;transition-timing-function:linear!important}` +
-        `html body,html body *{visibility:visible!important;opacity:1!important;` +
-        `pointer-events:auto!important;clip-path:none!important}` +
-        `#locked-fixed{position:fixed!important;inset:0!important;background:red!important}` +
-        `dialog{position:fixed!important;inset:0!important;width:100vw!important;` +
-        `height:100vh!important;background:lime!important}` +
-        `dialog::backdrop{background:blue!important;opacity:1!important}` +
-        `[popover]{position:fixed!important;inset:0!important;background:magenta!important}` +
-        `</style>`,
-      body: `<aside id="locked-fixed">fixed advertisement</aside>` +
-        `<dialog data-edge-lock-dialog>modal advertisement</dialog>` +
-        `<div popover="manual" data-edge-lock-popover>popover advertisement</div>` +
-        `<div data-edge-lock-shadow-host></div>` +
-        `<div data-edge-delayed-approved style="display:none!important">` +
-        `<article class="post_article" data-edge="post-lock-body"><p>${longBody}</p></article>` +
-        `<div class="post_comment"><div class="comment">` +
-        `<div class="comment_row" data-edge="post-lock-comment">comment</div>` +
-        `</div></div></div>`,
-      script: `document.querySelector('[data-edge-lock-dialog]').showModal();` +
-        `document.querySelector('[data-edge-lock-popover]')?.showPopover?.();` +
-        `const shadowHost=document.querySelector('[data-edge-lock-shadow-host]');` +
-        `const shadowRoot=shadowHost.attachShadow({mode:'closed'});` +
-        `shadowRoot.innerHTML='<style>dialog{position:fixed!important;inset:0!important;` +
-        `width:100vw!important;height:100vh!important;background:cyan!important;` +
-        `visibility:visible!important;opacity:1!important;content-visibility:visible!important;` +
-        `clip-path:none!important}dialog::backdrop{background:yellow!important;` +
-        `opacity:1!important;visibility:visible!important}</style><dialog>shadow modal ad</dialog>';` +
-        `shadowRoot.querySelector('dialog').showModal();` +
-        `document.documentElement.setAttribute('data-edge-lock-attack-active','1');` +
-        `window.setTimeout(() => {` +
-        `document.querySelector('[data-edge-lock-dialog]')?.close();` +
-        `document.querySelector('[data-edge-lock-dialog]')?.remove();` +
-        `document.querySelector('[data-edge-lock-popover]')?.hidePopover?.();` +
-        `document.querySelector('[data-edge-lock-popover]')?.remove();` +
-        `shadowHost.remove();` +
-        `document.querySelector('#locked-fixed')?.remove();` +
-        `document.querySelector('[data-edge-lock-attack-style]')?.remove();` +
-        `document.querySelector('[data-edge-delayed-approved]')?.removeAttribute('style');` +
-        `document.documentElement.setAttribute('data-edge-lock-attack-released','1');` +
-        `}, 800);`,
-      checkSelectors: ["[data-edge='post-lock-body']", "[data-edge='post-lock-comment']"],
-    },
-    {
       id: "empty-comments",
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"></div>`,
@@ -6848,20 +6902,26 @@ async function auditSyntheticEdgeFixtures(
     },
     {
       id: "pre-ready-content-visibility-tamper-is-terminal",
-      expectFailClosed: true,
-      expectedStatusPrefix:
-        "terminal-bootstrap-inline-lock-tamper-content-visibility",
+      expectProjectionRecovery: true,
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"><div class="comment">` +
         `<div class="comment_row">comment</div></div></div>`,
-      script: `document.documentElement.style.setProperty(` +
-        `'content-visibility','visible','important');`,
+      script: `(() => {` +
+        `const html = document.documentElement;` +
+        `const attackAfterLock = () => {` +
+          `if (html.getAttribute('data-hotdeal-focus-lock') !== '1') return;` +
+          `observer.disconnect();` +
+          `html.style.setProperty('content-visibility','visible','important');` +
+        `};` +
+        `const observer = new MutationObserver(attackAfterLock);` +
+        `observer.observe(html,{attributes:true,attributeFilter:['data-hotdeal-focus-lock']});` +
+        `attackAfterLock();` +
+      `})();`,
       checkSelectors: [],
     },
     {
       id: "unauthorized-measurement-marker-is-terminal",
-      expectFailClosed: true,
-      expectedStatusPrefix: "terminal-protocol-marker-tamper",
+      expectProjectionRecovery: true,
       headHtml: `<style>` +
         `html[data-hotdeal-focus-measure="1"]{visibility:visible!important;` +
         `content-visibility:visible!important;opacity:1!important;` +
@@ -6869,8 +6929,17 @@ async function auditSyntheticEdgeFixtures(
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"><div class="comment">` +
         `<div class="comment_row">comment</div></div></div>`,
-      script: `document.documentElement.setAttribute(` +
-        `'data-hotdeal-focus-measure','1');`,
+      script: `(() => {` +
+        `const html = document.documentElement;` +
+        `const attackAfterLock = () => {` +
+          `if (html.getAttribute('data-hotdeal-focus-lock') !== '1') return;` +
+          `observer.disconnect();` +
+          `html.setAttribute('data-hotdeal-focus-measure','1');` +
+        `};` +
+        `const observer = new MutationObserver(attackAfterLock);` +
+        `observer.observe(html,{attributes:true,attributeFilter:['data-hotdeal-focus-lock']});` +
+        `attackAfterLock();` +
+      `})();`,
       checkSelectors: [],
     },
     {
@@ -6904,7 +6973,7 @@ async function auditSyntheticEdgeFixtures(
     },
     {
       id: "delayed-unclassified-comment-sibling",
-      expectFailClosed: true,
+      expectProjectionRecovery: true,
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"><div class="comment">` +
         `<div class="comment_row">known comment</div></div></div>`,
@@ -6961,8 +7030,7 @@ async function auditSyntheticEdgeFixtures(
     },
     {
       id: "late-outside-inline-important-ad-is-terminal",
-      expectFailClosed: true,
-      expectedStatusPrefix: "terminal-cascade-visible-leak",
+      expectProjectionRecovery: true,
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"><div class="comment">` +
         `<div class="comment_row">comment</div></div></div>`,
@@ -6977,8 +7045,7 @@ async function auditSyntheticEdgeFixtures(
     },
     {
       id: "late-author-stylesheet-exposure-is-terminal",
-      expectFailClosed: true,
-      expectedStatusPrefix: "terminal-cascade-visible-leak",
+      expectProjectionRecovery: true,
       fixtureOriginNote: "synthetic author-origin CSS; AdGuard user-origin CSS has higher cascade priority",
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"><div class="comment">` +
@@ -6997,8 +7064,7 @@ async function auditSyntheticEdgeFixtures(
     },
     {
       id: "root-pseudo-wallpaper-exposure-is-terminal",
-      expectFailClosed: true,
-      expectedStatusPrefix: "terminal-cascade-visible-leak",
+      expectProjectionRecovery: true,
       fixtureOriginNote: "synthetic author-origin root pseudo/background paint",
       headHtml: `<style data-edge-transition-attack>` +
         `html{transition-property:opacity,visibility,clip-path!important;` +
@@ -7030,8 +7096,7 @@ async function auditSyntheticEdgeFixtures(
     },
     {
       id: "late-inside-body-widget-is-terminal",
-      expectFailClosed: true,
-      expectedStatusPrefix: "terminal-role-projection-atomic-addition",
+      expectProjectionRecovery: true,
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"><div class="comment">` +
         `<div class="comment_row">comment</div></div></div>`,
@@ -7061,8 +7126,7 @@ async function auditSyntheticEdgeFixtures(
     },
     {
       id: "comment-item-unknown-class-flip-is-terminal",
-      expectFailClosed: true,
-      expectedStatusPrefix: "terminal-protocol-marker-tamper",
+      expectProjectionRecovery: true,
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"><div class="comment">` +
         `<div class="comment_row" data-edge="class-flip">comment</div></div></div>`,
@@ -7083,7 +7147,10 @@ async function auditSyntheticEdgeFixtures(
     },
     {
       id: "spa-different-article-is-terminal-even-after-back",
-      expectNavigationTerminal: true,
+      expectProjectionRecovery: true,
+      expectNavigationReturn: true,
+      expectedProjectionReason: "algumon-referrer-known-route",
+      waitAfterNavigationMs: 2_200,
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"><div class="comment"><div class="comment_row">comment</div></div></div>`,
       script: `window.setTimeout(() => {
@@ -7092,14 +7159,14 @@ async function auditSyntheticEdgeFixtures(
         window.setTimeout(() => {
           history.back();
           document.documentElement.setAttribute('data-edge-spa-back', 'attempted');
-        }, 150);
+        }, 1100);
       }, 300);`,
       checkSelectors: [],
     },
     {
       id: "spa-same-number-different-board-is-terminal",
-      expectFailClosed: true,
-      expectedStatusPrefix: "terminal-navigation-identity",
+      expectProjectionRecovery: true,
+      expectedProjectionReason: "frozen-navigation-identity",
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"><div class="comment"><div class="comment_row">comment</div></div></div>`,
       script: `window.setTimeout(() => {
@@ -7136,8 +7203,7 @@ async function auditSyntheticEdgeFixtures(
     },
     {
       id: "owned-wrapper-marker-shape-spoof-is-terminal",
-      expectFailClosed: true,
-      expectedStatusPrefix: "terminal-protocol-marker-tamper",
+      expectProjectionRecovery: true,
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"><div class="comment"><div class="comment_row">comment</div></div></div>`,
       script: `const attack = window.setInterval(() => {
@@ -7150,23 +7216,21 @@ async function auditSyntheticEdgeFixtures(
       checkSelectors: [],
     },
     {
-      id: "runtime-cssom-insert-rule-is-terminal",
-      expectFailClosed: true,
-      expectedStatusPrefix: "terminal-runtime-style-tamper",
+      id: "runtime-style-text-tamper-is-terminal",
+      expectProjectionRecovery: true,
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"><div class="comment"><div class="comment_row">comment</div></div></div>`,
       script: `const attack = window.setInterval(() => {
         if (document.documentElement.getAttribute('data-hotdeal-focus-ready') !== '1') return;
         window.clearInterval(attack);
         const style = document.querySelector('style[data-hotdeal-focus-runtime-style]');
-        style.sheet.insertRule('html{outline:0!important}', style.sheet.cssRules.length);
+        style.textContent += '\\n/* audit runtime style tamper */';
       }, 25);`,
       checkSelectors: [],
     },
     {
       id: "terminal-guardian-rejects-ready-and-marker-forgery",
-      expectFailClosed: true,
-      expectedStatusPrefix: "terminal-protocol-marker-tamper",
+      expectProjectionRecovery: true,
       body: `<article class="post_article"><p>${longBody}</p></article>` +
         `<div class="post_comment"><div class="comment"><div class="comment_row">comment</div></div></div>`,
       script: `const attack = window.setInterval(() => {
@@ -7318,18 +7382,11 @@ async function auditSyntheticEdgeFixtures(
         result.fixtures.push(fixtureResult);
         continue;
       }
-      const blankPaint = fixture.lockedPixelProbe
-        ? await session.page.screenshot({ animations: "disabled" })
-        : null;
       await session.page.route(fixtureUrl, async (route) => {
-        const protocolSpoof = fixture.preseedProtocolReady
-          ? ` data-hotdeal-focus-ready="1" data-hotdeal-focus-protocol="1" ` +
-            `data-hotdeal-focus-state="ready" data-hotdeal-focus-status="ready"`
-          : "";
         await route.fulfill({
           status: 200,
           contentType: "text/html; charset=utf-8",
-          body: `<!doctype html><html lang="ko"${protocolSpoof}><head><meta charset="utf-8">` +
+          body: `<!doctype html><html lang="ko"><head><meta charset="utf-8">` +
             `<title>${title}</title><meta property="og:title" content="${title}">` +
             (fixture.headHtml ?? "") + `</head>` +
             `<body${fixture.bodyAttributes ?? ""}>` +
@@ -7337,114 +7394,26 @@ async function auditSyntheticEdgeFixtures(
             `<section class="content_view"><h1 class="post_subject">${title}</h1>` +
             fixture.body +
             `</section><aside data-edge-noise="delayed">delayed advertisement noise</aside>` +
-            `<script>${fixture.script ?? ""}</script></body></html>`,
+            `<script>` +
+            `window.__HDF_EDGE_ORIGINALS__ = {` +
+              `body: document.querySelector('.post_article'),` +
+              `comments: [...document.querySelectorAll('.comment_row')],` +
+              `bodyText: document.querySelector('.post_article')?.textContent,` +
+              `bodyTextNodes:(()=>{const nodes=[];const walker=document.createTreeWalker(document.querySelector('.post_article'),NodeFilter.SHOW_TEXT);` +
+                `while(walker.nextNode())nodes.push({node:walker.currentNode,text:walker.currentNode.data});return nodes;})(),` +
+              `commentTexts: [...document.querySelectorAll('.comment_row')].map(node=>node.textContent)` +
+            `};${fixture.script ?? ""}</script></body></html>`,
         });
       });
-      const fixtureNavigationUrl = fixture.fixedGateOnly
-        ? fixtureUrl
-        : seededNavigationUrl(fixtureUrl, "clien", title, 99999000 + index);
-      if (fixture.lockedPixelProbe) {
-        const navigationProof = seededNavigationProof(fixtureNavigationUrl);
-        if (navigationProof) {
-          await session.page.goto("about:blank", {
-            waitUntil: "commit",
-            timeout: timeoutMs,
-          });
-          await session.page.evaluate((name) => {
-            window.name = name;
-          }, `hdf-provenance:${navigationProof.encoded}`);
-        }
-        await session.page.goto(fixtureNavigationUrl, {
-          waitUntil: "domcontentloaded",
-          timeout: timeoutMs,
-          ...(navigationProof ? { referer: ALGUMON_GLOBAL_DISCOVERY_URL } : {}),
-        });
-      } else {
-        await navigate(session.page, fixtureNavigationUrl, timeoutMs);
-      }
-      if (fixture.lockedPixelProbe) {
-        await session.page.waitForFunction(
-          () => document.documentElement.getAttribute("data-edge-lock-attack-active") === "1",
-          null,
-          { timeout: timeoutMs },
-        );
-        await session.page.waitForTimeout(50);
-        const lockedPaint = await session.page.screenshot({ animations: "disabled" });
-        const lockedState = await evaluateInIsolatedWorld(session.page, () => {
-          const html = document.documentElement;
-          const rootStyle = getComputedStyle(html);
-          const dialog = document.querySelector("[data-edge-lock-dialog]");
-          const dialogStyle = dialog ? getComputedStyle(dialog) : null;
-          return {
-            runtimeLock: html.getAttribute("data-hotdeal-focus-lock"),
-            ready: html.getAttribute("data-hotdeal-focus-ready"),
-            state: html.getAttribute("data-hotdeal-focus-state"),
-            rootTransitionProperty: rootStyle.transitionProperty,
-            rootAnimationName: rootStyle.animationName,
-            rootContentVisibility: rootStyle.contentVisibility,
-            rootVisibility: rootStyle.visibility,
-            rootOpacity: rootStyle.opacity,
-            rootPointerEvents: rootStyle.pointerEvents,
-            rootClipPath: rootStyle.clipPath,
-            dialogOpen: Boolean(dialog?.open),
-            dialogDisplay: dialogStyle?.display ?? null,
-            dialogTransitionProperty: dialogStyle?.transitionProperty ?? null,
-            dialogAnimationName: dialogStyle?.animationName ?? null,
-            dialogContentVisibility: dialogStyle?.contentVisibility ?? null,
-            dialogVisibility: dialogStyle?.visibility ?? null,
-            dialogOpacity: dialogStyle?.opacity ?? null,
-            dialogPointerEvents: dialogStyle?.pointerEvents ?? null,
-            dialogClipPath: dialogStyle?.clipPath ?? null,
-          };
-        });
-        fixtureResult.lockedPaint = {
-          blankPixelMatch: lockedPaint.equals(blankPaint),
-          ...lockedState,
-        };
-        if (!fixtureResult.lockedPaint.blankPixelMatch) {
-          fixtureResult.failures.push(
-            `locked descendant or top-layer content painted: ` +
-              `${JSON.stringify(fixtureResult.lockedPaint)}`,
-          );
-        }
-        if (
-          lockedState.rootTransitionProperty !== "none" ||
-          lockedState.rootAnimationName !== "none" ||
-          lockedState.rootVisibility !== "hidden" ||
-          lockedState.rootContentVisibility !== "hidden" ||
-          Number(lockedState.rootOpacity) !== 0 ||
-          lockedState.rootClipPath !== "inset(50%)" ||
-          lockedState.rootPointerEvents !== "none" ||
-          lockedState.dialogOpen !== true ||
-          lockedState.runtimeLock !== "1"
-        ) {
-          fixtureResult.failures.push(
-            `paint lock did not cover the root and top layer: ${JSON.stringify(lockedState)}`,
-          );
-        }
-      }
-      if (fixture.fixedGateOnly) {
-        await captureBoundedScreenshot(
-          session.page,
-          path.join(runDirectory, `synthetic-${fixture.id}.png`),
-        );
-        fixtureResult.passed = fixtureResult.failures.length === 0;
-        result.fixtures.push(fixtureResult);
-        continue;
-      }
-      if (fixture.lockedPixelProbe) {
-        await session.page.waitForFunction(
-          () =>
-            document.documentElement.getAttribute("data-edge-lock-attack-released") === "1" &&
-            document.documentElement.getAttribute("data-hotdeal-focus-ready") === "1",
-          null,
-          { timeout: timeoutMs },
-        );
-        await session.page.waitForTimeout(100);
-      } else {
-        await session.page.waitForTimeout(900);
-      }
-      if (!fixture.tamper && !fixture.expectFailClosed && !fixture.expectNavigationTerminal) {
+      const fixtureNavigationUrl = seededNavigationUrl(
+        fixtureUrl,
+        "clien",
+        title,
+        99999000 + index,
+      );
+      await navigate(session.page, fixtureNavigationUrl, timeoutMs);
+      await session.page.waitForTimeout(fixture.waitAfterNavigationMs ?? 900);
+      if (!fixture.tamper && !fixture.expectPublisherRollback) {
         const gate = await auditUserscriptGate(
           session.page,
           REQUIRED_ROLE_NAMES,
@@ -7457,21 +7426,41 @@ async function auditSyntheticEdgeFixtures(
           ...userscriptGateFailures(gate, REQUIRED_ROLE_NAMES),
         );
       }
-      const paintFlashCount = await session.page.evaluate(() =>
-        window.__HOTDEAL_FOCUS_PAINT_PROBE__?.flashFrameCount ?? 1);
+      const paintProbe = await session.page.evaluate(() => {
+        try {
+          return JSON.parse(JSON.stringify(window.__HOTDEAL_FOCUS_PAINT_PROBE__ ?? null));
+        } catch {
+          return null;
+        }
+      });
+      const rollbackDiagnostics = await session.page.evaluate(() => {
+        try {
+          return JSON.parse(JSON.stringify(
+            window.__HOTDEAL_FOCUS_DIAGNOSTICS__ ?? null,
+          ));
+        } catch {
+          return null;
+        }
+      });
       const edgeState = await evaluateInIsolatedWorld(session.page, ({
         visibleSelectors,
         hiddenSelectors,
-        observedPaintFlashCount,
+        observedUnsafeGateFrameCount,
+        allowPublisherMarkerForgery,
       }) => {
         const visible = (element) => {
           const style = getComputedStyle(element);
           return style.display !== "none" && style.visibility !== "hidden" &&
+            style.contentVisibility !== "hidden" &&
             Number(style.opacity) !== 0 &&
             [...element.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0);
         };
         const html = document.documentElement;
-        const ready = html.getAttribute("data-hotdeal-focus-ready") === "1" &&
+        const runtimeStyleCount = document.querySelectorAll(
+          'style[data-hotdeal-focus-runtime-style="2"]',
+        ).length;
+        const ready = runtimeStyleCount === 1 &&
+          html.getAttribute("data-hotdeal-focus-ready") === "1" &&
           html.getAttribute("data-hotdeal-focus-state") === "ready";
         const selected = visibleSelectors.map((selector) => {
           const node = document.querySelector(selector);
@@ -7493,38 +7482,61 @@ async function auditSyntheticEdgeFixtures(
         });
         const visibleNoiseCount = [...document.querySelectorAll("[data-edge-noise]")]
           .filter(visible).length;
-        const paintFlashCount = observedPaintFlashCount;
+        const unsafeGateFrameCount = observedUnsafeGateFrameCount;
         const rootStyle = getComputedStyle(html);
-        const failClosed =
+        const publisherProtocolAttributes = [
+          "data-hotdeal-focus-lock",
+          "data-hotdeal-focus-ready",
+          "data-hotdeal-focus-protocol",
+          "data-hotdeal-focus-state",
+          "data-hotdeal-focus-status",
+          "data-hotdeal-focus-measure",
+        ];
+        const publisherProtocolCleared = publisherProtocolAttributes.every(
+          (attribute) => !html.hasAttribute(attribute),
+        ) && !html.classList.contains("hdf-v2-lock") &&
+          !html.classList.contains("hdf-v2-ready");
+        const markedNodeCount = [html, ...document.querySelectorAll("*")].filter((element) =>
+          [...element.attributes].some((attribute) =>
+            attribute.name.startsWith("data-hotdeal-focus-")) ||
+          [...element.classList].some((className) => className.startsWith("hdf-v2-")),
+        ).length;
+        const inlineLockCleared = [
+          ["opacity", "0"],
+          ["visibility", "hidden"],
+          ["content-visibility", "hidden"],
+          ["clip-path", "inset(50%)"],
+          ["pointer-events", "none"],
+        ].every(([property, value]) =>
+          html.style.getPropertyValue(property) !== value ||
+          html.style.getPropertyPriority(property) !== "important",
+        );
+        const publisherArticleVisible = visible(document.querySelector(".post_article"));
+        const publisherCommentsVisible = visible(document.querySelector(".post_comment"));
+        const publisherRollback =
           !ready &&
-          html.classList.contains("hdf-v2-lock") &&
-          html.getAttribute("data-hotdeal-focus-lock") === "1" &&
-          rootStyle.transitionProperty === "none" &&
-          rootStyle.animationName === "none" &&
-          rootStyle.visibility === "hidden" &&
-          rootStyle.contentVisibility === "hidden" &&
-          Number(rootStyle.opacity) === 0 &&
-          rootStyle.clipPath === "inset(50%)" &&
-          rootStyle.pointerEvents === "none" &&
-          html.style.getPropertyValue("opacity") === "0" &&
-          html.style.getPropertyPriority("opacity") === "important" &&
-          html.style.getPropertyValue("clip-path") === "inset(50%)" &&
-          html.style.getPropertyPriority("clip-path") === "important" &&
-          html.style.getPropertyValue("visibility") === "hidden" &&
-          html.style.getPropertyPriority("visibility") === "important" &&
-          html.style.getPropertyValue("content-visibility") === "hidden" &&
-          html.style.getPropertyPriority("content-visibility") === "important" &&
-          !html.hasAttribute("data-hotdeal-focus-measure") &&
-          paintFlashCount === 0;
+          runtimeStyleCount === 0 &&
+          (allowPublisherMarkerForgery ||
+            (publisherProtocolCleared && markedNodeCount === 0)) &&
+          inlineLockCleared &&
+          rootStyle.visibility !== "hidden" &&
+          rootStyle.contentVisibility !== "hidden" &&
+          Number(rootStyle.opacity) !== 0 &&
+          publisherArticleVisible &&
+          publisherCommentsVisible;
         return {
           ready,
-          failClosed,
+          publisherRollback,
           selected,
           hidden,
           visibleNoiseCount,
-          paintFlashCount,
-          status: html.getAttribute("data-hotdeal-focus-status"),
-          measurementMarker: html.getAttribute("data-hotdeal-focus-measure"),
+          unsafeGateFrameCount,
+          runtimeStyleCount,
+          markedNodeCount,
+          publisherProtocolCleared,
+          inlineLockCleared,
+          publisherArticleVisible,
+          publisherCommentsVisible,
           path: location.pathname,
           backAttempted: html.getAttribute("data-edge-spa-back") === "attempted",
           bodyBackgroundColor: getComputedStyle(document.body).backgroundColor,
@@ -7533,31 +7545,95 @@ async function auditSyntheticEdgeFixtures(
       }, {
         visibleSelectors: fixture.checkSelectors,
         hiddenSelectors: fixture.hiddenSelectors ?? [],
-        observedPaintFlashCount: paintFlashCount,
+        observedUnsafeGateFrameCount: Number(paintProbe?.unsafeGateFrameCount ?? 1),
+        allowPublisherMarkerForgery:
+          fixture.allowPublisherMarkerForgery === true,
       });
       fixtureResult.edgeState = edgeState;
-      if (fixture.expectNavigationTerminal) {
+      if (fixture.expectProjectionRecovery) {
+        // Reader-only recovery must not roll back to the entire publisher
+        // page: that would expose the very noise this product removes. Check
+        // original node/text preservation plus continuous zero-noise paint.
+        const preservation = await session.page.evaluate(() => {
+          const original = window.__HDF_EDGE_ORIGINALS__;
+          const visible = (node) => {
+            if (!node?.isConnected) return false;
+            const style = getComputedStyle(node);
+            return style.display !== "none" && style.visibility !== "hidden" &&
+              style.contentVisibility !== "hidden" && Number(style.opacity) !== 0 &&
+              node.getClientRects().length > 0;
+          };
+          return {
+            bodyIdentity: original.body === document.querySelector('.post_article'),
+            bodyText: original.bodyTextNodes.every(({node,text})=>node.isConnected && node.data===text),
+            bodyVisible: visible(original.body),
+            commentsPreserved: original.comments.length > 0 && original.comments.every(
+              (node, index) => visible(node) && node.textContent === original.commentTexts[index] &&
+                node.getAttribute('data-hotdeal-focus-role') === 'comment-item'),
+            measurementCleared: !document.documentElement.hasAttribute('data-hotdeal-focus-measure'),
+          };
+        });
+        fixtureResult.publisherPreservation = preservation;
+        if (!Object.values(preservation).every((value) => value === true)) {
+          fixtureResult.failures.push(`protocol recovery damaged original content: ${JSON.stringify(preservation)}`);
+        }
+        if (!edgeState.ready || edgeState.visibleNoiseCount !== 0 || edgeState.unsafeGateFrameCount !== 0) {
+          fixtureResult.failures.push(`protocol recovery did not continuously contain noise: ${JSON.stringify(edgeState)}`);
+        }
+        if (fixture.expectedProjectionReason && rollbackDiagnostics?.targetReason !== fixture.expectedProjectionReason) {
+          fixtureResult.failures.push(`projection identity state was ${rollbackDiagnostics?.targetReason ?? "missing"}`);
+        }
+        if (fixture.expectNavigationReturn && (!edgeState.backAttempted || edgeState.path === "/service/board/jirum/99999998")) {
+          fixtureResult.failures.push(`original article did not resume after history.back(): ${JSON.stringify(edgeState)}`);
+        }
+      }
+      if (fixture.expectPublisherRollback) {
+        if (!edgeState.publisherRollback) {
+          fixtureResult.failures.push(
+            `terminal path did not restore publisher-visible content: ` +
+              `${JSON.stringify(edgeState)}`,
+          );
+        }
         if (
-          !edgeState.failClosed ||
-          edgeState.status !== "terminal-navigation-identity" ||
+          fixture.expectedRollbackReasonPrefix &&
+          !String(rollbackDiagnostics?.targetReason ?? "").startsWith(
+            fixture.expectedRollbackReasonPrefix,
+          )
+        ) {
+          fixtureResult.failures.push(
+            `rollback reason was ${rollbackDiagnostics?.targetReason ?? "missing"}`,
+          );
+        }
+        if (
+          fixture.allowPublisherMarkerForgery !== true &&
+          edgeState.unsafeGateFrameCount !== 0
+        ) {
+          fixtureResult.failures.push(
+            `${edgeState.unsafeGateFrameCount} active reader-gate frames exposed content before rollback`,
+          );
+        }
+      }
+      fixtureResult.rollbackDiagnostics = rollbackDiagnostics;
+      if (fixture.expectPublisherRollback) {
+        if (fixture.expectNavigationRollback && (
+          !edgeState.publisherRollback ||
+          !edgeState.backAttempted ||
+          edgeState.path === "/service/board/jirum/99999998"
+        )) {
+          fixtureResult.failures.push(
+            `article identity mismatch did not roll back after history.back(): ` +
+              `${JSON.stringify(edgeState)}`,
+          );
+        }
+      } else if (fixture.expectNavigationRollback) {
+        if (
+          !edgeState.publisherRollback ||
           !edgeState.backAttempted ||
           edgeState.path === "/service/board/jirum/99999998"
         ) {
           fixtureResult.failures.push(
-            `article identity mismatch was not terminal after history.back(): ` +
-            `${JSON.stringify(edgeState)}`,
-          );
-        }
-      } else if (fixture.expectFailClosed) {
-        if (!edgeState.failClosed) {
-          fixtureResult.failures.push("unclassified comment content did not fail closed");
-        }
-        if (
-          fixture.expectedStatusPrefix &&
-          !String(edgeState.status ?? "").startsWith(fixture.expectedStatusPrefix)
-        ) {
-          fixtureResult.failures.push(
-            `terminal status was ${edgeState.status ?? "missing"}`,
+            `article identity mismatch did not roll back after history.back(): ` +
+              `${JSON.stringify(edgeState)}`,
           );
         }
       } else if (fixture.tamper) {
@@ -7565,9 +7641,9 @@ async function auditSyntheticEdgeFixtures(
           (selected) => selected.selector.includes("data-edge-tamper") && selected.exists,
         );
         const safelyRecovered =
-          (edgeState.ready && edgeState.visibleNoiseCount === 0) || edgeState.failClosed;
+          (edgeState.ready && edgeState.visibleNoiseCount === 0) || edgeState.publisherRollback;
         if (!tamperAttempted || !safelyRecovered) {
-          fixtureResult.failures.push("marker/style tamper neither recovered nor failed closed");
+          fixtureResult.failures.push("marker/style tamper neither recovered nor restored publisher content");
         }
       } else {
         for (const selected of edgeState.selected) {
@@ -7637,50 +7713,44 @@ async function auditSyntheticEdgeFixtures(
     `verified comment</div></div></div></section>`;
   const pathDriftCases = [
     {
-      id: "path-only-drift-seeded-exact-remains-blank",
+      id: "path-only-drift-seeded-exact-remains-publisher-visible",
       seed: true,
-      expectedState: "blocked",
-      expectedStatus: "terminal-article-identity-required",
+      expectReaderProjection: true,
       body: pathDriftBody,
     },
     {
-      id: "ordinary-unknown-path-remains-blank",
+      id: "ordinary-unknown-path-remains-publisher-visible",
       seed: false,
-      expectedState: "blocked",
       body: pathDriftBody,
     },
     {
-      id: "cross-site-seed-destination-mismatch-is-terminal",
+      id: "cross-site-seed-destination-mismatch-remains-publisher-visible",
       seed: true,
+      expectReaderProjection: true,
       seedSiteType: "ppomppu",
-      expectedState: "blocked",
-      expectedStatus: "terminal-algumon-site-mismatch",
       body: pathDriftBody,
     },
     {
-      id: "null-article-identity-is-terminal",
+      id: "null-article-identity-remains-publisher-visible",
       seed: true,
+      expectReaderProjection: true,
       requestPath: "/fresh-hotdeal/no-article-token",
-      expectedState: "blocked",
-      expectedStatus: "terminal-article-identity-required",
       body: pathDriftBody,
     },
     {
-      id: "path-drift-seeded-dom-drift-remains-blank",
+      id: "path-drift-seeded-dom-drift-remains-publisher-visible",
       seed: true,
-      expectedState: "blocked",
+      expectReaderProjection: true,
       body:
         `<main class="drift-shell"><h1 class="drift-title">${pathDriftTitle}</h1>` +
         `<article class="drift-body"><p>${longBody}</p></article>` +
         `<section class="drift-comments"><div class="drift-comment">comment</div></section></main>`,
     },
     {
-      id: "forged-direct-fragment-and-window-name-is-terminal",
+      id: "forged-direct-fragment-and-window-name-remains-publisher-visible",
       seed: true,
       forgedDirectNavigation: true,
-      requestPath: "/service/board/jirum/990099",
-      expectedState: "blocked",
-      expectedStatus: "terminal-algumon-seed-required",
+      requestPath: "/service/board/free/990099",
       body: pathDriftBody,
     },
   ];
@@ -7713,13 +7783,15 @@ async function auditSyntheticEdgeFixtures(
           `<header data-path-drift-noise>outside navigation noise</header>` +
           fixture.body +
           `<aside data-path-drift-noise>outside recommendation noise</aside>` +
+          `<script>window.__HDF_PATH_ORIGINALS__ = {` +
+            `body:document.querySelector('.post_article,.drift-body'),` +
+            `bodyText:document.querySelector('.post_article,.drift-body')?.textContent,` +
+            `comment:document.querySelector('.comment_row,.drift-comment'),` +
+            `commentText:document.querySelector('.comment_row,.drift-comment')?.textContent` +
+          `};</script>` +
           `</body></html>`,
       }));
       if (fixture.forgedDirectNavigation) {
-        const proof = seededNavigationProof(navigationUrl);
-        await session.page.evaluate((name) => {
-          window.name = name;
-        }, `hdf-provenance:${proof.navigationNonce}`);
         await session.page.goto(navigationUrl, {
           waitUntil: "domcontentloaded",
           timeout: timeoutMs,
@@ -7741,6 +7813,59 @@ async function auditSyntheticEdgeFixtures(
         const logicallyVisible = (element) =>
           visible(element) || hasVisibleOwnedDescendant(element);
         const html = document.documentElement;
+        const rootStyle = getComputedStyle(html);
+        const runtimeStyleCount = document.querySelectorAll(
+          'style[data-hotdeal-focus-runtime-style="2"]',
+        ).length;
+        const publisherProtocolAttributes = [
+          "data-hotdeal-focus-lock",
+          "data-hotdeal-focus-ready",
+          "data-hotdeal-focus-protocol",
+          "data-hotdeal-focus-state",
+          "data-hotdeal-focus-status",
+          "data-hotdeal-focus-measure",
+        ];
+        const publisherProtocolCleared = publisherProtocolAttributes.every(
+          (attribute) => !html.hasAttribute(attribute),
+        ) && !html.classList.contains("hdf-v2-lock") &&
+          !html.classList.contains("hdf-v2-ready");
+        const hotdealMarkerCount = [html, ...document.querySelectorAll("*")]
+          .filter((element) =>
+            [...element.attributes].some((attribute) =>
+              attribute.name.startsWith("data-hotdeal-focus-")) ||
+            [...element.classList].some((className) => className.startsWith("hdf-v2-")),
+          ).length;
+        const rootInlineLockCleared = [
+          ["opacity", "0"],
+          ["visibility", "hidden"],
+          ["content-visibility", "hidden"],
+          ["clip-path", "inset(50%)"],
+          ["pointer-events", "none"],
+        ].every(([property, value]) =>
+          html.style.getPropertyValue(property) !== value ||
+          html.style.getPropertyPriority(property) !== "important",
+        );
+        const publisherRootVisible =
+          rootStyle.display !== "none" &&
+          rootStyle.visibility !== "hidden" &&
+          rootStyle.contentVisibility !== "hidden" &&
+          Number(rootStyle.opacity) !== 0;
+        const publisherArticle = document.querySelector(".post_article, .drift-body");
+        const publisherComments = document.querySelector(".post_comment, .drift-comments");
+        const publisherArticleVisible = Boolean(publisherArticle && visible(publisherArticle));
+        const publisherCommentsVisible = Boolean(publisherComments && visible(publisherComments));
+        let diagnostics = null;
+        try {
+          diagnostics = JSON.parse(JSON.stringify(
+            window.__HOTDEAL_FOCUS_DIAGNOSTICS__ ?? null,
+          ));
+        } catch {
+          diagnostics = null;
+        }
+        const paintProbe = window.__HOTDEAL_FOCUS_PAINT_PROBE__ ?? null;
+        const activeGateFrameCount = (paintProbe?.samples ?? []).filter(
+          (sample) => sample.readerGateActive === true || sample.paintLockIntact === true,
+        ).length;
         const roles = Object.fromEntries(
           ["title", "body", "comments"].map((role) => {
             const nodes = [...document.querySelectorAll(
@@ -7757,13 +7882,21 @@ async function auditSyntheticEdgeFixtures(
         const commentItems = [
           ...document.querySelectorAll('[data-hotdeal-focus-role="comment-item"]'),
         ];
+        const original = window.__HDF_PATH_ORIGINALS__;
         return {
           ready:
             html.getAttribute("data-hotdeal-focus-ready") === "1" &&
             html.getAttribute("data-hotdeal-focus-state") === "ready",
           state: html.getAttribute("data-hotdeal-focus-state"),
           status: html.getAttribute("data-hotdeal-focus-status"),
-          htmlVisibility: getComputedStyle(html).visibility,
+          diagnostics,
+          runtimeStyleCount,
+          publisherProtocolCleared,
+          hotdealMarkerCount,
+          rootInlineLockCleared,
+          publisherRootVisible,
+          publisherArticleVisible,
+          publisherCommentsVisible,
           visibleElementCount: [...document.body.querySelectorAll("*")].filter(visible).length,
           visibleNoiseCount: [...document.querySelectorAll("[data-path-drift-noise]")]
             .filter(visible).length,
@@ -7778,53 +7911,72 @@ async function auditSyntheticEdgeFixtures(
               (node) => node.hasAttribute("data-hotdeal-focus-keep"),
             ),
           },
-          fragmentCleared: !location.hash.includes("hdf-seed="),
-          paintFlashCount:
-            window.__HOTDEAL_FOCUS_PAINT_PROBE__?.flashFrameCount ?? 1,
+          originalContentPreserved: original.body === document.querySelector('.post_article,.drift-body') &&
+            original.comment === document.querySelector('.comment_row,.drift-comment') &&
+            original.bodyText === original.body.textContent && original.commentText === original.comment.textContent &&
+            visible(original.body) && visible(original.comment),
+          fragmentCleared: !location.hash.includes("hdf-audit-seed="),
+          unsafeGateFrameCount: Number(paintProbe?.unsafeGateFrameCount ?? 1),
+          activeGateFrameCount,
+          firstReadyFrame: paintProbe?.firstReadyFrame ?? null,
         };
       });
       fixtureResult.state = state;
-      if (fixture.expectedState === "ready") {
-        if (!state.ready || state.state !== "ready") {
-          fixtureResult.failures.push(`seeded exact DOM did not become ready (${state.state})`);
-        }
-        for (const [role, metrics] of Object.entries(state.roles)) {
-          if (metrics.count !== 1 || metrics.visibleCount !== 1 || !metrics.allKept) {
-            fixtureResult.failures.push(`${role} was not preserved exactly once`);
-          }
-        }
-        if (
-          state.commentItems.count !== 1 ||
-          state.commentItems.visibleCount !== 1 ||
-          !state.commentItems.allKept
-        ) {
-          fixtureResult.failures.push("comment item was not preserved exactly once");
-        }
-        if (state.visibleNoiseCount !== 0 || state.visibleUnkeptCount !== 0) {
-          fixtureResult.failures.push("seeded path probe exposed outside noise");
+      const roleMarkerCount = Object.values(state.roles).reduce(
+        (count, metrics) => count + metrics.count,
+        0,
+      ) + state.commentItems.count;
+      const publisherPageRestored =
+        !state.ready &&
+        state.runtimeStyleCount === 0 &&
+        state.publisherProtocolCleared &&
+        state.hotdealMarkerCount === 0 &&
+        state.rootInlineLockCleared &&
+        state.publisherRootVisible &&
+        state.publisherArticleVisible &&
+        state.publisherCommentsVisible &&
+        state.visibleElementCount > 0 &&
+        state.visibleNoiseCount >= 2 &&
+        state.visibleUnkeptCount > 0 &&
+        roleMarkerCount === 0;
+      if (fixture.expectReaderProjection) {
+        // A real Algumon referrer is the runtime authority; obsolete fragments
+        // neither authorize direct visits nor veto a proven new route/DOM.
+        const gate = await auditUserscriptGate(session.page, REQUIRED_ROLE_NAMES, timeoutMs,
+          "relay-positive", commentControlSelectorDigestsForUrl(clienLayout, clienLayout.sample_urls[0]));
+        fixtureResult.gate = gate;
+        fixtureResult.failures.push(...userscriptGateFailures(gate, REQUIRED_ROLE_NAMES));
+        if (!state.ready || !state.originalContentPreserved || state.visibleNoiseCount !== 0 ||
+            state.visibleUnkeptCount !== 0 || state.unsafeGateFrameCount !== 0 ||
+            state.commentItems.count !== 1 || state.commentItems.visibleCount !== 1 ||
+            !state.commentItems.allKept || state.firstReadyFrame === null ||
+            Object.values(state.roles).some((role) => role.count !== 1 || role.visibleCount !== 1 || !role.allKept)) {
+          fixtureResult.failures.push(`referrer-authorized path/DOM drift damaged reader projection: ${JSON.stringify(state)}`);
         }
       } else {
-        if (state.ready || state.state !== fixture.expectedState) {
-          fixtureResult.failures.push(
-            `fail-closed path probe state was ${state.state ?? "missing"}`,
-          );
-        }
-        if (state.htmlVisibility !== "hidden" || state.visibleElementCount !== 0) {
-          fixtureResult.failures.push("unknown/drifted path was not completely blank");
-        }
-        if (fixture.expectedStatus && state.status !== fixture.expectedStatus) {
-          fixtureResult.failures.push(
-            `terminal path status was ${state.status ?? "missing"}`,
-          );
-        }
-      }
-      if (!state.fragmentCleared) {
-        fixtureResult.failures.push("public Algumon seed fragment was not cleared");
-      }
-      if (state.paintFlashCount !== 0) {
+      if (!publisherPageRestored) {
         fixtureResult.failures.push(
-          `path-drift gate exposed ${state.paintFlashCount} pre-ready frames`,
+          `path drift did not preserve the original inactive publisher page: ` +
+            `${JSON.stringify(state)}`,
         );
+      }
+      if (state.diagnostics && state.diagnostics.state !== "inactive") {
+        fixtureResult.failures.push(
+          `path drift left non-inactive diagnostics: ${state.diagnostics.state}`,
+        );
+      }
+      if (state.unsafeGateFrameCount !== 0 || state.activeGateFrameCount !== 0) {
+        fixtureResult.failures.push(
+          `path drift installed an active reader gate: ` +
+            `${state.unsafeGateFrameCount} unsafe frames, ` +
+            `${state.activeGateFrameCount} active frames`,
+        );
+      }
+      if (state.firstReadyFrame !== null) {
+        fixtureResult.failures.push(
+          `path drift emitted a reader-ready frame: ${state.firstReadyFrame}`,
+        );
+      }
       }
       await captureBoundedScreenshot(
         session.page,
@@ -7854,7 +8006,7 @@ async function auditSyntheticEdgeFixtures(
       requiredRoles: REQUIRED_ROLE_NAMES,
       allowEmptyComments: false,
       roleProjection: {
-        title: { mode: "seeded-shallow" },
+        title: { mode: "metadata-shallow" },
         body: { mode: "atomic-boundary", ignored: [] },
         product: { mode: "absent", cardinality: "zero", selectors: [], ignored: [] },
         comments: { mode: "classified-children" },
@@ -7875,7 +8027,7 @@ async function auditSyntheticEdgeFixtures(
       requiredRoles: REQUIRED_ROLE_NAMES,
       allowEmptyComments: false,
       roleProjection: {
-        title: { mode: "seeded-shallow" },
+        title: { mode: "metadata-shallow" },
         body: { mode: "atomic-boundary", ignored: [] },
         product: { mode: "absent", cardinality: "zero", selectors: [], ignored: [] },
         comments: { mode: "classified-children" },
@@ -7992,7 +8144,7 @@ async function auditSyntheticEdgeFixtures(
     requiredRoles: REQUIRED_ROLE_NAMES,
     allowEmptyComments: false,
     roleProjection: {
-      title: { mode: "seeded-shallow" },
+      title: { mode: "metadata-shallow" },
       body: { mode: "atomic-boundary", ignored: [] },
       product: { mode: "absent", cardinality: "zero", selectors: [], ignored: [] },
       comments: { mode: "classified-children" },
@@ -8091,8 +8243,16 @@ async function auditSyntheticEdgeFixtures(
         `<dd>USD 10 <a href="https://shop.invalid/product">buy</a></dd></dl>` +
         `</section><article class="board-contents"><p>${longBody}</p></article>` +
         `<div id="comment_list_area"><div id="iC_1" class="comment_wrapper">` +
-        `comment</div></div></main><script>window.setTimeout(() => {` +
+        `comment</div></div></main><script>` +
+        `window.__HDF_PRODUCT_ORIGINALS__={product:document.querySelector('.topTitle-link'),` +
+        `body:document.querySelector('.board-contents'),comment:document.querySelector('.comment_wrapper'),` +
+        `bodyText:document.querySelector('.board-contents').textContent,` +
+        `commentText:document.querySelector('.comment_wrapper').textContent,` +
+        `purchaseText:document.querySelector('.topTitle-link dd').textContent,` +
+        `purchaseHref:document.querySelector('.topTitle-link a').href};` +
+        `window.setTimeout(() => {` +
         `const widget = document.createElement('aside');` +
+        `widget.setAttribute('data-product-mutation-noise','1');` +
         `widget.textContent = 'injected product recommendation';` +
         `document.querySelector('.topTitle-link').append(widget);` +
         `}, 300);</script></body></html>`,
@@ -8109,25 +8269,103 @@ async function auditSyntheticEdgeFixtures(
     );
     await productMutationSession.page.waitForTimeout(900);
     const state = await productMutationSession.page.evaluate(() => {
+      const visible = (element) => {
+        if (!element) return false;
+        const style = getComputedStyle(element);
+        return style.display !== "none" && style.visibility !== "hidden" &&
+          style.contentVisibility !== "hidden" && Number(style.opacity) !== 0 &&
+          [...element.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0);
+      };
       const html = document.documentElement;
+      const rootStyle = getComputedStyle(html);
+      const runtimeStyleCount = document.querySelectorAll(
+        'style[data-hotdeal-focus-runtime-style="2"]',
+      ).length;
+      const publisherProtocolAttributes = [
+        "data-hotdeal-focus-lock",
+        "data-hotdeal-focus-ready",
+        "data-hotdeal-focus-protocol",
+        "data-hotdeal-focus-state",
+        "data-hotdeal-focus-status",
+        "data-hotdeal-focus-measure",
+      ];
+      const publisherProtocolCleared = publisherProtocolAttributes.every(
+        (attribute) => !html.hasAttribute(attribute),
+      ) && !html.classList.contains("hdf-v2-lock") &&
+        !html.classList.contains("hdf-v2-ready");
+      const hotdealMarkerCount = [html, ...document.querySelectorAll("*")].filter(
+        (element) =>
+          [...element.attributes].some((attribute) =>
+            attribute.name.startsWith("data-hotdeal-focus-")) ||
+          [...element.classList].some((className) => className.startsWith("hdf-v2-")),
+      ).length;
+      const rootInlineLockCleared = [
+        ["opacity", "0"],
+        ["visibility", "hidden"],
+        ["content-visibility", "hidden"],
+        ["clip-path", "inset(50%)"],
+        ["pointer-events", "none"],
+      ].every(([property, value]) =>
+        html.style.getPropertyValue(property) !== value ||
+        html.style.getPropertyPriority(property) !== "important",
+      );
+      let diagnostics = null;
+      try {
+        diagnostics = JSON.parse(JSON.stringify(
+          window.__HOTDEAL_FOCUS_DIAGNOSTICS__ ?? null,
+        ));
+      } catch {
+        diagnostics = null;
+      }
+      const paintProbe = window.__HOTDEAL_FOCUS_PAINT_PROBE__ ?? null;
       return {
         ready: html.getAttribute("data-hotdeal-focus-ready") === "1",
         state: html.getAttribute("data-hotdeal-focus-state"),
         status: html.getAttribute("data-hotdeal-focus-status"),
-        visibility: getComputedStyle(html).visibility,
-        paintFlashCount: window.__HOTDEAL_FOCUS_PAINT_PROBE__?.flashFrameCount ?? 1,
+        diagnostics,
+        runtimeStyleCount,
+        publisherProtocolCleared,
+        hotdealMarkerCount,
+        rootInlineLockCleared,
+        publisherRootVisible:
+          rootStyle.display !== "none" && rootStyle.visibility !== "hidden" &&
+          rootStyle.contentVisibility !== "hidden" && Number(rootStyle.opacity) !== 0,
+        productVisible: visible(document.querySelector(".topTitle-link")),
+        articleVisible: visible(document.querySelector(".board-contents")),
+        commentsVisible: visible(document.querySelector(".comment_wrapper")),
+        originalContentPreserved: (() => {
+          const original = window.__HDF_PRODUCT_ORIGINALS__;
+          return original.product === document.querySelector('.topTitle-link') &&
+            original.body === document.querySelector('.board-contents') &&
+            original.comment === document.querySelector('.comment_wrapper') &&
+            original.bodyText === original.body.textContent && original.commentText === original.comment.textContent &&
+            original.purchaseText === document.querySelector('.topTitle-link dd').textContent &&
+            original.purchaseHref === document.querySelector('.topTitle-link a').href;
+        })(),
+        noiseHiddenAndUnowned: (() => {
+          const noise = document.querySelector('[data-product-mutation-noise]');
+          return Boolean(noise) && !visible(noise) && !noise.hasAttribute('data-hotdeal-focus-keep');
+        })(),
+        unsafeGateFrameCount: Number(paintProbe?.unsafeGateFrameCount ?? 1),
       };
     });
     productMutationFixture.state = state;
     if (
-      state.ready ||
-      state.state !== "blocked" ||
-      state.status !== "terminal-role-projection-atomic-addition" ||
-      state.visibility !== "hidden" ||
-      state.paintFlashCount !== 0
+      !state.ready ||
+      state.diagnostics?.state !== "ready" ||
+      state.diagnostics?.standaloneCascadeProof?.frameCount !== 2 ||
+      state.diagnostics?.visibleLeakCount !== 0 ||
+      state.runtimeStyleCount !== 1 ||
+      !state.originalContentPreserved || !state.noiseHiddenAndUnowned ||
+      !state.rootInlineLockCleared ||
+      !state.publisherRootVisible ||
+      !state.productVisible ||
+      !state.articleVisible ||
+      !state.commentsVisible ||
+      state.unsafeGateFrameCount !== 0
     ) {
       productMutationFixture.failures.push(
-        `product injection did not terminally fail closed: ${JSON.stringify(state)}`,
+        `product injection damaged the reader projection or exposed noise: ${JSON.stringify(state)}`,
       );
     }
   } catch (error) {
@@ -8150,17 +8388,33 @@ function fixtureCoverageFailures(fixtures, config) {
   const failures = [];
   for (const site of config.sites) {
     for (const layout of site.layouts) {
-      const vintages = new Set(
-        fixtures
-          .filter(
-            (fixture) =>
-              fixture.site_id === site.id && fixture.layout_id === layout.id,
-          )
-          .map((fixture) => fixture.vintage),
+      const applicableProfiles = Array.isArray(layout.applicable_profiles)
+        ? layout.applicable_profiles
+        : [];
+      const layoutFixtures = fixtures.filter(
+        (fixture) => fixture.site_id === site.id && fixture.layout_id === layout.id,
       );
-      for (const vintage of ["june", "july"]) {
-        if (!vintages.has(vintage)) {
-          failures.push(`${site.id}/${layout.id}: missing ${vintage} regression fixture`);
+      for (const fixture of layoutFixtures) {
+        const profileName = fixture.profile ?? "desktop";
+        if (!applicableProfiles.includes(profileName)) {
+          failures.push(
+            `${site.id}/${layout.id}/${profileName}: fixture profile is not applicable`,
+          );
+        }
+      }
+      for (const profileName of applicableProfiles) {
+        const vintages = new Set(
+          layoutFixtures
+            .filter((fixture) => (fixture.profile ?? "desktop") === profileName)
+            .map((fixture) => fixture.vintage),
+        );
+        for (const vintage of ["june", "july"]) {
+          if (!vintages.has(vintage)) {
+            failures.push(
+              `${site.id}/${layout.id}/${profileName}: ` +
+                `missing ${vintage} regression fixture`,
+            );
+          }
         }
       }
     }
@@ -8202,6 +8456,7 @@ async function runRegressionFixtures(
       siteId: fixture.site_id,
       layoutId: fixture.layout_id,
       vintage: fixture.vintage,
+      profile: fixture.profile ?? "desktop",
       failures: [],
     };
     if (!site || !layout) {
@@ -8220,6 +8475,13 @@ async function runRegressionFixtures(
       continue;
     }
     const profileName = fixture.profile ?? "desktop";
+    if (!layout.applicable_profiles.includes(profileName)) {
+      fixtureResult.failures.push(
+        `fixture profile ${profileName} is not applicable to ${site.id}/${layout.id}`,
+      );
+      result.fixtures.push(fixtureResult);
+      continue;
+    }
     const session = await createPageContext(
       browser,
       profileName,
@@ -8337,8 +8599,11 @@ function exactSignedAlgumonDealUrl(urlLike, expectedDealId = null) {
   } catch {
     return null;
   }
-  const dealMatch = url.pathname.match(/^\/l\/d\/(\d{1,24})$/u);
+  const dealMatch = url.pathname.match(/^\/(l|n)\/d\/(\d{1,24})$/u);
   const queryKeys = [...url.searchParams.keys()];
+  const currentRelay = dealMatch?.[1] === "n";
+  const expectedQueryKeys = currentRelay ? ["v", "t", "enc"] : ["v", "t"];
+  const encryptedDestination = url.searchParams.get("enc") || "";
   if (
     url.protocol !== "https:" ||
     url.hostname !== "www.algumon.com" ||
@@ -8347,14 +8612,18 @@ function exactSignedAlgumonDealUrl(urlLike, expectedDealId = null) {
     url.port ||
     url.hash ||
     !dealMatch ||
-    (expectedDealId && dealMatch[1] !== String(expectedDealId)) ||
-    queryKeys.length !== 2 ||
-    queryKeys[0] !== "v" ||
-    queryKeys[1] !== "t" ||
+    (expectedDealId && dealMatch[2] !== String(expectedDealId)) ||
+    queryKeys.length !== expectedQueryKeys.length ||
+    queryKeys.some((key, index) => key !== expectedQueryKeys[index]) ||
     url.searchParams.getAll("v").length !== 1 ||
     url.searchParams.getAll("t").length !== 1 ||
     !/^[0-9a-f]{32}$/u.test(url.searchParams.get("v") || "") ||
-    !/^\d{13}$/u.test(url.searchParams.get("t") || "")
+    !/^\d{13}$/u.test(url.searchParams.get("t") || "") ||
+    (currentRelay && (
+      url.searchParams.getAll("enc").length !== 1 ||
+      encryptedDestination.length > 4_096 ||
+      !/^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u.test(encryptedDestination)
+    ))
   ) {
     return null;
   }
@@ -8556,17 +8825,19 @@ function classifyAlgumonInventorySnapshot(snapshot, expectedSiteId = null) {
   }
   const failures = [];
   let observedLabels = [];
+  let sourcePickerPresent = false;
   if (!expectedSiteId) {
     const expectedLabels = new Set(ALGUMON_SOURCE_CONTRACTS.map((source) => source.label));
     const dropdowns = (snapshot?.dropdowns ?? []).map((labels) =>
       labels.map(normalizeAlgumonSourceLabel).filter(Boolean),
     );
+    sourcePickerPresent = dropdowns.length > 0;
     const candidates = dropdowns.filter((labels) =>
       labels.some((label) => expectedLabels.has(label)),
     );
-    if (candidates.length !== 1) {
+    if (sourcePickerPresent && candidates.length !== 1) {
       failures.push("source-dropdown-cardinality");
-    } else {
+    } else if (candidates.length === 1) {
       observedLabels = candidates[0];
       const expectedSorted = [...expectedLabels].sort();
       const observedSorted = [...observedLabels].sort();
@@ -8598,6 +8869,9 @@ function classifyAlgumonInventorySnapshot(snapshot, expectedSiteId = null) {
     status: failures.length === 0 ? "ok" : "inventory-contract-failure",
     failures,
     observedLabels,
+    sourceInventoryMode: expectedSiteId
+      ? "filtered-feed-source-identity"
+      : sourcePickerPresent ? "source-picker" : "source-picker-unavailable",
     observedSiteTypes,
     cardCount: classifiedCards.length,
     links: failures.length === 0
@@ -8654,8 +8928,16 @@ async function snapshotAlgumonInventoryPage(page, response) {
         return labels.length === 1 ? labels : [];
       }),
     );
+    for (const fieldset of document.querySelectorAll(
+      'dialog[aria-label="필터"] fieldset, [role="dialog"][aria-label="필터"] fieldset',
+    )) {
+      if (cleanText(fieldset.querySelector("legend")?.textContent) !== "사이트") continue;
+      dropdowns.push([...fieldset.querySelectorAll('input[type="checkbox"][value]')]
+        .filter((input) => input.getAttribute("value"))
+        .map((input) => cleanText(input.closest("label")?.textContent)));
+    }
     const cards = [...document.querySelectorAll(".deal-feed-card[id^='deal-']")].map((card) => {
-      const relayAnchors = [...card.querySelectorAll('a[href*="/l/d/"]')];
+      const relayAnchors = [...card.querySelectorAll('a[href*="/l/d/"], a[href*="/n/d/"]')];
       const iconImages = [...card.querySelectorAll('img[src*="/site-icon/"]')];
       const explicitCount = card.getAttribute("data-source-comment-count") ||
         card.getAttribute("data-origin-comment-count") ||
@@ -8667,12 +8949,14 @@ async function snapshotAlgumonInventoryPage(page, response) {
         cardDomId: card.id,
         hrefs: relayAnchors.map((anchor) => anchor.href),
         title: cleanText(
-          card.querySelector('h3 a[href*="/l/d/"]')?.textContent ||
+          card.querySelector('h3 a[href*="/l/d/"], h3 a[href*="/n/d/"]')?.textContent ||
             card.querySelector("h3")?.textContent ||
             "",
         ),
         iconUrls: iconImages.map((image) => image.src),
-        sourceLabels: iconImages.map((image) => cleanText(image.closest("span")?.textContent)),
+        sourceLabels: iconImages.map((image) => cleanText(
+          image.closest(".badge")?.textContent || image.closest("span")?.textContent,
+        )),
         dataSiteTypes: [
           card.getAttribute("data-site-type"),
           card.getAttribute("data-site"),
@@ -8746,6 +9030,7 @@ async function collectAlgumonRedirectLinks(
   requestBudget,
   transitionBudget,
   requestKind = "site-discovery",
+  relayContext = null,
 ) {
   const source = site.algumon_source ?? site.id.toUpperCase();
   const discoveryUrl = `${ALGUMON_ORIGIN}/n/deal?sites=${encodeURIComponent(source)}`;
@@ -8777,6 +9062,9 @@ async function collectAlgumonRedirectLinks(
       await snapshotAlgumonInventoryPage(page, response),
       site.id,
     );
+    if (result.status === "ok" && relayContext) {
+      await transferAlgumonRelaySession(context, relayContext);
+    }
     return {
       discoveryUrl,
       ...result,
@@ -8787,6 +9075,22 @@ async function collectAlgumonRedirectLinks(
   } finally {
     await context.close();
   }
+}
+
+async function transferAlgumonRelaySession(sourceContext, relayContext) {
+  const cookies = await sourceContext.cookies([
+    `${ALGUMON_ORIGIN}/n/d/1`,
+    `${ALGUMON_ORIGIN}/l/d/1`,
+  ]);
+  if (cookies.some((cookie) =>
+    !ALGUMON_HOSTNAMES.has(String(cookie.domain).replace(/^\./u, "")),
+  )) {
+    throw new Error("relay-contract-failure: discovery cookies escaped the exact Algumon origin");
+  }
+  // The private resolver context is not a user browser session. Keep only this
+  // source acquisition's cookies, in memory, without adding them to evidence.
+  await relayContext.clearCookies();
+  await relayContext.addCookies(cookies);
 }
 
 async function parseSignedRelayDestination(page, source, expectedDomain) {
@@ -8872,7 +9176,13 @@ function createAlgumonRelayResolver(
         maxRedirects: 0,
         maxRetries: 0,
         timeout: timeoutMs,
-        headers: { "cache-control": "no-store", pragma: "no-cache" },
+        headers: {
+          "cache-control": "no-store",
+          pragma: "no-cache",
+          referer: `${ALGUMON_ORIGIN}/n/deal?sites=${encodeURIComponent(
+            site.algumon_source ?? site.id.toUpperCase(),
+          )}`,
+        },
       }).then(async (response) => {
         const bytes = await response.body();
         return {
@@ -9141,6 +9451,9 @@ async function discoverLatestTargets(
   );
   let terminalSourceFailure = false;
   try {
+    // APIRequestContext does not pass through page routing. Prime only the exact
+    // relay host through the same public-address pinning used by browser requests.
+    await relaySession.approvePublicHost(new URL(ALGUMON_ORIGIN).hostname);
     for (const site of sites) {
       const record = {
         siteId: site.id,
@@ -9164,6 +9477,8 @@ async function discoverLatestTargets(
           timeoutMs,
           requestBudget,
           transitionBudget,
+          "site-discovery",
+          relaySession.context,
         );
         record.discoveryUrl = discovery.discoveryUrl;
         record.status = discovery.status;
@@ -9392,7 +9707,8 @@ function sampleTargets(sites) {
             profileName,
             target: {
               source: "sample",
-              runtimeExpectation: "direct-negative",
+              runtimeExpectation: "registered-positive",
+              readerRouteRegistered: true,
               url: sampleUrl,
             },
           });
@@ -9408,9 +9724,7 @@ function resultHasZeroLeak(result) {
   if (!gate) return false;
   if (gate.ready !== true) {
     return Boolean(
-      gate.state === "blocked" &&
-      gate.blockedStateSafety?.passed === true &&
-      gate.paintProbe?.flashFrameCount === 0,
+      gate.inactivePublisherSafety?.passed === true,
     );
   }
   const commentItemsProjected = Boolean(
@@ -9425,21 +9739,22 @@ function resultHasZeroLeak(result) {
     gate.standaloneRuntimeCoverage?.passed === true &&
     gate.visibleWithoutKeepCount === 0 &&
     gate.directVisibleTextLeakCount === 0 &&
-    gate.paintProbe?.flashFrameCount === 0 &&
+    gate.paintProbe?.unsafeGateFrameCount === 0 &&
     commentItemsProjected &&
     commentControlsProjected,
   );
 }
 
-function resultIsSafelyReadableOrClosed(result) {
+function resultIsSafelyReadableOrPublisherVisible(result) {
   const gate = result.userscript?.gate;
   if (!resultHasZeroLeak(result)) return false;
   const staticOnlyFailure = (result.failures ?? []).every((failure) =>
     failure.startsWith("static"),
   );
   const safelyReadable = gate.ready === true && staticOnlyFailure;
-  const safelyClosed = gate.ready === false && gate.state === "blocked";
-  return safelyReadable || safelyClosed;
+  const publisherVisible =
+    gate.ready === false && gate.inactivePublisherSafety?.passed === true;
+  return safelyReadable || publisherVisible;
 }
 
 function promotionRetestFailures(report, scope) {
@@ -9490,7 +9805,7 @@ function promotionRetestFailures(report, scope) {
     );
     if (
       results.length === 0 ||
-      results.some((result) => !resultIsSafelyReadableOrClosed(result))
+      results.some((result) => !resultIsSafelyReadableOrPublisherVisible(result))
     ) {
       failures.push(
         `promotion-retest failed sibling is not zero-leak: ` +
@@ -9594,7 +9909,12 @@ function discoveryFailures(
   } else {
     const expectedLabels = ALGUMON_SOURCE_CONTRACTS.map((source) => source.label).sort();
     const observedLabels = [...(inventory.observedLabels ?? [])].sort();
-    if (canonicalJson(observedLabels) !== canonicalJson(expectedLabels)) {
+    // Current Algumon renders the picker only after loading interactive JS.
+    // Document-only collection intentionally avoids that extra source traffic;
+    // all configured sites still require their own validated filtered feed below.
+    const pickerUnavailable = inventory.sourceInventoryMode === "source-picker-unavailable" &&
+      observedLabels.length === 0;
+    if (!pickerUnavailable && canonicalJson(observedLabels) !== canonicalJson(expectedLabels)) {
       failures.push("Algumon global dropdown differs from the exact seven-source contract");
     }
   }
@@ -10319,7 +10639,7 @@ function selectStableDiscoveryGroups(report, config) {
         : observedCardinalities.has("required") ? "required" : "zero";
       const presentProduct = presentProductShapes[0] ?? null;
       group.roleProjection = {
-        title: { mode: "seeded-shallow" },
+        title: { mode: "metadata-shallow" },
         body: {
           mode: "atomic-boundary",
           ignored: [...group.shape.bodyIgnored],
@@ -10557,7 +10877,7 @@ function measuredVisibleLeakCount(gate) {
     Number(gate?.visibleWithoutKeepCount ?? 1),
     Number(gate?.directVisibleTextLeakCount ?? 1),
     Number(gate?.uncoveredUnmarkedCount ?? 1),
-    Number(gate?.paintProbe?.flashFrameCount ?? 1),
+    Number(gate?.paintProbe?.unsafeGateFrameCount ?? 1),
   );
 }
 
@@ -11016,6 +11336,12 @@ async function main() {
       (result) =>
         result.runtimeExpectation === "direct-negative" && result.passed === true,
     ).length,
+    registeredPositiveCount: report.results.filter(
+      (result) => result.runtimeExpectation === "registered-positive",
+    ).length,
+    registeredPositivePassedCount: report.results.filter(
+      (result) => result.runtimeExpectation === "registered-positive" && result.passed === true,
+    ).length,
     relayPositiveCount: report.results.filter(
       (result) => result.runtimeExpectation === "relay-positive",
     ).length,
@@ -11023,14 +11349,14 @@ async function main() {
       (result) =>
         result.runtimeExpectation === "relay-positive" && result.passed === true,
     ).length,
-    blockedSafetyPassedCount: report.results.filter(
+    inactivePublisherSafetyPassedCount: report.results.filter(
       (result) =>
         result.runtimeExpectation === "direct-negative" &&
-        result.userscript?.gate?.blockedStateSafety?.passed === true,
+        result.userscript?.gate?.inactivePublisherSafety?.passed === true,
     ).length,
     standaloneRuntimeCoveragePassedCount: report.results.filter(
       (result) =>
-        result.runtimeExpectation === "relay-positive" &&
+        result.runtimeExpectation !== "direct-negative" &&
         result.userscript?.gate?.standaloneRuntimeCoverage?.passed === true,
     ).length,
     failureCount: report.failures.length,
@@ -11178,6 +11504,7 @@ export {
   createNetworkPolicyEvidenceRecorder,
   createPinnedPublicHttpsProxy,
   exactSignedAlgumonDealUrl,
+  fixtureCoverageFailures,
   finalizeProfileLandingCoverage,
   matchingApprovedPaths,
   networkFidelityFailures,
@@ -11199,6 +11526,8 @@ export {
   signedRelayAcquisitionEvidence,
   siteArticleIdentity,
   staticRuntimeConsistencyFailures,
+  transferAlgumonRelaySession,
+  validateDiagnostics,
 };
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {

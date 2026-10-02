@@ -34,6 +34,59 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
         self.assertLess(current_plan, first_write)
         self.assertIn("[Parameter(Mandatory = $true)] $DesiredUserscript", invoke)
 
+    def test_document_exception_repair_verifies_its_rollback(self) -> None:
+        repair = self.source[
+            self.source.index("function Disable-AlgumonDocumentWideExceptions"):
+            self.source.index("function Enable-AlgumonDocumentWideExceptions")
+        ]
+        self.assertIn("Get-EnabledAlgumonDocumentWideExceptions -Client $Client", repair)
+        self.assertIn("Test-ExactStringMultiset -Left $before.Rules", repair)
+        self.assertIn("rollback did not restore every exception", repair)
+
+    def test_algumon_document_exemption_enables_only_existing_exact_delta(self) -> None:
+        exemption = self.source[
+            self.source.index("function Enable-AlgumonDocumentWideExceptions"):
+            self.source.index("function Get-InspectionReport")
+        ]
+        self.assertIn("$delta = @($before.DisabledRules)", exemption)
+        self.assertIn("$Client.EnableFilterRules(", exemption)
+        self.assertIn("$Client.DisableFilterRules(", exemption)
+        self.assertIn(
+            "Test-ExactStringMultiset `\n"
+            "                -Left $before.CandidateRules -Right $after.CandidateRules",
+            exemption,
+        )
+        self.assertIn(
+            "Algumon exemption rollback did not restore every exception state",
+            exemption,
+        )
+        validate_set = self.source[
+            self.source.index("[ValidateSet('inspect'"):
+            self.source.index("[string] $Command")
+        ]
+        self.assertIn("'exempt-algumon-web-filtering'", validate_set)
+
+    def test_algumon_policy_refresh_keeps_prior_subscription_until_shadow_is_verified(self) -> None:
+        prepare = self.source[
+            self.source.index("function Prepare-AlgumonAdDeliveryPolicy"):
+            self.source.index("function Test-AlgumonDocumentWideException")
+        ]
+        install = self.source[
+            self.source.index("function Install-AlgumonAdDeliveryPolicy"):
+            self.source.index("function Test-AlgumonDocumentWideException")
+        ]
+        self.assertIn("Get-AlgumonAdDeliverySubscriptionUrl", prepare)
+        self.assertIn("hdf-policy-version", prepare)
+        self.assertIn("SubscriptionUrl = $null", self.source)
+        self.assertIn("Assert-AlgumonAdDeliveryPolicyTargetInstalled", install)
+        self.assertIn("foreach ($previous in $priorState)", install)
+        self.assertLess(
+            install.index("$Client.InstallCustomFilter"),
+            install.index("foreach ($previous in $priorState)"),
+        )
+        self.assertNotIn("RemoveFilterSubscription(\n                    $before", install)
+        self.assertIn("$created -and $currentTarget.Count -eq 1", install)
+
     def test_deploy_order_is_backup_userscript_then_filter_inventory_proof(self) -> None:
         deploy = self.source[self.source.index("        'deploy' {") :]
         backup = deploy.index("New-StateBackup")
@@ -50,9 +103,19 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
             self.assertNotIn(forbidden, deploy)
 
     def test_user_filter_migration_is_disable_only_and_transactional(self) -> None:
+        migration = self.source[
+            self.source.index("function Invoke-LegacyMigration") :
+            self.source.index("function Assert-Sha256Value")
+        ]
+        migrate_command = self.source[
+            self.source.index("        'migrate-legacy' {") :
+            self.source.index("        'install-filter' {")
+        ]
+        for token in ("AddUserFilterRules", "RemoveUserFilterRules"):
+            with self.subTest(token=token):
+                self.assertNotIn(token, migration)
+                self.assertNotIn(token, migrate_command)
         forbidden = (
-            "AddUserFilterRules",
-            "RemoveUserFilterRules",
             "Stop-Service",
             "Stop-Process",
             "StopProtection",
@@ -66,6 +129,51 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
         self.assertIn("protected_ordered_sha256", self.source)
         self.assertIn("Test-ExactStringSequence", self.source)
         self.assertIn("Test-ExactStringMultiset", self.source)
+
+    def test_algumon_dns_exception_is_an_exact_transactional_delta(self) -> None:
+        validate_set = self.source[
+            self.source.index("[ValidateSet('inspect'") :
+            self.source.index("[string] $Command")
+        ]
+        self.assertIn("'exempt-algumon-ad-dns'", validate_set)
+        self.assertIn("'@@||doubleclick.net^'", self.source)
+        self.assertIn("'@@||googlesyndication.com^'", self.source)
+
+        mutation = self.source[
+            self.source.index("function Enable-AlgumonAdDnsExceptions") :
+            self.source.index("function Set-DnsFilteringState")
+        ]
+        for token in (
+            "Get-AlgumonAdDnsExceptionState -Client $Client",
+            "$Client.AddUserFilterRules(",
+            "$Client.EnableFilterRules(",
+            "$Client.RemoveUserFilterRules(",
+            "$Client.DisableFilterRules(",
+            "Test-ExactStringMultiset -Left $expectedRules -Right $after.Rules",
+            "DNS exception rollback did not restore the complete prior rule state",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, mutation)
+        self.assertLess(
+            mutation.index("$Client.AddUserFilterRules("),
+            mutation.index("$after = Get-AlgumonAdDnsExceptionState"),
+        )
+
+        command = self.source[
+            self.source.index("        'exempt-algumon-ad-dns' {") :
+            self.source.index("        'install-algumon-ads-policy' {")
+        ]
+        for token in (
+            "Assert-MutationAuthorized",
+            "if (-not $dnsFiltering.Enabled)",
+            "Enable-AlgumonAdDnsExceptions -Client $client",
+            "dns_filtering_enabled = $true",
+            "other_dns_user_rules_preserved = $true",
+            "dns_scope = 'global-host-resolution'",
+            "adguard_configuration_changed = $false",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, command)
 
     def test_every_explicit_disconnect_keeps_service_running(self) -> None:
         calls = re.findall(r"\.Disconnect\(([^)]*)\)", self.source)
@@ -175,10 +283,9 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
 
     def test_every_forward_mutation_substep_has_durable_intent(self) -> None:
         for event in (
-            "intent-userscript-update-code",
             "intent-userscript-install",
-            "intent-userscript-reclassification-remove",
-            "intent-userscript-reclassification-restore-gm",
+            "intent-userscript-replacement-remove",
+            "intent-userscript-replacement-restore-gm",
             "intent-userscript-enable",
             "intent-legacy-disable-rule",
             "intent-filter-install",
@@ -193,7 +300,8 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
         ]
         self.assertIn("UpdateUserscriptGmProperties", forward)
         self.assertIn("if ($replacementRequired)", forward)
-        self.assertNotIn("intent-userscript-update-gm", forward)
+        self.assertIn("Test-UserscriptEntryReplacementRequired", forward)
+        self.assertNotIn("UpdateUserscriptCode", forward)
 
     def test_userscript_verification_exposes_protected_filter_state_hashes(self) -> None:
         for token in (
@@ -207,6 +315,72 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
         ):
             with self.subTest(token=token):
                 self.assertIn(token, self.source)
+
+    def test_disable_userscript_command_preserves_owned_state_and_fails_closed(self) -> None:
+        validate_set_start = self.source.index("[ValidateSet(")
+        validate_set = self.source[
+            validate_set_start : self.source.index("[string] $Command,", validate_set_start)
+        ]
+        self.assertIn("'disable-userscript'", validate_set)
+
+        standalone_commands = self.source[
+            self.source.index("$isStandaloneUserscriptCommand =") :
+            self.source.index("$isLegacyMigrationCommand =")
+        ]
+        self.assertNotIn("disable-userscript", standalone_commands)
+
+        mutation = self.source[
+            self.source.index("function Disable-TargetUserscriptSafely") :
+            self.source.index("function Assert-LegacyMigrationUserscriptUnchanged")
+        ]
+        for token in (
+            "Get-StableProtectedFilterStateEvidence -Client $Client",
+            "Get-UserscriptSnapshot -Client $Client",
+            "SetUserscriptStatus($UserscriptName, $false)",
+            "[string] $after.Code -cne [string] $before.Code",
+            "[string] $after.GmProperties -cne [string] $before.GmProperties",
+            "Test-UserscriptSnapshotExact -Left $after -Right $confirmed",
+            "Target userscript is not installed; refusing an ambiguous mutation",
+            "Userscript disable did not preserve the exact executable and saved-state identity",
+            "Userscript disable state did not converge on a second read",
+            "Userscript disable changed protected AdGuard filter state",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, mutation)
+        self.assertEqual(mutation.count("SetUserscriptStatus($UserscriptName, $false)"), 1)
+        self.assertLess(
+            mutation.index("$protectedBefore ="),
+            mutation.index("SetUserscriptStatus($UserscriptName, $false)"),
+        )
+        self.assertLess(
+            mutation.index("SetUserscriptStatus($UserscriptName, $false)"),
+            mutation.index("$protectedAfter ="),
+        )
+
+    def test_disable_userscript_what_if_is_an_explicit_zero_write_plan(self) -> None:
+        command = self.source[
+            self.source.index("        'disable-userscript' {") :
+            self.source.index("        'csp-probe-inspect' {")
+        ]
+        for token in (
+            "Assert-MutationAuthorized",
+            "Assert-GlobalProtection -Client $client",
+            "$before = Get-UserscriptSnapshot -Client $client",
+            "if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess(",
+            "Disable-TargetUserscriptSafely -Client $client",
+            "what_if = $true",
+            "installed = [bool] $before.Exists",
+            "current_enabled = if ($before.Exists)",
+            "adguard_configuration_changed = $false",
+        ):
+            with self.subTest(token=token):
+                self.assertIn(token, command)
+        self.assertEqual(command.count("Disable-TargetUserscriptSafely -Client $client"), 1)
+        self.assertLess(
+            command.index("if (-not $WhatIfPreference"),
+            command.index("Disable-TargetUserscriptSafely -Client $client"),
+        )
+        self.assertLess(command.index("} else {"), command.index("what_if = $true"))
 
     def test_adguard_cache_visibility_uses_bounded_exact_convergence(self) -> None:
         for token in (
@@ -305,7 +479,7 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
         ]
         self.assertIn("MetadataBlock = $metadata", source_parser)
         self.assertIn("FreshInstallGmProperties", source_parser)
-        self.assertIn("intent-userscript-reclassification-restore-gm", forward)
+        self.assertIn("intent-userscript-replacement-restore-gm", forward)
         self.assertIn("UpdateUserscriptGmProperties", forward)
         self.assertIn("UpdateUserscriptGmProperties", restore)
 
@@ -347,10 +521,10 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
             mutation.index("SetUserscriptStatus"),
         )
         for intent, write in (
-            ("intent-userscript-reclassification-remove", "RemoveUserscript"),
+            ("intent-userscript-replacement-remove", "RemoveUserscript"),
             ("intent-userscript-install", "InstallUserscriptFromMeta"),
             (
-                "intent-userscript-reclassification-restore-gm",
+                "intent-userscript-replacement-restore-gm",
                 "UpdateUserscriptGmProperties",
             ),
             ("intent-userscript-enable", "SetUserscriptStatus"),
@@ -359,8 +533,8 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
                 self.assertLess(mutation.index(intent), mutation.index(write))
         for token in (
             "Get-UserscriptMetaForSnapshotRestore",
-            "intent-rollback-userscript-reclassification-remove",
-            "intent-rollback-userscript-reclassification-install",
+            "intent-rollback-userscript-replacement-remove",
+            "intent-rollback-userscript-replacement-install",
             "Assert-UserscriptInstallReceipt",
             "Assert-UserscriptSnapshotConverged",
         ):
@@ -368,11 +542,11 @@ class AdGuardWindowsCliContractTests(unittest.TestCase):
                 self.assertIn(token, restore)
         for intent, write in (
             (
-                "intent-rollback-userscript-reclassification-remove",
+                "intent-rollback-userscript-replacement-remove",
                 "RemoveUserscript",
             ),
             (
-                "intent-rollback-userscript-reclassification-install",
+                "intent-rollback-userscript-replacement-install",
                 "InstallUserscriptFromMeta",
             ),
             ("intent-rollback-userscript-gm", "UpdateUserscriptGmProperties"),

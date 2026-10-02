@@ -3,7 +3,7 @@
   "metadata": {
     "title": "AdGuard Hotdeal Focus",
     "description": "Shows only the hot-deal title, purchase information, article body, and comments.",
-    "version": "0.6.4",
+    "version": "0.6.91",
     "expires_hours": 12,
     "license": "MIT",
     "rollback_of": null
@@ -56,7 +56,7 @@
             ]
           },
           "role_projection": {
-            "title": { "mode": "seeded-shallow" },
+            "title": { "mode": "metadata-shallow" },
             "body": { "mode": "atomic-boundary", "ignored": [] },
             "product": {
               "mode": "absent",
@@ -145,7 +145,7 @@
             ]
           },
           "role_projection": {
-            "title": { "mode": "seeded-shallow" },
+            "title": { "mode": "metadata-shallow" },
             "body": { "mode": "atomic-boundary", "ignored": [] },
             "product": {
               "mode": "atomic-boundary",
@@ -168,7 +168,10 @@
             ],
             "controls": [
               "#comment_list_area .comment_more",
-              "#comment_list_area .pagination"
+              "#comment_list_area .pagination",
+              "#quote > .cmt-more-btn-pc",
+              "#quote > #comment_total_btn_area",
+              "#quote > #comment_paging_area"
             ],
             "ignored": [],
             "allow_empty": true
@@ -226,7 +229,7 @@
             ]
           },
           "role_projection": {
-            "title": { "mode": "seeded-shallow" },
+            "title": { "mode": "metadata-shallow" },
             "body": { "mode": "atomic-boundary", "ignored": [] },
             "product": {
               "mode": "atomic-boundary",
@@ -279,14 +282,16 @@
           "ancestor_markers": [
             ".category_text",
             ".subject_inner_text",
-            ".source_url.box_line_with_shadow",
+            ".source_url",
             ".view_content",
-            ".comment_view.normal"
+            ".comment_view.normal",
+            "#cmt.comment_wrapper"
           ],
           "preserve_deep": [
-            ".source_url.box_line_with_shadow",
+            ".source_url",
             ".view_content",
-            ".comment_view.normal"
+            ".comment_view.normal",
+            "#cmt.comment_wrapper"
           ],
           "preserve_shallow": [
             ".category_text",
@@ -305,34 +310,42 @@
               ".view_content"
             ],
             "comments": [
-              ".comment_view.normal"
+              ".comment_view.normal",
+              "#cmt.comment_wrapper"
             ]
           },
           "role_projection": {
-            "title": { "mode": "seeded-shallow" },
+            "title": { "mode": "metadata-shallow" },
             "body": { "mode": "atomic-boundary", "ignored": [] },
             "product": {
               "mode": "atomic-boundary",
               "cardinality": "optional",
               "order": "after-body",
-              "selectors": [".source_url.box_line_with_shadow"],
+              "selectors": [".source_url"],
               "ignored": []
             },
             "comments": { "mode": "classified-children" }
           },
           "comment_contract": {
             "mount": [
-              ".comment_view.normal"
+              ".comment_view.normal",
+              "#cmt.comment_wrapper"
             ],
             "items": [
-              ".comment_view.normal > table.comment_table > tbody > tr.comment_element"
+              ".comment_view.normal > table.comment_table > tbody > tr.comment_element:not(:has(> td.comment > .nbp_container))"
             ],
             "controls": [
               ".comment_view.normal .comment_more",
               ".comment_view.normal .pagination",
               ".comment_view.normal .btn_reply"
             ],
-            "ignored": [],
+            "ignored": [
+              "#cmt.comment_wrapper > input",
+              "#cmt.comment_wrapper > .comment_count_wrapper",
+              "#cmt.comment_wrapper > .comment_disable",
+              "#cmt.comment_wrapper > br",
+              ".comment_view.normal > table.comment_table > tbody > tr.comment_element:has(> td.comment > .nbp_container)"
+            ],
             "allow_empty": true
           }
         }
@@ -358,6 +371,7 @@
           ],
           "ancestor_markers": [
             "h1.title",
+            "h1.v2-view-head__title",
             ".market-info-view-table",
             ".view-content > .note-editor",
             "#ajax-reply-list"
@@ -368,7 +382,8 @@
             "#ajax-reply-list"
           ],
           "preserve_shallow": [
-            "h1.title"
+            "h1.title",
+            "h1.v2-view-head__title"
           ],
           "required_roles": [
             "title",
@@ -378,7 +393,8 @@
           ],
           "required_groups": {
             "title": [
-              "h1.title"
+              "h1.title",
+              "h1.v2-view-head__title"
             ],
             "body": [
               ".view-content > .note-editor"
@@ -391,14 +407,14 @@
             ]
           },
           "role_projection": {
-            "title": { "mode": "seeded-shallow" },
+            "title": { "mode": "metadata-shallow" },
             "body": { "mode": "atomic-boundary", "ignored": [] },
             "product": {
               "mode": "atomic-boundary",
               "cardinality": "required",
               "order": "before-body",
               "selectors": [".market-info-view-table"],
-              "ignored": []
+              "ignored": [".market-info-view-table th .tooltip", ".market-info-view-table th .common-tooltip", ".market-info-view-table th img[alt='info']", ".market-info-view-table td img.brand-logo"]
             },
             "comments": { "mode": "classified-children" }
           },
@@ -407,7 +423,8 @@
               "#ajax-reply-list"
             ],
             "items": [
-              "#ajax-reply-list > li[id^='comment']"
+              "#ajax-reply-list > li[id^='comment']",
+              "#ajax-reply-list > ul.common-reply-list > li[id^='comment']"
             ],
             "controls": [
               "#ajax-reply-list .more-btn",
@@ -436,6 +453,7 @@
           ],
           "ancestor_markers": [
             ".content.market-info-view-wrap .view-style01 .tit .ment > h1",
+            "h1.v2-view-head__title",
             ".market-info-view-table",
             ".view-content > .note-editor",
             "#ajax-reply-list"
@@ -446,7 +464,8 @@
             "#ajax-reply-list"
           ],
           "preserve_shallow": [
-            ".content.market-info-view-wrap .view-style01 .tit .ment > h1"
+            ".content.market-info-view-wrap .view-style01 .tit .ment > h1",
+            "h1.v2-view-head__title"
           ],
           "required_roles": [
             "title",
@@ -456,7 +475,8 @@
           ],
           "required_groups": {
             "title": [
-              ".content.market-info-view-wrap .view-style01 .tit .ment > h1"
+              ".content.market-info-view-wrap .view-style01 .tit .ment > h1",
+              "h1.v2-view-head__title"
             ],
             "body": [
               ".view-content > .note-editor"
@@ -469,14 +489,14 @@
             ]
           },
           "role_projection": {
-            "title": { "mode": "seeded-shallow" },
+            "title": { "mode": "metadata-shallow" },
             "body": { "mode": "atomic-boundary", "ignored": [] },
             "product": {
               "mode": "atomic-boundary",
               "cardinality": "required",
               "order": "before-body",
               "selectors": [".market-info-view-table"],
-              "ignored": []
+              "ignored": [".market-info-view-table th .tooltip", ".market-info-view-table th .common-tooltip", ".market-info-view-table th img[alt='info']", ".market-info-view-table td img.brand-logo"]
             },
             "comments": { "mode": "classified-children" }
           },
@@ -485,7 +505,8 @@
               "#ajax-reply-list"
             ],
             "items": [
-              "#ajax-reply-list > .commnet-main[id^='comment']"
+              "#ajax-reply-list > .commnet-main[id^='comment']",
+              "#ajax-reply-list > ul.common-reply-list > li[id^='comment']"
             ],
             "controls": [
               "#ajax-reply-list .more-btn",
@@ -528,6 +549,7 @@
             "#C_",
             "#C_ > #comment",
             "#C_ > ._bd > ._comment[id^='comment_']",
+            "#C_ > ._bd > .cmt-overlay-background[data-cmt-overlay]",
             "#C_ > ._bd .pagination",
             "#C_ > ._bd .more",
             "#C_ > ._bd .reply"
@@ -537,6 +559,7 @@
             "#D_ article > .rhymix_content",
             "#C_ > #comment",
             "#C_ > ._bd > ._comment[id^='comment_']",
+            "#C_ > ._bd > .cmt-overlay-background[data-cmt-overlay]",
             "#C_ > ._bd .pagination",
             "#C_ > ._bd .more",
             "#C_ > ._bd .reply"
@@ -566,14 +589,14 @@
             ]
           },
           "role_projection": {
-            "title": { "mode": "seeded-shallow" },
+            "title": { "mode": "metadata-shallow" },
             "body": { "mode": "atomic-boundary", "ignored": [] },
             "product": {
               "mode": "atomic-boundary",
               "cardinality": "required",
               "order": "before-body",
               "selectors": ["#D_ .et_vars"],
-              "ignored": []
+              "ignored": ["#D_ .et_vars > caption", "#D_ .et_vars .tooltip"]
             },
             "comments": { "mode": "classified-children" }
           },
@@ -586,6 +609,7 @@
             ],
             "controls": [
               "#C_ > #comment",
+              "#C_ > ._bd > .cmt-overlay-background[data-cmt-overlay]",
               "#C_ > ._bd .pagination",
               "#C_ > ._bd .more",
               "#C_ > ._bd .reply"
@@ -651,14 +675,14 @@
             ]
           },
           "role_projection": {
-            "title": { "mode": "seeded-shallow" },
+            "title": { "mode": "metadata-shallow" },
             "body": { "mode": "atomic-boundary", "ignored": [] },
             "product": {
               "mode": "atomic-boundary",
               "cardinality": "required",
               "order": "before-body",
               "selectors": [".app-article-container > .app-board-extra-value"],
-              "ignored": []
+              "ignored": [".app-board-extra-value th .iconoir-info-circle"]
             },
             "comments": { "mode": "classified-children" }
           },
@@ -733,7 +757,7 @@
             ]
           },
           "role_projection": {
-            "title": { "mode": "seeded-shallow" },
+            "title": { "mode": "metadata-shallow" },
             "body": {
               "mode": "atomic-boundary",
               "ignored": [".article-body > .ad"]

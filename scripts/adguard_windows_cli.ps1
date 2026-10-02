@@ -67,7 +67,11 @@ param(
     [Parameter(Mandatory = $true, Position = 0)]
     [ValidateSet('inspect', 'backup', 'restore-backup', 'install-userscript',
         'migrate-legacy', 'install-filter', 'deploy', 'verify',
-        'csp-probe-inspect', 'csp-probe-install', 'csp-probe-restore')]
+        'csp-probe-inspect', 'csp-probe-install', 'csp-probe-restore',
+        'dns-disable', 'dns-enable', 'select-nextdns', 'install-algumon-ads-policy',
+        'exempt-algumon-ad-dns',
+        'enable-algumon-web-filtering', 'exempt-algumon-web-filtering',
+        'disable-userscript')]
     [string] $Command,
 
     [string] $UserscriptSource,
@@ -92,6 +96,9 @@ param(
 
     [string] $BackupPath,
 
+    [ValidatePattern('^[0-9a-f]{6}$')]
+    [string] $NextDnsProfileId,
+
     [string] $ReferenceUserFilterSnapshot,
 
     [switch] $ApproveExclusiveTargetMigration,
@@ -107,7 +114,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$script:ToolVersion = '0.6.4'
+$script:ToolVersion = '0.6.6'
 $script:MaximumSourceBytes = 8MB
 $script:AdGuardInstallDirectory = $null
 $script:AdGuardProcess = $null
@@ -116,6 +123,7 @@ $script:ApiClientType = $null
 $script:HubType = $null
 $script:FilterSubscriptionType = $null
 $script:StandardFilterType = $null
+$script:DnsFilterType = $null
 $script:TemporaryPaths = New-Object 'System.Collections.Generic.List[string]'
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
 $script:LastConflictReport = $null
@@ -125,12 +133,43 @@ $script:HistoricalSnapshotRules = @()
 $script:RecoveryBackupPath = $null
 $script:RecoveryCommand = $null
 $script:ReaderGateProtocolVersion = 2
-$script:ReaderGateGrants = @('GM_addElement', 'window.onurlchange')
+$script:ReaderGateGrants = @(
+    'GM_addElement', 'window.onurlchange'
+)
+$script:ReaderGateMatches = @(
+    'https://*.clien.net/*',
+    'https://*.ppomppu.co.kr/*',
+    'https://*.ruliweb.com/*',
+    'https://*.quasarzone.com/*',
+    'https://*.eomisae.co.kr/*',
+    'https://*.zod.kr/*',
+    'https://*.arca.live/*'
+)
 $script:ReleaseUserscriptUrl = ('https://heelee912.github.io/' +
     'adguard-hotdeal-focus/hotdeal-focus.user.js')
 $script:MarkerGateArtifactVersion = '2.0.2'
 $script:MarkerGateSubscriptionUrl = ('https://github.com/heelee912/' +
     'adguard-hotdeal-focus/releases/download/gate-v2.0.2/filter.txt')
+$script:AlgumonAdPolicyUrl = ('https://raw.githubusercontent.com/heelee912/' +
+    'adguard-hotdeal-focus/main/algumon-ads-webfilter.txt')
+$script:AlgumonAdPolicyName = 'Algumon scoped Google ad delivery exceptions'
+$script:AlgumonAdPolicyHosts = @(
+    'safeframe.googlesyndication.com',
+    'pagead2.googlesyndication.com',
+    'tpc.googlesyndication.com',
+    'securepubads.g.doubleclick.net',
+    'pubads.g.doubleclick.net',
+    'googleads.g.doubleclick.net',
+    'googletagservices.com',
+    'googleadservices.com',
+    'beacons.gvt2.com'
+)
+$script:AlgumonAdDnsExceptionRules = @(
+    '@@||doubleclick.net^',
+    '@@||googlesyndication.com^',
+    '@@||api2.amplitude.com^',
+    '@@||sr-client-cfg.amplitude.com^'
+)
 $script:CspProbeUserscriptName = 'AdGuard Hotdeal Focus CSP Probe'
 $script:CspProbeUserscriptVersion = '1.2.0'
 $script:CspProbeFilterName = 'AdGuard Hotdeal Focus CSP Probe Sentinel'
@@ -1258,7 +1297,15 @@ function Get-UserscriptSource {
     $runAtDirectives = @([regex]::Matches(
             $metadata, '(?m)^//\s+@run-at\s+(?<value>\S+)\s*$'))
     $grantDirectives = @([regex]::Matches(
-            $metadata, '(?m)^//\s+@grant\s+(?<value>\S+)\s*$'))
+            $metadata, '(?m)^//[ \t]+@grant[ \t]+(?<value>\S+)[ \t]*$'))
+    $grantDirectiveLines = @([regex]::Matches(
+            $metadata, '(?m)^//[ \t]+@grant\b[^\r\n]*$'))
+    $matchDirectives = @([regex]::Matches(
+            $metadata, '(?m)^//[ \t]+@match[ \t]+(?<value>\S+)[ \t]*$'))
+    $matchDirectiveLines = @([regex]::Matches(
+            $metadata, '(?m)^//[ \t]+@match\b[^\r\n]*$'))
+    $includeDirectiveLines = @([regex]::Matches(
+            $metadata, '(?m)^//[ \t]+@include\b[^\r\n]*$'))
     $downloadUrlDirectives = @([regex]::Matches(
             $metadata, '(?m)^//\s+@downloadURL\s+(?<value>\S+)\s*$'))
     $updateUrlDirectives = @([regex]::Matches(
@@ -1267,23 +1314,24 @@ function Get-UserscriptSource {
             $metadata, '(?m)^//\s+@noframes\s*$'))
     if ($runAtDirectives.Count -ne 1 -or
         $runAtDirectives[0].Groups['value'].Value -cne 'document-start' -or
+        $matchDirectiveLines.Count -ne $matchDirectives.Count -or
+        -not (Test-ExactStringSequence `
+            -Left @($matchDirectives | ForEach-Object { $_.Groups['value'].Value }) `
+            -Right $script:ReaderGateMatches) -or
+        $includeDirectiveLines.Count -ne 0 -or
+        $grantDirectiveLines.Count -ne $grantDirectives.Count -or
         -not (Test-ExactStringSequence `
             -Left @($grantDirectives | ForEach-Object { $_.Groups['value'].Value }) `
             -Right $script:ReaderGateGrants) -or
         $noframesDirectives.Count -ne 1) {
         throw ("Reader Gate v2 must declare exactly one document-start, one @noframes, " +
-            "and the exact ordered grants GM_addElement and window.onurlchange")
+            "the seven ordered target-domain matches, no @include, and the exact " +
+            "ordered grants for the Reader Gate")
     }
     if ($downloadUrlDirectives.Count -ne 1 -or $updateUrlDirectives.Count -ne 1 -or
         $downloadUrlDirectives[0].Groups['value'].Value -cne $script:ReleaseUserscriptUrl -or
         $updateUrlDirectives[0].Groups['value'].Value -cne $script:ReleaseUserscriptUrl) {
         throw "Reader Gate v2 update metadata must use the exact release Userscript URL"
-    }
-    foreach ($hostToken in @('algumon.com', 'clien.net', 'ppomppu.co.kr', 'ruliweb.com',
-            'quasarzone.com', 'eomisae.co.kr', 'zod.kr', 'arca.live')) {
-        if (-not $metadata.Contains($hostToken)) {
-            throw "Userscript is missing required match scope: $hostToken"
-        }
     }
     foreach ($marker in @('data-hotdeal-focus-ready', 'data-hotdeal-focus-keep',
             'data-hotdeal-focus-protocol', 'data-hotdeal-focus-lock',
@@ -1343,6 +1391,7 @@ function Get-UserscriptSource {
         Name = $name
         Version = $version
         ProtocolVersion = $script:ReaderGateProtocolVersion
+        Matches = @($script:ReaderGateMatches)
         Grants = @($script:ReaderGateGrants)
         InstallUrl = $script:ReleaseUserscriptUrl
         Sha256 = Get-CanonicalTextSha256 -Text $text
@@ -1628,6 +1677,8 @@ function Assert-ReleaseInputsMatchManifest {
             $DesiredUserscript.ProtocolVersion -ne $ManifestContract.ProtocolVersion -or
             $DesiredUserscript.Bytes.Length -ne $ManifestContract.UserscriptBytes -or
             $DesiredUserscript.InstallUrl -cne $ManifestContract.InstallUrl -or
+            -not (Test-ExactStringSequence -Left $DesiredUserscript.Matches `
+                -Right $script:ReaderGateMatches) -or
             -not (Test-ExactStringSequence -Left $DesiredUserscript.Grants `
                 -Right $script:ReaderGateGrants)) {
             throw "Userscript source or expected hash differs from the release manifest"
@@ -2019,6 +2070,7 @@ function Initialize-AdGuardAssemblies {
     $script:FilterSubscriptionType = Get-TypeFromLoadedAssemblies -FullName (
         'Adguard.Global.Model.AdBlocker.FilterSubscriptionType')
     $script:StandardFilterType = [Enum]::Parse($script:FilterSubscriptionType, 'Standard')
+    $script:DnsFilterType = [Enum]::Parse($script:FilterSubscriptionType, 'Dns')
 
     foreach ($methodName in @('Connect', 'Disconnect', 'GetApplicationState',
             'GetProtectionSettings', 'GetInstalledFilterSubscriptions', 'GetAllFilterSubscriptions',
@@ -2027,6 +2079,7 @@ function Initialize-AdGuardAssemblies {
             'UpdateUserscriptCode', 'UpdateUserscriptGmProperties', 'SetUserscriptStatus',
             'RemoveUserscript', 'GetSubscriptionsMetaSet', 'InstallCustomFilter',
             'UpdateFilterSubscriptionState', 'RemoveFilterSubscription',
+            'AddUserFilterRules', 'RemoveUserFilterRules',
             'DisableFilterRules', 'EnableFilterRules')) {
         if (-not $script:ApiClientType.GetMethod($methodName)) {
             throw "Installed AdGuard IPC contract is missing method: $methodName"
@@ -3001,6 +3054,23 @@ function Get-ExpectedUserscriptPostState {
     }
 }
 
+function Test-UserscriptEntryReplacementRequired {
+    param(
+        [Parameter(Mandatory = $true)] $Snapshot,
+        [Parameter(Mandatory = $true)] $Desired
+    )
+    if (-not $Snapshot.Exists) { return $false }
+    if ([bool] $Snapshot.Info.IsCustom -ne [bool] $Desired.Meta.IsCustom -or
+        [bool] $Snapshot.Info.IsStyle -ne [bool] $Desired.Meta.IsStyle) {
+        return $true
+    }
+    # AdGuard 7.22 re-parses UpdateUserscriptCode input as a local/manual
+    # source and drops IsCustom. Reinstalling a changed executable entry is
+    # the only API sequence that preserves its executable classification.
+    return (Get-CanonicalTextSha256 -Text ([string] $Snapshot.Code)) -cne
+        (Get-CanonicalTextSha256 -Text ([string] $Desired.Meta.Content))
+}
+
 function Initialize-TransactionJournal {
     param(
         [Parameter(Mandatory = $true)][string] $Directory,
@@ -3030,12 +3100,8 @@ function Initialize-TransactionJournal {
             enabled = $true
             is_custom = [bool] $expectedPostState.IsCustom
             is_style = [bool] $expectedPostState.IsStyle
-            replacement_required = [bool] (
-                $BeforeUserscriptSnapshot.Exists -and
-                ([bool] $BeforeUserscriptSnapshot.Info.IsCustom -ne
-                    [bool] $expectedPostState.IsCustom -or
-                    [bool] $BeforeUserscriptSnapshot.Info.IsStyle -ne
-                    [bool] $expectedPostState.IsStyle))
+            replacement_required = [bool] (Test-UserscriptEntryReplacementRequired `
+                    -Snapshot $BeforeUserscriptSnapshot -Desired $DesiredUserscript)
         }
     }
     $filterAfter = $null
@@ -3463,6 +3529,50 @@ function Test-UserscriptSnapshotExact {
         [string] $Left.GmProperties -ceq [string] $Right.GmProperties
 }
 
+function Disable-TargetUserscriptSafely {
+    param([Parameter(Mandatory = $true)] $Client)
+
+    $protectedBefore = Get-StableProtectedFilterStateEvidence -Client $Client
+    $before = Get-UserscriptSnapshot -Client $Client
+    if (-not $before.Exists) {
+        throw "Target userscript is not installed; refusing an ambiguous mutation"
+    }
+    if (-not [bool] $before.Info.IsEnabled) {
+        return [ordered]@{
+            Changed = $false
+            Before = $before
+            After = $before
+        }
+    }
+
+    $Client.SetUserscriptStatus($UserscriptName, $false)
+    $after = Get-UserscriptSnapshot -Client $Client
+    $confirmed = Get-UserscriptSnapshot -Client $Client
+    $protectedAfter = Get-StableProtectedFilterStateEvidence -Client $Client
+
+    if (-not $after.Exists -or [bool] $after.Info.IsEnabled -or
+        [string] $after.Info.Name -cne [string] $before.Info.Name -or
+        [string] $after.Info.Version -cne [string] $before.Info.Version -or
+        [bool] $after.Info.IsCustom -ne [bool] $before.Info.IsCustom -or
+        [bool] $after.Info.IsStyle -ne [bool] $before.Info.IsStyle -or
+        [string] $after.Code -cne [string] $before.Code -or
+        [string] $after.GmProperties -cne [string] $before.GmProperties) {
+        throw "Userscript disable did not preserve the exact executable and saved-state identity"
+    }
+    if (-not (Test-UserscriptSnapshotExact -Left $after -Right $confirmed)) {
+        throw "Userscript disable state did not converge on a second read"
+    }
+    if ([string] $protectedBefore.Evidence.StateSha256 -cne
+        [string] $protectedAfter.Evidence.StateSha256) {
+        throw "Userscript disable changed protected AdGuard filter state"
+    }
+    return [ordered]@{
+        Changed = $true
+        Before = $before
+        After = $after
+    }
+}
+
 function Assert-LegacyMigrationUserscriptUnchanged {
     param(
         [Parameter(Mandatory = $true)] $Client,
@@ -3571,14 +3681,16 @@ function Assert-UserscriptRestorePreconditions {
 
     $replacementRequired = $BackupSnapshot.Exists -and
         ([bool] $BackupSnapshot.Info.IsCustom -ne [bool] $after.is_custom -or
-            [bool] $BackupSnapshot.Info.IsStyle -ne [bool] $after.is_style)
+            [bool] $BackupSnapshot.Info.IsStyle -ne [bool] $after.is_style -or
+            (Get-CanonicalTextSha256 -Text ([string] $BackupSnapshot.Code)) -cne
+                [string] $after.code_sha256)
     if ([bool] $after.replacement_required -ne [bool] $replacementRequired) {
         throw "Transaction userscript replacement classification is inconsistent"
     }
 
-    # A classification replacement starts with RemoveUserscript. Absence is an
-    # authorized durable-intent prefix only when the bound before/after classes
-    # prove that the transaction had to replace the existing entry.
+    # An entry replacement starts with RemoveUserscript. Absence is an
+    # authorized durable-intent prefix only when the bound before/after state
+    # proves that the transaction had to replace the existing entry.
     if (-not $Current.Exists) {
         if ($replacementRequired) { return $true }
         throw "Current userscript existence is not an authorized transaction prefix"
@@ -3598,12 +3710,15 @@ function Assert-UserscriptRestorePreconditions {
         [string] $Current.Info.Name -ceq [string] $BackupSnapshot.Info.Name -and
         [bool] $Current.Info.IsCustom -eq [bool] $BackupSnapshot.Info.IsCustom -and
         [bool] $Current.Info.IsStyle -eq [bool] $BackupSnapshot.Info.IsStyle
-    if ($replacementRequired -and $identityMatchesBefore) {
-        # A restore of a classification replacement is itself resumable. After
-        # reinstalling the original class, GM values and enabled status may
+    $beforeCodeSha = Get-CanonicalTextSha256 -Text ([string] $BackupSnapshot.Code)
+    $isOriginalEntry = $identityMatchesBefore -and
+        $currentCodeSha -ceq $beforeCodeSha -and
+        [string] $Current.Info.Version -ceq [string] $BackupSnapshot.Info.Version
+    if ($replacementRequired -and $isOriginalEntry) {
+        # A restore of an entry replacement is itself resumable. After
+        # reinstalling the original entry, GM values and enabled status may
         # still be at their fresh-install values; the atomic install may expose
         # either enabled value before the explicit snapshot-status write.
-        $beforeCodeSha = Get-CanonicalTextSha256 -Text ([string] $BackupSnapshot.Code)
         $beforeGmSha = Get-CanonicalTextSha256 `
             -Text ([string] $BackupSnapshot.GmProperties)
         $isRollbackInstallPrefix = $currentCodeSha -ceq $beforeCodeSha -and
@@ -3957,6 +4072,17 @@ function Prepare-UserscriptMeta {
     if ([bool] $Source.Meta.IsStyle) {
         throw "AdGuard parsed the authenticated userscript as a style extension"
     }
+    $parsedMatches = @($Source.Meta.Match | ForEach-Object { [string] $_ })
+    $parsedIncludes = @($Source.Meta.Include | ForEach-Object { [string] $_ })
+    $parsedGrants = @($Source.Meta.Grant | ForEach-Object { [string] $_ })
+    if (-not (Test-ExactStringSequence -Left $parsedMatches `
+                -Right $script:ReaderGateMatches) -or
+        $parsedIncludes.Count -ne 0 -or
+        -not (Test-ExactStringSequence -Left $parsedGrants `
+                -Right $script:ReaderGateGrants)) {
+        throw ("AdGuard parsed userscript scope or privileges outside the exact " +
+            "Reader Gate metadata contract")
+    }
     if ((Get-CanonicalTextSha256 -Text ([string] $Source.Meta.Content)) -cne
             (Get-CanonicalTextSha256 -Text ([string] $Source.Text))) {
         throw "AdGuard parsed userscript content that differs from the authenticated source"
@@ -4222,19 +4348,20 @@ function Invoke-UserscriptMutation {
     )
     Assert-UserscriptMutationPreconditions -Snapshot $Snapshot -Desired $Desired
     $expectedPostState = Get-ExpectedUserscriptPostState -Snapshot $Snapshot -Desired $Desired
-    $replacementRequired = $Snapshot.Exists -and
-        ([bool] $Snapshot.Info.IsCustom -ne [bool] $Desired.Meta.IsCustom -or
-            [bool] $Snapshot.Info.IsStyle -ne [bool] $Desired.Meta.IsStyle)
+    $replacementRequired = Test-UserscriptEntryReplacementRequired `
+        -Snapshot $Snapshot -Desired $Desired
 
     if ($replacementRequired) {
         if ($JournalDirectory) {
             Write-TransactionJournalEvent -Directory $JournalDirectory `
-                -Event 'intent-userscript-reclassification-remove' `
+                        -Event 'intent-userscript-replacement-remove' `
                 -Details ([ordered]@{
                         before_is_custom = [bool] $Snapshot.Info.IsCustom
                         before_is_style = [bool] $Snapshot.Info.IsStyle
                         after_is_custom = [bool] $Desired.Meta.IsCustom
                         after_is_style = [bool] $Desired.Meta.IsStyle
+                        code_changed = (Get-CanonicalTextSha256 -Text $Snapshot.Code) -cne
+                            (Get-CanonicalTextSha256 -Text $Desired.Meta.Content)
                         preserved_gm_properties_sha256 = `
                             [string] $expectedPostState.GmPropertiesSha256
                     })
@@ -4243,25 +4370,14 @@ function Invoke-UserscriptMutation {
         $absenceObservationCount = Assert-UserscriptAbsent -Client $Client
         if ($JournalDirectory) {
             Write-TransactionJournalEvent -Directory $JournalDirectory `
-                -Event 'userscript-reclassification-absence-verified' `
+                        -Event 'userscript-replacement-absence-verified' `
                 -Details ([ordered]@{
                         observation_count = [int] $absenceObservationCount
                     })
         }
     }
 
-    if ($Snapshot.Exists -and -not $replacementRequired) {
-        if ($JournalDirectory) {
-            Write-TransactionJournalEvent -Directory $JournalDirectory `
-                -Event 'intent-userscript-update-code' `
-                -Details ([ordered]@{
-                        code_sha256 = Get-CanonicalTextSha256 -Text $Desired.Meta.Content
-                        preserved_gm_properties_sha256 = `
-                            [string] $expectedPostState.GmPropertiesSha256
-                    })
-        }
-        [void] $Client.UpdateUserscriptCode($UserscriptName, $Desired.Meta.Content)
-    } else {
+    if (-not $Snapshot.Exists -or $replacementRequired) {
         if ($JournalDirectory) {
             Write-TransactionJournalEvent -Directory $JournalDirectory `
                 -Event 'intent-userscript-install' `
@@ -4291,10 +4407,10 @@ function Invoke-UserscriptMutation {
                     })
         }
     }
-    if ($replacementRequired) {
+    if ($Snapshot.Exists -and $replacementRequired) {
         if ($JournalDirectory) {
             Write-TransactionJournalEvent -Directory $JournalDirectory `
-                -Event 'intent-userscript-reclassification-restore-gm' `
+                        -Event 'intent-userscript-replacement-restore-gm' `
                 -Details ([ordered]@{
                         gm_properties_sha256 = `
                             [string] $expectedPostState.GmPropertiesSha256
@@ -4335,21 +4451,31 @@ function Restore-UserscriptSnapshot {
         if ($current.Count -gt 1) {
             throw "Cannot roll back a non-unique userscript"
         }
-        $classificationDiffers = $current.Count -eq 0 -or
+        $currentCode = if ($current.Count -eq 1) {
+            [string] $Client.GetUserscriptCode($UserscriptName, $true)
+        } else { '' }
+        $entryReplacementRequired = $current.Count -eq 0 -or
             [bool] $current[0].IsCustom -ne [bool] $Snapshot.Info.IsCustom -or
-            [bool] $current[0].IsStyle -ne [bool] $Snapshot.Info.IsStyle
-        if ($classificationDiffers) {
+            [bool] $current[0].IsStyle -ne [bool] $Snapshot.Info.IsStyle -or
+            ($current.Count -eq 1 -and
+                (Get-CanonicalTextSha256 -Text ([string] $Snapshot.Code)) -cne
+                    (Get-CanonicalTextSha256 -Text $currentCode))
+        if ($entryReplacementRequired) {
             # Parse and authenticate the backup before removing any current
-            # entry. Classification cannot be changed in place by AdGuard.
+            # entry. AdGuard 7.22 cannot preserve executable classification
+            # through UpdateUserscriptCode, so code restoration is also an
+            # entry replacement rather than an in-place update.
             $restoreMeta = Get-UserscriptMetaForSnapshotRestore `
                 -Client $Client -Snapshot $Snapshot
             if ($current.Count -eq 1) {
                 if ($JournalDirectory) {
                     Write-TransactionJournalEvent -Directory $JournalDirectory `
-                        -Event 'intent-rollback-userscript-reclassification-remove' `
+                        -Event 'intent-rollback-userscript-replacement-remove' `
                         -Details ([ordered]@{
                                 current_is_custom = [bool] $current[0].IsCustom
                                 restore_is_custom = [bool] $Snapshot.Info.IsCustom
+                                code_changed = (Get-CanonicalTextSha256 -Text $Snapshot.Code) -cne
+                                    (Get-CanonicalTextSha256 -Text $currentCode)
                             })
                 }
                 $Client.RemoveUserscript($UserscriptName)
@@ -4364,7 +4490,7 @@ function Restore-UserscriptSnapshot {
             }
             if ($JournalDirectory) {
                 Write-TransactionJournalEvent -Directory $JournalDirectory `
-                    -Event 'intent-rollback-userscript-reclassification-install' `
+                    -Event 'intent-rollback-userscript-replacement-install' `
                     -Details ([ordered]@{
                             version = [string] $Snapshot.Info.Version
                             is_custom = [bool] $Snapshot.Info.IsCustom
@@ -4404,8 +4530,9 @@ function Restore-UserscriptSnapshot {
             }
             $Client.SetUserscriptStatus($UserscriptName, [bool] $Snapshot.Info.IsEnabled)
         } else {
-            # Reverse the normal UpdateCode -> SetStatus forward order. GM_*
-            # values are restored independently before the original code.
+            # The entry code is already exact. Restore only the independent
+            # GM value-store and enabled state; calling UpdateUserscriptCode
+            # would reclassify this executable local userscript as noncustom.
             if ($JournalDirectory) {
                 Write-TransactionJournalEvent -Directory $JournalDirectory `
                     -Event 'intent-rollback-userscript-status' `
@@ -4424,14 +4551,6 @@ function Restore-UserscriptSnapshot {
                 $UserscriptName,
                 $Snapshot.GmProperties
             )
-            if ($JournalDirectory) {
-                Write-TransactionJournalEvent -Directory $JournalDirectory `
-                    -Event 'intent-rollback-userscript-code' `
-                    -Details ([ordered]@{
-                            code_sha256 = Get-CanonicalTextSha256 -Text $Snapshot.Code
-                        })
-            }
-            $Client.UpdateUserscriptCode($UserscriptName, $Snapshot.Code)
         }
     } elseif ($current.Count -eq 1) {
         if ($JournalDirectory) {
@@ -4820,6 +4939,649 @@ function Assert-GlobalProtection {
     return $protection
 }
 
+function Get-DnsFilteringState {
+    param([Parameter(Mandatory = $true)] $Client)
+    $settings = $Client.GetDnsSettings()
+    return [pscustomobject]@{
+        Enabled = [bool] $settings.IsEnabled
+        WifiExclusionsEnabled = [bool] $settings.ShouldDisableDnsByWifiExclusions
+        SelectedServerName = [string] $settings.SelectedServer.Name
+        SelectedServerType = [string] $settings.SelectedServer.ServerType
+        SelectedServerAddresses = @(
+            $settings.SelectedServer.Addresses | ForEach-Object { [string] $_ }
+        )
+    }
+}
+
+function Select-ExistingNextDnsServer {
+    param(
+        [Parameter(Mandatory = $true)] $Client,
+        [Parameter(Mandatory = $true)]
+        [ValidatePattern('^[0-9a-f]{6}$')][string] $ProfileId
+    )
+    $address = "https://dns.nextdns.io/$ProfileId"
+    $before = Get-DnsFilteringState -Client $Client
+    if (-not $before.Enabled) { throw 'DNS filtering must remain enabled' }
+    $servers = @($Client.GetDnsProviders() | ForEach-Object { $_.Servers } |
+        Where-Object {
+            [string] $_.ServerType -ceq 'DnsOverHttps' -and
+            @($_.Addresses).Count -eq 1 -and
+            [string] $_.Addresses[0] -ceq $address
+        })
+    if ($servers.Count -ne 1) { throw 'The existing exact NextDNS profile server was not unique' }
+    if (-not $Client.ValidateDnsServer($servers[0])) {
+        throw 'AdGuard rejected the existing NextDNS server'
+    }
+    if (@($before.SelectedServerAddresses).Count -eq 1 -and
+        $before.SelectedServerAddresses[0] -ceq $address -and
+        $before.SelectedServerType -ceq 'DnsOverHttps') {
+        return [pscustomobject]@{ Changed = $false; Before = $before; After = $before }
+    }
+    $settings = $Client.GetDnsSettings()
+    $originalServer = $settings.SelectedServer
+    try {
+        $settings.SelectedServer = $servers[0]
+        $Client.SaveDnsSettings($settings)
+        foreach ($read in 1..2) {
+            $after = Get-DnsFilteringState -Client $Client
+            if (-not $after.Enabled -or
+                $after.WifiExclusionsEnabled -ne $before.WifiExclusionsEnabled -or
+                $after.SelectedServerType -cne 'DnsOverHttps' -or
+                @($after.SelectedServerAddresses).Count -ne 1 -or
+                $after.SelectedServerAddresses[0] -cne $address) {
+                throw 'AdGuard did not persist the exact NextDNS selection with DNS enabled'
+            }
+        }
+        return [pscustomobject]@{ Changed = $true; Before = $before; After = $after }
+    }
+    catch {
+        $original = $_
+        try {
+            $settings.SelectedServer = $originalServer
+            $settings.IsEnabled = $before.Enabled
+            $settings.ShouldDisableDnsByWifiExclusions = $before.WifiExclusionsEnabled
+            $Client.SaveDnsSettings($settings)
+            $restored = Get-DnsFilteringState -Client $Client
+            if ($restored.Enabled -ne $before.Enabled -or
+                $restored.WifiExclusionsEnabled -ne $before.WifiExclusionsEnabled -or
+                $restored.SelectedServerType -cne $before.SelectedServerType -or
+                -not (Test-ExactStringMultiset -Left $before.SelectedServerAddresses `
+                    -Right $restored.SelectedServerAddresses)) {
+                throw 'NextDNS selection rollback did not restore the previous DNS state'
+            }
+        }
+        catch { throw 'NextDNS selection failed and rollback was incomplete' }
+        throw $original
+    }
+}
+
+function Get-DnsUserFilter {
+    param([Parameter(Mandatory = $true)] $Client)
+    $filters = @($Client.GetAllFilterSubscriptions() | Where-Object {
+            [string] $_.FilterType -ceq 'Dns' -and
+            [bool] $_.IsEditable -and [bool] $_.IsCustom
+        })
+    if ($filters.Count -ne 1) {
+        throw 'The editable AdGuard DNS User filter was not unique'
+    }
+    return $filters[0]
+}
+
+function Get-AlgumonAdDnsExceptionState {
+    param([Parameter(Mandatory = $true)] $Client)
+    $filter = Get-DnsUserFilter -Client $Client
+    $rules = $Client.GetFilterSubscriptionRules(
+        $filter.FilterId,
+        $script:DnsFilterType
+    )
+    $all = @($rules.Rules | ForEach-Object { [string] $_ })
+    $disabled = @($rules.DisabledRules | ForEach-Object { [string] $_ })
+    $disabledSet = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($rule in $disabled) { [void] $disabledSet.Add($rule) }
+
+    $enabledDesired = New-Object 'System.Collections.Generic.List[string]'
+    $disabledDesired = New-Object 'System.Collections.Generic.List[string]'
+    $missingDesired = New-Object 'System.Collections.Generic.List[string]'
+    foreach ($desired in $script:AlgumonAdDnsExceptionRules) {
+        $matches = @($all | Where-Object { $_ -ceq $desired })
+        if ($matches.Count -gt 1) {
+            throw "DNS User filter contains a duplicate managed exception: $desired"
+        }
+        if ($matches.Count -eq 0) {
+            $missingDesired.Add($desired)
+        }
+        elseif ($disabledSet.Contains($desired)) {
+            $disabledDesired.Add($desired)
+        }
+        else {
+            $enabledDesired.Add($desired)
+        }
+    }
+
+    return [pscustomobject]@{
+        Filter = $filter
+        Rules = $all
+        DisabledRules = $disabled
+        EnabledDesiredRules = @($enabledDesired)
+        DisabledDesiredRules = @($disabledDesired)
+        MissingDesiredRules = @($missingDesired)
+        RulesSha256 = Get-RuleListSha256 -Rules $all
+        DisabledRulesSha256 = Get-RuleMultisetSha256 -Rules $disabled
+    }
+}
+
+function Enable-AlgumonAdDnsExceptions {
+    param([Parameter(Mandatory = $true)] $Client)
+    $before = Get-AlgumonAdDnsExceptionState -Client $Client
+    $added = @($before.MissingDesiredRules)
+    $enabled = @($before.DisabledDesiredRules)
+    if ($added.Count -eq 0 -and $enabled.Count -eq 0) {
+        return [pscustomobject]@{
+            Changed = $false
+            AddedRuleCount = 0
+            EnabledRuleCount = 0
+            State = $before
+        }
+    }
+
+    try {
+        if ($added.Count -gt 0) {
+            $Client.AddUserFilterRules(
+                [System.Collections.Generic.List[string]] $added,
+                [int] $before.Filter.FilterId,
+                $script:DnsFilterType
+            )
+        }
+        if ($enabled.Count -gt 0) {
+            $Client.EnableFilterRules(
+                [int] $before.Filter.FilterId,
+                [System.Collections.Generic.List[string]] $enabled,
+                $script:DnsFilterType
+            )
+        }
+        $after = Get-AlgumonAdDnsExceptionState -Client $Client
+        $expectedRules = @($before.Rules) + @($added)
+        $expectedDisabled = @($before.DisabledRules | Where-Object {
+                $enabled -cnotcontains $_
+            })
+        if (-not (Test-ExactStringMultiset -Left $expectedRules -Right $after.Rules) -or
+            -not (Test-ExactStringMultiset `
+                -Left $expectedDisabled -Right $after.DisabledRules) -or
+            @($after.EnabledDesiredRules).Count -ne
+                @($script:AlgumonAdDnsExceptionRules).Count -or
+            @($after.DisabledDesiredRules).Count -ne 0 -or
+            @($after.MissingDesiredRules).Count -ne 0) {
+            throw 'AdGuard did not persist the exact DNS exception delta'
+        }
+        return [pscustomobject]@{
+            Changed = $true
+            AddedRuleCount = $added.Count
+            EnabledRuleCount = $enabled.Count
+            State = $after
+        }
+    }
+    catch {
+        $original = $_
+        try {
+            if ($added.Count -gt 0) {
+                $Client.RemoveUserFilterRules(
+                    [System.Collections.Generic.List[string]] $added,
+                    [int] $before.Filter.FilterId,
+                    $script:DnsFilterType
+                )
+            }
+            if ($enabled.Count -gt 0) {
+                $Client.DisableFilterRules(
+                    [int] $before.Filter.FilterId,
+                    [System.Collections.Generic.List[string]] $enabled,
+                    $script:DnsFilterType
+                )
+            }
+            $restored = Get-AlgumonAdDnsExceptionState -Client $Client
+            if (-not (Test-ExactStringMultiset `
+                    -Left $before.Rules -Right $restored.Rules) -or
+                -not (Test-ExactStringMultiset `
+                    -Left $before.DisabledRules -Right $restored.DisabledRules)) {
+                throw 'DNS exception rollback did not restore the complete prior rule state'
+            }
+        }
+        catch {
+            throw 'DNS exception update failed and rollback was incomplete'
+        }
+        throw $original
+    }
+}
+
+function Set-DnsFilteringState {
+    param(
+        [Parameter(Mandatory = $true)] $Client,
+        [Parameter(Mandatory = $true)][bool] $Enabled
+    )
+    $before = Get-DnsFilteringState -Client $Client
+    if ($before.Enabled -eq $Enabled) {
+        return [pscustomobject]@{
+            Changed = $false
+            Before = $before
+            After = $before
+        }
+    }
+    $settings = $Client.GetDnsSettings()
+    $originalEnabled = [bool] $settings.IsEnabled
+    try {
+        $settings.IsEnabled = $Enabled
+        $Client.SaveDnsSettings($settings)
+        $after = Get-DnsFilteringState -Client $Client
+        if ($after.Enabled -ne $Enabled) {
+            throw 'AdGuard did not persist the requested DNS-filtering state'
+        }
+        return [pscustomobject]@{
+            Changed = $true
+            Before = $before
+            After = $after
+        }
+    }
+    catch {
+        $original = $_
+        try {
+            $settings.IsEnabled = $originalEnabled
+            $Client.SaveDnsSettings($settings)
+            $rollback = Get-DnsFilteringState -Client $Client
+            if ($rollback.Enabled -ne $originalEnabled) {
+                throw 'DNS-filtering rollback did not restore the prior state'
+            }
+        }
+        catch {
+            throw 'DNS-filtering change failed and rollback was incomplete'
+        }
+        throw $original
+    }
+}
+
+function Get-AlgumonAdDeliveryRules {
+    return @($script:AlgumonAdPolicyHosts | ForEach-Object {
+            "@@||$_^`$domain=algumon.com"
+        })
+}
+
+function Get-AlgumonAdDeliveryPolicySource {
+    [void] (Assert-PublicHttpsUri -Value $script:AlgumonAdPolicyUrl)
+    $bytes = Read-HttpsBytes -Url $script:AlgumonAdPolicyUrl
+    $text = ConvertFrom-StrictUtf8 -Bytes $bytes
+    $titleMatches = @([regex]::Matches(
+            $text, '(?m)^!\s*Title:\s*(?<value>.+?)\s*$'))
+    if ($titleMatches.Count -ne 1 -or
+        $titleMatches[0].Groups['value'].Value.Trim() -cne $script:AlgumonAdPolicyName) {
+        throw 'Algumon ad-delivery policy title is not the expected immutable policy'
+    }
+    $rules = @($text -split "`r?`n" | Where-Object {
+            $_.Trim().Length -gt 0 -and -not $_.TrimStart().StartsWith('!')
+        } | ForEach-Object { [string] $_ })
+    $expected = @(Get-AlgumonAdDeliveryRules)
+    $unexpected = Compare-Object -ReferenceObject ($expected | Sort-Object) `
+        -DifferenceObject ($rules | Sort-Object)
+    if (@($unexpected).Count -ne 0 -or $rules.Count -ne $expected.Count) {
+        throw 'Algumon ad-delivery policy must contain only the exact scoped host exceptions'
+    }
+    return [pscustomobject]@{
+        Url = $script:AlgumonAdPolicyUrl
+        Text = $text
+        Bytes = $bytes
+        Rules = $rules
+        RulesSha256 = Get-RuleListSha256 -Rules $rules
+        Version = ([regex]::Match($text, '(?m)^!\s*Version:\s*(?<value>\S+)\s*$')).Groups['value'].Value
+        SubscriptionUrl = $null
+        MetaSet = $null
+    }
+}
+
+function Prepare-AlgumonAdDeliveryPolicy {
+    param(
+        [Parameter(Mandatory = $true)] $Client,
+        [Parameter(Mandatory = $true)] $Source
+    )
+    if ([string]::IsNullOrWhiteSpace([string] $Source.Version)) {
+        throw 'Algumon ad-delivery policy must declare a version'
+    }
+    $subscriptionUrl = Get-AlgumonAdDeliverySubscriptionUrl -Source $Source
+    $metaSet = $Client.GetSubscriptionsMetaSet($subscriptionUrl)
+    if (-not $metaSet -or -not $metaSet.Main -or $metaSet.Required) {
+        throw 'AdGuard did not parse the Algumon ad-delivery policy as one custom subscription'
+    }
+    if ($metaSet.Main.Name -cne $script:AlgumonAdPolicyName -or
+        $metaSet.Main.SubscriptionUrl -cne $subscriptionUrl -or
+        $metaSet.Main.Version -cne $Source.Version) {
+        throw 'AdGuard policy metadata differs from the verified remote policy'
+    }
+    $Source.SubscriptionUrl = $subscriptionUrl
+    $Source.MetaSet = $metaSet
+    return $Source
+}
+
+function Get-AlgumonAdDeliverySubscriptionUrl {
+    param([Parameter(Mandatory = $true)] $Source)
+    if ([string]::IsNullOrWhiteSpace([string] $Source.Version) -or
+        [string] $Source.Version -notmatch '^[0-9A-Za-z._-]+$') {
+        throw 'Algumon ad-delivery policy version is not safe for a subscription URL'
+    }
+    $sourceUri = [Uri] $Source.Url
+    if (-not $sourceUri.IsAbsoluteUri -or -not [string]::IsNullOrEmpty($sourceUri.Query)) {
+        throw 'Algumon ad-delivery policy source URL must be an absolute query-free URL'
+    }
+    $builder = New-Object System.UriBuilder($sourceUri)
+    $builder.Query = 'hdf-policy-version=' + [Uri]::EscapeDataString([string] $Source.Version)
+    return $builder.Uri.AbsoluteUri
+}
+
+function Test-AlgumonAdDeliverySubscriptionUrl {
+    param([AllowNull()][string] $SubscriptionUrl)
+    if ([string]::IsNullOrWhiteSpace($SubscriptionUrl)) { return $false }
+    if ($SubscriptionUrl -ceq $script:AlgumonAdPolicyUrl) { return $true }
+    try {
+        $expected = [Uri] $script:AlgumonAdPolicyUrl
+        $candidate = [Uri] $SubscriptionUrl
+        return $candidate.Scheme -ceq $expected.Scheme -and
+            $candidate.Host -ceq $expected.Host -and
+            $candidate.Port -eq $expected.Port -and
+            $candidate.AbsolutePath -ceq $expected.AbsolutePath -and
+            $candidate.Query -match '^\?hdf-policy-version=[0-9A-Za-z._~-]+$'
+    }
+    catch {
+        return $false
+    }
+}
+
+function Get-AlgumonAdDeliveryFilters {
+    param([Parameter(Mandatory = $true)] $Client)
+    return @(Get-InstalledStandardFilters -Client $Client | Where-Object {
+            $_.IsCustom -and (Test-AlgumonAdDeliverySubscriptionUrl `
+                    -SubscriptionUrl ([string] $_.SubscriptionUrl))
+        } | Sort-Object FilterId)
+}
+
+function Assert-AlgumonAdDeliveryPolicyTargetInstalled {
+    param(
+        [Parameter(Mandatory = $true)] $Client,
+        [Parameter(Mandatory = $true)] $Source
+    )
+    $filters = @(Get-AlgumonAdDeliveryFilters -Client $Client)
+    $target = @($filters | Where-Object {
+            $_.SubscriptionUrl -ceq $Source.SubscriptionUrl
+        })
+    if ($target.Count -ne 1 -or -not [bool] $target[0].IsEnabled -or
+        -not [bool] $target[0].IsTrusted -or
+        $target[0].Name -cne $script:AlgumonAdPolicyName -or
+        $target[0].Version -cne $Source.Version) {
+        throw 'Algumon ad-delivery policy target is not uniquely installed, enabled, and trusted'
+    }
+    $installedRules = $Client.GetFilterSubscriptionRules(
+        $target[0].FilterId,
+        $script:StandardFilterType
+    )
+    $installedPolicyRules = @($installedRules.Rules | ForEach-Object { [string] $_ } |
+        Where-Object { $_.Trim().Length -gt 0 -and -not $_.TrimStart().StartsWith('!') })
+    $unexpected = Compare-Object -ReferenceObject ($Source.Rules | Sort-Object) `
+        -DifferenceObject ($installedPolicyRules | Sort-Object)
+    if (@($unexpected).Count -ne 0 -or @($installedRules.DisabledRules).Count -ne 0) {
+        throw ('Installed Algumon ad-delivery policy rules differ from the verified scoped set ' +
+            "(expected=$(@($Source.Rules).Count), installed=$(@($installedPolicyRules).Count), " +
+            "disabled=$(@($installedRules.DisabledRules).Count), differences=$(@($unexpected).Count))")
+    }
+    return [pscustomobject]@{
+        FilterId = [int] $target[0].FilterId
+        Version = [string] $target[0].Version
+        RulesSha256 = Get-RuleListSha256 -Rules $installedPolicyRules
+    }
+}
+
+function Assert-AlgumonAdDeliveryPolicyInstalled {
+    param(
+        [Parameter(Mandatory = $true)] $Client,
+        [Parameter(Mandatory = $true)] $Source
+    )
+    $verified = Assert-AlgumonAdDeliveryPolicyTargetInstalled -Client $Client -Source $Source
+    $filters = @(Get-AlgumonAdDeliveryFilters -Client $Client)
+    $enabled = @($filters | Where-Object { [bool] $_.IsEnabled })
+    if ($enabled.Count -ne 1 -or $enabled[0].FilterId -ne $verified.FilterId) {
+        throw 'Algumon ad-delivery policy lineage has more than one enabled subscription'
+    }
+    return $verified
+}
+
+function Install-AlgumonAdDeliveryPolicy {
+    param(
+        [Parameter(Mandatory = $true)] $Client,
+        [Parameter(Mandatory = $true)] $Source
+    )
+    $before = @(Get-AlgumonAdDeliveryFilters -Client $Client)
+    $targetBefore = @($before | Where-Object {
+            $_.SubscriptionUrl -ceq $Source.SubscriptionUrl
+        })
+    if ($targetBefore.Count -gt 1) {
+        throw 'Algumon ad-delivery policy target URL is installed more than once'
+    }
+    $prior = @($before | Where-Object {
+            $_.SubscriptionUrl -cne $Source.SubscriptionUrl
+        })
+    $created = $false
+    $targetStateChanged = $false
+    $priorStateChanged = $false
+    $targetPriorEnabled = if ($targetBefore.Count -eq 1) { [bool] $targetBefore[0].IsEnabled } else { $false }
+    $targetPriorTrusted = if ($targetBefore.Count -eq 1) { [bool] $targetBefore[0].IsTrusted } else { $false }
+    $priorState = @($prior | ForEach-Object {
+            [pscustomobject]@{
+                FilterId = [int] $_.FilterId
+                Enabled = [bool] $_.IsEnabled
+                Trusted = [bool] $_.IsTrusted
+            }
+        })
+    try {
+        if ($targetBefore.Count -eq 0) {
+            # The versioned URL makes this a separate subscription identity. Verify it
+            # before changing any prior policy state so an install failure retains the
+            # working policy exactly as it was.
+            $Client.InstallCustomFilter($Source.MetaSet, $script:StandardFilterType)
+            $created = $true
+        }
+        $target = @(Get-AlgumonAdDeliveryFilters -Client $Client | Where-Object {
+                $_.SubscriptionUrl -ceq $Source.SubscriptionUrl
+            })
+        if ($target.Count -ne 1) {
+            throw 'Algumon ad-delivery policy target was not uniquely visible'
+        }
+        if (-not [bool] $target[0].IsEnabled -or -not [bool] $target[0].IsTrusted) {
+            $Client.UpdateFilterSubscriptionState(
+                $target[0].FilterId,
+                $true,
+                $true,
+                $script:StandardFilterType
+            )
+            $targetStateChanged = $true
+        }
+        [void] (Assert-AlgumonAdDeliveryPolicyTargetInstalled -Client $Client -Source $Source)
+        foreach ($previous in $priorState) {
+            if ($previous.Enabled -or $previous.Trusted) {
+                $Client.UpdateFilterSubscriptionState(
+                    $previous.FilterId,
+                    $false,
+                    $false,
+                    $script:StandardFilterType
+                )
+                $priorStateChanged = $true
+            }
+        }
+        $verified = Assert-AlgumonAdDeliveryPolicyInstalled -Client $Client -Source $Source
+        return [pscustomobject]@{
+            Changed = $created -or $targetStateChanged -or $priorStateChanged
+            Verified = $verified
+        }
+    }
+    catch {
+        $original = $_
+        try {
+            foreach ($previous in $priorState) {
+                $Client.UpdateFilterSubscriptionState(
+                    $previous.FilterId,
+                    $previous.Enabled,
+                    $previous.Trusted,
+                    $script:StandardFilterType
+                )
+            }
+            $currentTarget = @(Get-AlgumonAdDeliveryFilters -Client $Client | Where-Object {
+                    $_.SubscriptionUrl -ceq $Source.SubscriptionUrl
+                })
+            if ($created -and $currentTarget.Count -eq 1) {
+                $Client.RemoveFilterSubscription(
+                    $currentTarget[0].FilterId,
+                    $script:StandardFilterType
+                )
+            } elseif (-not $created -and $currentTarget.Count -eq 1 -and
+                ($targetStateChanged -or $priorStateChanged)) {
+                $Client.UpdateFilterSubscriptionState(
+                    $currentTarget[0].FilterId,
+                    $targetPriorEnabled,
+                    $targetPriorTrusted,
+                    $script:StandardFilterType
+                )
+            }
+        }
+        catch {
+            throw 'Algumon ad-delivery policy installation failed and rollback was incomplete'
+        }
+        throw $original
+    }
+}
+
+function Test-AlgumonDocumentWideException {
+    param([Parameter(Mandatory = $true)][string] $Rule)
+    $match = [regex]::Match(
+        $Rule.Trim(),
+        '^@@\|\|(?:www\.)?algumon\.com\^(?<modifiers>\$[^\s]+)?$'
+    )
+    if (-not $match.Success) { return $false }
+    $modifiers = [string] $match.Groups['modifiers'].Value
+    if ([string]::IsNullOrEmpty($modifiers)) { return $false }
+    return @($modifiers.TrimStart('$').Split(',')) -contains 'document'
+}
+
+function Get-EnabledAlgumonDocumentWideExceptions {
+    param([Parameter(Mandatory = $true)] $Client)
+    $userFilter = Get-UserFilter -Client $Client
+    $rules = $Client.GetFilterSubscriptionRules(
+        $userFilter.FilterId,
+        $script:StandardFilterType
+    )
+    $disabled = New-Object 'System.Collections.Generic.HashSet[string]'
+    foreach ($rule in @($rules.DisabledRules | ForEach-Object { [string] $_ })) {
+        [void] $disabled.Add($rule)
+    }
+    $candidates = @($rules.Rules | ForEach-Object { [string] $_ } | Where-Object {
+            Test-AlgumonDocumentWideException -Rule $_
+        })
+    return [pscustomobject]@{
+        Filter = $userFilter
+        Rules = @($candidates | Where-Object { -not $disabled.Contains($_) })
+        CandidateRules = @($candidates)
+        DisabledRules = @($candidates | Where-Object { $disabled.Contains($_) })
+    }
+}
+
+function Disable-AlgumonDocumentWideExceptions {
+    param([Parameter(Mandatory = $true)] $Client)
+    $before = Get-EnabledAlgumonDocumentWideExceptions -Client $Client
+    if (@($before.Rules).Count -eq 0) {
+        return [pscustomobject]@{ Changed = $false; DisabledRuleCount = 0 }
+    }
+    try {
+        $Client.DisableFilterRules(
+            [int] $before.Filter.FilterId,
+            [System.Collections.Generic.List[string]] @($before.Rules),
+            $script:StandardFilterType
+        )
+        $after = Get-EnabledAlgumonDocumentWideExceptions -Client $Client
+        if (@($after.Rules).Count -ne 0) {
+            throw 'AdGuard kept an enabled document-wide Algumon exception'
+        }
+        return [pscustomobject]@{
+            Changed = $true
+            DisabledRuleCount = @($before.Rules).Count
+        }
+    }
+    catch {
+        $original = $_
+        try {
+            $Client.EnableFilterRules(
+                [int] $before.Filter.FilterId,
+                [System.Collections.Generic.List[string]] @($before.Rules),
+                $script:StandardFilterType
+            )
+            $restored = Get-EnabledAlgumonDocumentWideExceptions -Client $Client
+            if (-not (Test-ExactStringMultiset -Left $before.Rules -Right $restored.Rules)) {
+                throw 'Algumon web-filtering repair rollback did not restore every exception'
+            }
+        }
+        catch {
+            throw 'Algumon web-filtering repair failed and rollback was incomplete'
+        }
+        throw $original
+    }
+}
+
+function Enable-AlgumonDocumentWideExceptions {
+    param([Parameter(Mandatory = $true)] $Client)
+    $before = Get-EnabledAlgumonDocumentWideExceptions -Client $Client
+    $delta = @($before.DisabledRules)
+    if ($delta.Count -eq 0) {
+        return [pscustomobject]@{
+            Changed = $false
+            EnabledRuleCount = 0
+            TotalEnabledRuleCount = @($before.Rules).Count
+        }
+    }
+    try {
+        $Client.EnableFilterRules(
+            [int] $before.Filter.FilterId,
+            [System.Collections.Generic.List[string]] $delta,
+            $script:StandardFilterType
+        )
+        $after = Get-EnabledAlgumonDocumentWideExceptions -Client $Client
+        if (-not (Test-ExactStringMultiset `
+                -Left $before.CandidateRules -Right $after.CandidateRules) -or
+            @($after.DisabledRules).Count -ne 0 -or
+            -not (Test-ExactStringMultiset `
+                -Left $before.CandidateRules -Right $after.Rules)) {
+            throw 'AdGuard did not enable every exact Algumon document exception'
+        }
+        return [pscustomobject]@{
+            Changed = $true
+            EnabledRuleCount = $delta.Count
+            TotalEnabledRuleCount = @($after.Rules).Count
+        }
+    }
+    catch {
+        $original = $_
+        try {
+            $Client.DisableFilterRules(
+                [int] $before.Filter.FilterId,
+                [System.Collections.Generic.List[string]] $delta,
+                $script:StandardFilterType
+            )
+            $restored = Get-EnabledAlgumonDocumentWideExceptions -Client $Client
+            if (-not (Test-ExactStringMultiset `
+                    -Left $before.Rules -Right $restored.Rules) -or
+                -not (Test-ExactStringMultiset `
+                    -Left $before.DisabledRules -Right $restored.DisabledRules) -or
+                -not (Test-ExactStringMultiset `
+                    -Left $before.CandidateRules -Right $restored.CandidateRules)) {
+                throw 'Algumon exemption rollback did not restore every exception state'
+            }
+        }
+        catch {
+            throw 'Algumon exemption failed and rollback was incomplete'
+        }
+        throw $original
+    }
+}
+
 function Get-InspectionReport {
     param([Parameter(Mandatory = $true)] $Session)
     $client = $Session.Client
@@ -4828,6 +5590,8 @@ function Get-InspectionReport {
     $userEvidence = Get-UserFilterEvidence -Client $client
     $userFilter = $userEvidence.Filter
     $userRules = $userEvidence.Rules
+    $dnsState = Get-DnsFilteringState -Client $client
+    $dnsUserState = Get-AlgumonAdDnsExceptionState -Client $client
 
     $userscripts = @(Get-TargetUserscripts -Client $client)
     $userscriptRecords = @($userscripts | ForEach-Object {
@@ -4868,6 +5632,24 @@ function Get-InspectionReport {
             application_state = [string] $client.GetApplicationState()
             ad_blocker_enabled = [bool] $protection.IsAdBlockerEnabled
             extensions_enabled = [bool] $protection.IsExtensionsEnabled
+        }
+        dns_filtering = [ordered]@{
+            enabled = [bool] $dnsState.Enabled
+            selected_server_name = [string] $dnsState.SelectedServerName
+            selected_server_type = [string] $dnsState.SelectedServerType
+            selected_server_addresses = @($dnsState.SelectedServerAddresses)
+            user_filter_id = [int] $dnsUserState.Filter.FilterId
+            user_filter_rule_count = @($dnsUserState.Rules).Count
+            user_filter_disabled_rule_count = @($dnsUserState.DisabledRules).Count
+            user_filter_rules_sha256 = [string] $dnsUserState.RulesSha256
+            user_filter_disabled_rules_sha256 =
+                [string] $dnsUserState.DisabledRulesSha256
+            managed_exception_enabled_count =
+                @($dnsUserState.EnabledDesiredRules).Count
+            managed_exception_disabled_count =
+                @($dnsUserState.DisabledDesiredRules).Count
+            managed_exception_missing_count =
+                @($dnsUserState.MissingDesiredRules).Count
         }
         user_filter = [ordered]@{
             preserved = $true
@@ -4972,6 +5754,11 @@ $isCspProbeCommand = $Command -in @(
 $isStandaloneUserscriptCommand = $Command -in @(
     'install-userscript', 'deploy', 'verify')
 $isLegacyMigrationCommand = $Command -eq 'migrate-legacy'
+$isDnsFilteringCommand = $Command -in @('dns-disable', 'dns-enable')
+$isAlgumonAdDnsCommand = $Command -eq 'exempt-algumon-ad-dns'
+$isAlgumonAdPolicyCommand = $Command -eq 'install-algumon-ads-policy'
+$isAlgumonWebFilteringCommand = $Command -eq 'enable-algumon-web-filtering'
+$isAlgumonWebExemptionCommand = $Command -eq 'exempt-algumon-web-filtering'
 $requiresAuthenticatedStandaloneUserscript =
     $isStandaloneUserscriptCommand -or $isLegacyMigrationCommand
 $cspProbeForbiddenParameters = @(
@@ -5098,6 +5885,10 @@ try {
     if ($desiredFilter) {
         $desiredFilter = Prepare-FilterMetaSet -Client $client -Source $desiredFilter
     }
+    $algumonAdPolicy = if ($isAlgumonAdPolicyCommand) {
+        Prepare-AlgumonAdDeliveryPolicy -Client $client `
+            -Source (Get-AlgumonAdDeliveryPolicySource)
+    } else { $null }
     if ($Command -eq 'csp-probe-restore') {
         Assert-CspProbeBackupContract -Backup $validatedBackup -Desired $desiredUserscript
     }
@@ -5105,6 +5896,244 @@ try {
     switch ($Command) {
         'inspect' {
             Write-JsonResult -Value (Get-InspectionReport -Session $session)
+        }
+        'select-nextdns' {
+            Assert-MutationAuthorized
+            [void] (Assert-GlobalProtection -Client $client)
+            if (-not $NextDnsProfileId) { throw 'select-nextdns requires -NextDnsProfileId' }
+            if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess(
+                    "Existing NextDNS profile $NextDnsProfileId",
+                    'Select the saved DNS-over-HTTPS server without disabling DNS')) {
+                $result = Select-ExistingNextDnsServer -Client $client -ProfileId $NextDnsProfileId
+                [void] (Assert-GlobalProtection -Client $client)
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'select-nextdns'
+                        changed = [bool] $result.Changed
+                        verified = $true
+                        before = $result.Before
+                        after = $result.After
+                    })
+            } else {
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'select-nextdns'
+                        what_if = $true
+                        desired_address = "https://dns.nextdns.io/$NextDnsProfileId"
+                        current = Get-DnsFilteringState -Client $client
+                        adguard_configuration_changed = $false
+                    })
+            }
+        }
+        'dns-disable' {
+            Assert-MutationAuthorized
+            [void] (Assert-GlobalProtection -Client $client)
+            $before = Get-DnsFilteringState -Client $client
+            if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess(
+                    'AdGuard DNS filtering',
+                    'Disable local DNS filtering and preserve web filtering')) {
+                $result = Set-DnsFilteringState -Client $client -Enabled $false
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'dns-disable'
+                        changed = [bool] $result.Changed
+                        verified = $true
+                        before_enabled = [bool] $result.Before.Enabled
+                        after_enabled = [bool] $result.After.Enabled
+                        web_filtering_preserved = $true
+                    })
+            } else {
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'dns-disable'
+                        what_if = $true
+                        current_enabled = [bool] $before.Enabled
+                        desired_enabled = $false
+                        web_filtering_preserved = $true
+                        adguard_configuration_changed = $false
+                    })
+            }
+        }
+        'dns-enable' {
+            Assert-MutationAuthorized
+            [void] (Assert-GlobalProtection -Client $client)
+            $before = Get-DnsFilteringState -Client $client
+            if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess(
+                    'AdGuard DNS filtering',
+                    'Enable local DNS filtering')) {
+                $result = Set-DnsFilteringState -Client $client -Enabled $true
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'dns-enable'
+                        changed = [bool] $result.Changed
+                        verified = $true
+                        before_enabled = [bool] $result.Before.Enabled
+                        after_enabled = [bool] $result.After.Enabled
+                        web_filtering_preserved = $true
+                    })
+            } else {
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'dns-enable'
+                        what_if = $true
+                        current_enabled = [bool] $before.Enabled
+                        desired_enabled = $true
+                        web_filtering_preserved = $true
+                        adguard_configuration_changed = $false
+                    })
+            }
+        }
+        'exempt-algumon-ad-dns' {
+            Assert-MutationAuthorized
+            [void] (Assert-GlobalProtection -Client $client)
+            $dnsFiltering = Get-DnsFilteringState -Client $client
+            if (-not $dnsFiltering.Enabled) {
+                throw 'AdGuard DNS filtering must remain enabled'
+            }
+            $before = Get-AlgumonAdDnsExceptionState -Client $client
+            if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess(
+                    'AdGuard DNS User filter',
+                    'Enable the exact Google ad DNS exceptions required by Algumon')) {
+                $result = Enable-AlgumonAdDnsExceptions -Client $client
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'exempt-algumon-ad-dns'
+                        changed = [bool] $result.Changed
+                        added_rule_count = [int] $result.AddedRuleCount
+                        enabled_rule_count = [int] $result.EnabledRuleCount
+                        managed_exception_count =
+                            @($result.State.EnabledDesiredRules).Count
+                        managed_rules = @($script:AlgumonAdDnsExceptionRules)
+                        dns_filtering_enabled = $true
+                        dns_scope = 'global-host-resolution'
+                        web_filtering_scope =
+                            'Algumon exemption; all other sites remain web-filtered'
+                        other_dns_user_rules_preserved = $true
+                        verified = $true
+                    })
+            } else {
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'exempt-algumon-ad-dns'
+                        what_if = $true
+                        current_enabled_count =
+                            @($before.EnabledDesiredRules).Count
+                        current_disabled_count =
+                            @($before.DisabledDesiredRules).Count
+                        current_missing_count =
+                            @($before.MissingDesiredRules).Count
+                        managed_rules = @($script:AlgumonAdDnsExceptionRules)
+                        dns_filtering_enabled = $true
+                        dns_scope = 'global-host-resolution'
+                        web_filtering_scope =
+                            'Algumon exemption; all other sites remain web-filtered'
+                        adguard_configuration_changed = $false
+                    })
+            }
+        }
+        'install-algumon-ads-policy' {
+            Assert-MutationAuthorized
+            [void] (Assert-GlobalProtection -Client $client)
+            if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess(
+                    $algumonAdPolicy.Url,
+                    'Install the exact Algumon-scoped Google ad-delivery web policy')) {
+                $result = Install-AlgumonAdDeliveryPolicy -Client $client `
+                    -Source $algumonAdPolicy
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'install-algumon-ads-policy'
+                        changed = [bool] $result.Changed
+                        verified = $true
+                        filter_id = [int] $result.Verified.FilterId
+                        version = [string] $result.Verified.Version
+                        rules_sha256 = [string] $result.Verified.RulesSha256
+                        scope = 'algumon.com only'
+                    })
+            } else {
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'install-algumon-ads-policy'
+                        what_if = $true
+                        verified_source = $true
+                        rule_count = @($algumonAdPolicy.Rules).Count
+                        scope = 'algumon.com only'
+                        adguard_configuration_changed = $false
+                    })
+            }
+        }
+        'enable-algumon-web-filtering' {
+            Assert-MutationAuthorized
+            [void] (Assert-GlobalProtection -Client $client)
+            $before = Get-EnabledAlgumonDocumentWideExceptions -Client $client
+            if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess(
+                    'AdGuard User filter Algumon document exceptions',
+                    'Disable only document-wide exceptions so scoped web rules can apply')) {
+                $result = Disable-AlgumonDocumentWideExceptions -Client $client
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'enable-algumon-web-filtering'
+                        changed = [bool] $result.Changed
+                        disabled_document_exception_count = [int] $result.DisabledRuleCount
+                        verified = $true
+                        other_user_filter_rules_preserved = $true
+                    })
+            } else {
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'enable-algumon-web-filtering'
+                        what_if = $true
+                        enabled_document_exception_count = @($before.Rules).Count
+                        disabled_document_exception_count = @($before.DisabledRules).Count
+                        existing_document_exception_count = @($before.CandidateRules).Count
+                        adguard_configuration_changed = $false
+                })
+            }
+        }
+        'exempt-algumon-web-filtering' {
+            Assert-MutationAuthorized
+            [void] (Assert-GlobalProtection -Client $client)
+            $before = Get-EnabledAlgumonDocumentWideExceptions -Client $client
+            if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess(
+                    'AdGuard User filter exact Algumon document exceptions',
+                    'Enable only existing exact document exceptions for Algumon')) {
+                $result = Enable-AlgumonDocumentWideExceptions -Client $client
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'exempt-algumon-web-filtering'
+                        changed = [bool] $result.Changed
+                        newly_enabled_document_exception_count =
+                            [int] $result.EnabledRuleCount
+                        enabled_document_exception_count =
+                            [int] $result.TotalEnabledRuleCount
+                        verified = $true
+                        other_user_filter_rules_preserved = $true
+                    })
+            } else {
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'exempt-algumon-web-filtering'
+                        what_if = $true
+                        enabled_document_exception_count = @($before.Rules).Count
+                        disabled_document_exception_count =
+                            @($before.DisabledRules).Count
+                        existing_document_exception_count =
+                            @($before.CandidateRules).Count
+                        adguard_configuration_changed = $false
+                    })
+            }
+        }
+        'disable-userscript' {
+            Assert-MutationAuthorized
+            [void] (Assert-GlobalProtection -Client $client)
+            $before = Get-UserscriptSnapshot -Client $client
+            if (-not $WhatIfPreference -and $PSCmdlet.ShouldProcess(
+                    $UserscriptName,
+                    'Disable the target userscript while preserving all script contents and filters')) {
+                $result = Disable-TargetUserscriptSafely -Client $client
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'disable-userscript'
+                        changed = [bool] $result.Changed
+                        verified = $true
+                        userscript_enabled = [bool] $result.After.Info.IsEnabled
+                        userscript_code_preserved = $true
+                        userscript_saved_state_preserved = $true
+                        protected_filter_state_preserved = $true
+                    })
+            } else {
+                Write-JsonResult -Value ([ordered]@{
+                        command = 'disable-userscript'
+                        what_if = $true
+                        installed = [bool] $before.Exists
+                        current_enabled = if ($before.Exists) { [bool] $before.Info.IsEnabled } else { $false }
+                        adguard_configuration_changed = $false
+                    })
+            }
         }
         'csp-probe-inspect' {
             Write-JsonResult -Value (Get-CspProbeInspectionReport -Client $client)

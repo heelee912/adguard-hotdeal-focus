@@ -20,7 +20,18 @@ foreach ($statement in $ast.EndBlock.Statements) {
 $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
 $script:MaximumSourceBytes = 8MB
 $script:ReaderGateProtocolVersion = 2
-$script:ReaderGateGrants = @('GM_addElement', 'window.onurlchange')
+$script:ReaderGateGrants = @(
+    'GM_addElement', 'window.onurlchange'
+)
+$script:ReaderGateMatches = @(
+    'https://*.clien.net/*',
+    'https://*.ppomppu.co.kr/*',
+    'https://*.ruliweb.com/*',
+    'https://*.quasarzone.com/*',
+    'https://*.eomisae.co.kr/*',
+    'https://*.zod.kr/*',
+    'https://*.arca.live/*'
+)
 $script:ReleaseUserscriptUrl = ('https://heelee912.github.io/' +
     'adguard-hotdeal-focus/hotdeal-focus.user.js')
 $script:MarkerGateArtifactVersion = '2.0.2'
@@ -32,7 +43,12 @@ $script:AdGuardStateVisibilityRequiredConsecutiveReads = 2
 $script:FreshInstallGmProperties = '{}'
 $script:TemporaryPaths = New-Object 'System.Collections.Generic.List[string]'
 $script:StandardFilterType = 'Standard'
+$script:DnsFilterType = 'Dns'
 $script:FilterSubscriptionType = [string]
+$script:AlgumonAdDnsExceptionRules = @(
+    '@@||doubleclick.net^',
+    '@@||googlesyndication.com^'
+)
 $script:HistoricalSnapshotRules = @()
 $UserscriptName = 'AdGuard Hotdeal Focus Reader Gate'
 $FilterName = 'AdGuard Hotdeal Focus Marker Gate'
@@ -180,6 +196,9 @@ function New-FakeClient {
             } else { $content }
             IsCustom = $false
             IsStyle = $false
+            Match = @($script:ReaderGateMatches)
+            Include = @()
+            Grant = @($script:ReaderGateGrants)
         }
         $this.State.LastParsedMeta = $meta
         return $meta
@@ -243,6 +262,12 @@ function New-FakeClient {
         Assert-FakeUserscriptWriteIntent -State $this.State -Write 'set-status'
         $this.State.UserscriptWrites = @($this.State.UserscriptWrites) + @('set-status')
         $this.State.Userscripts[0].IsEnabled = [bool] $enabled
+        if ([bool] $this.State.MutateUserscriptCodeOnStatusChange) {
+            $this.State.UserscriptCode = [string] $this.State.UserscriptCode + '-tampered'
+        }
+        if ([bool] $this.State.MutateProtectedFilterOnStatusChange) {
+            $this.State.UserRules = @($this.State.UserRules) + @('||status-write-tamper.example^')
+        }
     }
     Add-Member -InputObject $client -MemberType ScriptMethod -Name EnableFilterRules -Value {
         param($filterId, $rules, $filterType)
@@ -291,8 +316,9 @@ Assert-Contract ($exclusive.ScopeKind -ceq 'exclusive-target') 'exclusive scope 
 Assert-Contract ($mixed.ScopeKind -ceq 'mixed-target') 'mixed scope misclassified'
 Assert-Contract ($global.ScopeKind -ceq 'global') 'global scope misclassified'
 
-# An already-custom userscript keeps the in-place UpdateCode -> SetStatus
-# transaction. The independent GM value-store remains byte-exact.
+# AdGuard 7.22 downgrades a changed local/manual executable script when its
+# code is updated in place, so every changed executable entry is replaced.
+# The independent GM value-store remains byte-exact across that replacement.
 $beforeUserscript = New-UserscriptSnapshot -Version '1.0.0' -Enabled $false `
     -Code 'before-code' -GmProperties '{"saved":"before"}' -Custom $true
 $userscriptPlan = [pscustomobject]@{
@@ -302,7 +328,7 @@ $userscriptPlan = [pscustomobject]@{
         gm_properties_sha256 = Get-CanonicalTextSha256 -Text '{"saved":"before"}'
         fresh_install_gm_properties_sha256 = Get-CanonicalTextSha256 -Text '{}'
         enabled = $true; is_custom = $true; is_style = $false
-        replacement_required = $false
+        replacement_required = $true
     }
 }
 Assert-Contract (-not (Assert-UserscriptRestorePreconditions -Current $beforeUserscript `
@@ -310,7 +336,7 @@ Assert-Contract (-not (Assert-UserscriptRestorePreconditions -Current $beforeUse
     'exact userscript before-state was not idempotent'
 $userscriptPrefixes = @(
     (New-UserscriptSnapshot -Version '2.0.0' -Enabled $false -Code 'after-code' `
-        -GmProperties '{"saved":"before"}' -Custom $true),
+        -GmProperties '{}' -Custom $true),
     (New-UserscriptSnapshot -Version '2.0.0' -Enabled $true -Code 'after-code' `
         -GmProperties '{"saved":"before"}' -Custom $true)
 )
@@ -325,11 +351,21 @@ Assert-ThrowsLike -Action {
     [void] (Assert-UserscriptRestorePreconditions -Current $invalidUserscript `
             -BackupSnapshot $beforeUserscript -TransactionPlan $userscriptPlan)
 } -Pattern '*not an enumerated mutation-prefix*'
-Assert-ThrowsLike -Action {
-    [void] (Assert-UserscriptRestorePreconditions -Current ([pscustomobject]@{
-                Exists = $false; Info = $null; Code = $null; GmProperties = $null
-            }) -BackupSnapshot $beforeUserscript -TransactionPlan $userscriptPlan)
-} -Pattern '*existence is not an authorized transaction prefix*'
+Assert-Contract (Assert-UserscriptRestorePreconditions -Current ([pscustomobject]@{
+            Exists = $false; Info = $null; Code = $null; GmProperties = $null
+        }) -BackupSnapshot $beforeUserscript -TransactionPlan $userscriptPlan) `
+    'remove-before-executable-code replacement prefix was rejected'
+$executableRollbackPrefixes = @(
+    (New-UserscriptSnapshot -Version '1.0.0' -Enabled $false -Code 'before-code' `
+        -GmProperties '{}' -Custom $true),
+    (New-UserscriptSnapshot -Version '1.0.0' -Enabled $true -Code 'before-code' `
+        -GmProperties '{"saved":"before"}' -Custom $true)
+)
+foreach ($prefix in $executableRollbackPrefixes) {
+    Assert-Contract (Assert-UserscriptRestorePreconditions -Current $prefix `
+            -BackupSnapshot $beforeUserscript -TransactionPlan $userscriptPlan) `
+        'authorized executable-code rollback prefix was rejected'
+}
 
 # A source-owned IsCustom=false entry is replaced, not updated in place. Every
 # forward crash prefix and every resumable rollback-reinstall prefix is exact.
@@ -447,6 +483,8 @@ $state = [pscustomobject]@{
     Userscripts = @()
     UserscriptCode = ''
     UserscriptGmProperties = ''
+    MutateUserscriptCodeOnStatusChange = $false
+    MutateProtectedFilterOnStatusChange = $false
     Filters = @()
     FilterRules = @{}
 }
@@ -487,6 +525,64 @@ Assert-ThrowsLike -Action {
             -Backup $protectedBackup -Phase 'contract User-filter tamper')
 } -Pattern '*User filter or subscription inventory changed*'
 $state.UserRules = @($ruleA, $ruleB, $ruleC, $unrelated)
+
+# Emergency disable changes only the enabled bit. The full script code, the
+# independent GM value-store, and every protected filter byte remain exact.
+$state.Userscripts = @((New-UserscriptSnapshot -Version '1.5.0' -Enabled $true `
+            -Code '' -GmProperties '' -Custom $true).Info)
+$state.UserscriptCode = "disable-code`r`nwith-exact-newlines"
+$state.UserscriptGmProperties = '{"saved-values":["exact"]}'
+$state.UserscriptWrites = @()
+$protectedBeforeDisable = Get-StableProtectedFilterStateEvidence -Client $client
+$disabled = Disable-TargetUserscriptSafely -Client $client
+$protectedAfterDisable = Get-StableProtectedFilterStateEvidence -Client $client
+Assert-Contract ([bool] $disabled.Changed) 'enabled userscript was not disabled'
+Assert-Contract (-not [bool] $disabled.After.Info.IsEnabled) `
+    'userscript enabled state did not become false'
+Assert-Contract ([string] $state.UserscriptCode -ceq "disable-code`r`nwith-exact-newlines") `
+    'userscript code changed during disable'
+Assert-Contract ([string] $state.UserscriptGmProperties -ceq `
+        '{"saved-values":["exact"]}') `
+    'userscript GM value-store changed during disable'
+Assert-Contract ([string] $protectedBeforeDisable.Evidence.StateSha256 -ceq `
+        [string] $protectedAfterDisable.Evidence.StateSha256) `
+    'protected filter state changed during disable'
+Assert-Contract (@($state.UserscriptWrites).Count -eq 1 -and `
+        [string] $state.UserscriptWrites[0] -ceq 'set-status') `
+    'disable issued a write other than the single status change'
+
+$disabledAgain = Disable-TargetUserscriptSafely -Client $client
+Assert-Contract (-not [bool] $disabledAgain.Changed) `
+    'already-disabled userscript was not idempotent'
+Assert-Contract (@($state.UserscriptWrites).Count -eq 1 -and `
+        [string] $state.UserscriptWrites[0] -ceq 'set-status') `
+    'already-disabled userscript issued another write'
+
+$state.Userscripts = @()
+Assert-ThrowsLike -Action {
+    [void] (Disable-TargetUserscriptSafely -Client $client)
+} -Pattern '*not installed; refusing an ambiguous mutation*'
+
+$state.Userscripts = @((New-UserscriptSnapshot -Version '1.5.0' -Enabled $true `
+            -Code '' -GmProperties '' -Custom $true).Info)
+$state.UserscriptCode = 'identity-before-disable'
+$state.UserscriptGmProperties = '{"saved":"identity"}'
+$state.MutateUserscriptCodeOnStatusChange = $true
+Assert-ThrowsLike -Action {
+    [void] (Disable-TargetUserscriptSafely -Client $client)
+} -Pattern '*did not preserve the exact executable and saved-state identity*'
+$state.MutateUserscriptCodeOnStatusChange = $false
+
+$state.Userscripts[0].IsEnabled = $true
+$state.UserscriptCode = 'protected-before-disable'
+$state.UserscriptGmProperties = '{"saved":"protected"}'
+$protectedRulesBeforeFailure = @($state.UserRules)
+$state.MutateProtectedFilterOnStatusChange = $true
+Assert-ThrowsLike -Action {
+    [void] (Disable-TargetUserscriptSafely -Client $client)
+} -Pattern '*changed protected AdGuard filter state*'
+$state.MutateProtectedFilterOnStatusChange = $false
+$state.UserRules = @($protectedRulesBeforeFailure)
 $state.Filters = @()
 $state.FilterRules = @{}
 
@@ -689,6 +785,73 @@ $state.Userscripts = @()
 $state.UserscriptCode = ''
 $state.UserscriptGmProperties = ''
 
+# A changed executable custom script uses remove -> install, never the broken
+# UpdateUserscriptCode path. Both the forward update and rollback preserve
+# the saved GM values and executable classification.
+$executableUpdateSnapshot = New-UserscriptSnapshot -Version '1.0.0' `
+    -Enabled $false -Code 'before-code' -GmProperties '{"saved":"before"}' -Custom $true
+$state.Userscripts = @($executableUpdateSnapshot.Info)
+$state.UserscriptCode = $executableUpdateSnapshot.Code
+$state.UserscriptGmProperties = $executableUpdateSnapshot.GmProperties
+$state.UserscriptWrites = @()
+$executableForwardJournal = Join-Path ([System.IO.Path]::GetTempPath()) (
+    'hdf-executable-forward-' + [Guid]::NewGuid().ToString('N'))
+[void] [System.IO.Directory]::CreateDirectory($executableForwardJournal)
+$state.IntentDirectory = $executableForwardJournal
+$state.ExpectedWriteIntents = @(
+    [pscustomobject]@{ Write = 'remove'; Event = 'intent-userscript-replacement-remove' },
+    [pscustomobject]@{ Write = 'install'; Event = 'intent-userscript-install' },
+    [pscustomobject]@{ Write = 'update-gm'; Event = 'intent-userscript-replacement-restore-gm' },
+    [pscustomobject]@{ Write = 'set-status'; Event = 'intent-userscript-enable' }
+)
+try {
+    [void] (Invoke-UserscriptMutation -Client $client `
+            -Snapshot $executableUpdateSnapshot -Desired $desiredUserscript `
+            -JournalDirectory $executableForwardJournal)
+}
+finally {
+    $state.IntentDirectory = $null
+    $state.ExpectedWriteIntents = @()
+    [System.IO.Directory]::Delete($executableForwardJournal, $true)
+}
+Assert-Contract ([bool] $state.Userscripts[0].IsCustom) `
+    'changed executable userscript lost IsCustom during replacement'
+Assert-Contract ([string] $state.UserscriptGmProperties -ceq '{"saved":"before"}') `
+    'changed executable userscript did not preserve GM values'
+Assert-Contract (Test-ExactStringSequence -Left $state.UserscriptWrites `
+        -Right @('remove', 'install', 'update-gm', 'set-status')) `
+    'changed executable userscript did not use replacement order'
+
+$state.UserscriptWrites = @()
+$executableRollbackJournal = Join-Path ([System.IO.Path]::GetTempPath()) (
+    'hdf-executable-rollback-' + [Guid]::NewGuid().ToString('N'))
+[void] [System.IO.Directory]::CreateDirectory($executableRollbackJournal)
+$state.IntentDirectory = $executableRollbackJournal
+$state.ExpectedWriteIntents = @(
+    [pscustomobject]@{ Write = 'remove'; Event = 'intent-rollback-userscript-replacement-remove' },
+    [pscustomobject]@{ Write = 'install'; Event = 'intent-rollback-userscript-replacement-install' },
+    [pscustomobject]@{ Write = 'update-gm'; Event = 'intent-rollback-userscript-gm' },
+    [pscustomobject]@{ Write = 'set-status'; Event = 'intent-rollback-userscript-status' }
+)
+try {
+    Restore-UserscriptSnapshot -Client $client -Snapshot $executableUpdateSnapshot `
+        -JournalDirectory $executableRollbackJournal
+}
+finally {
+    $state.IntentDirectory = $null
+    $state.ExpectedWriteIntents = @()
+    [System.IO.Directory]::Delete($executableRollbackJournal, $true)
+}
+$restoredExecutable = Get-UserscriptSnapshot -Client $client
+Assert-Contract (Test-UserscriptSnapshotExact -Left $restoredExecutable `
+        -Right $executableUpdateSnapshot) `
+    'changed executable userscript rollback was not exact'
+
+$state.Userscripts = @()
+$state.UserscriptCode = ''
+$state.UserscriptGmProperties = ''
+$state.UserscriptWrites = @()
+
 # A source-owned false classification is transactionally replaced and retains
 # its independent GM values. Rollback reinstalls the exact original class.
 $reclassificationSnapshot = New-UserscriptSnapshot -Version '1.0.0' `
@@ -702,10 +865,10 @@ $forwardJournal = Join-Path ([System.IO.Path]::GetTempPath()) (
 [void] [System.IO.Directory]::CreateDirectory($forwardJournal)
 $state.IntentDirectory = $forwardJournal
 $state.ExpectedWriteIntents = @(
-    [pscustomobject]@{ Write = 'remove'; Event = 'intent-userscript-reclassification-remove' },
+    [pscustomobject]@{ Write = 'remove'; Event = 'intent-userscript-replacement-remove' },
     [pscustomobject]@{ Write = 'install'; Event = 'intent-userscript-install' },
     [pscustomobject]@{
-        Write = 'update-gm'; Event = 'intent-userscript-reclassification-restore-gm'
+        Write = 'update-gm'; Event = 'intent-userscript-replacement-restore-gm'
     },
     [pscustomobject]@{ Write = 'set-status'; Event = 'intent-userscript-enable' }
 )
@@ -734,10 +897,10 @@ $rollbackJournal = Join-Path ([System.IO.Path]::GetTempPath()) (
 $state.IntentDirectory = $rollbackJournal
 $state.ExpectedWriteIntents = @(
     [pscustomobject]@{
-        Write = 'remove'; Event = 'intent-rollback-userscript-reclassification-remove'
+        Write = 'remove'; Event = 'intent-rollback-userscript-replacement-remove'
     },
     [pscustomobject]@{
-        Write = 'install'; Event = 'intent-rollback-userscript-reclassification-install'
+        Write = 'install'; Event = 'intent-rollback-userscript-replacement-install'
     },
     [pscustomobject]@{ Write = 'update-gm'; Event = 'intent-rollback-userscript-gm' },
     [pscustomobject]@{ Write = 'set-status'; Event = 'intent-rollback-userscript-status' }
@@ -900,6 +1063,9 @@ try {
     $ExpectedUserscriptSha256 = $null
     $builtUserscript = Get-UserscriptSource -Source (
         (Join-Path $PSScriptRoot '..\hotdeal-focus.user.js'))
+    Assert-Contract (Test-ExactStringSequence -Left $builtUserscript.Matches `
+            -Right $script:ReaderGateMatches) `
+        'actual release Userscript matches are not exact'
     Assert-Contract (Test-ExactStringSequence -Left $builtUserscript.Grants `
             -Right @('GM_addElement', 'window.onurlchange')) `
         'actual release Userscript grants are not exact'
@@ -1032,9 +1198,160 @@ finally {
     }
 }
 
+function New-FakeDnsExceptionClient {
+    param([Parameter(Mandatory = $true)] $State)
+    $client = [pscustomobject]@{ State = $State }
+    Add-Member -InputObject $client -MemberType ScriptMethod `
+        -Name GetAllFilterSubscriptions -Value {
+        return @($this.State.Filter)
+    }
+    Add-Member -InputObject $client -MemberType ScriptMethod `
+        -Name GetFilterSubscriptionRules -Value {
+        param($filterId, $filterType)
+        $rules = @($this.State.Rules)
+        if ([bool] $this.State.FaultNextRead) {
+            $this.State.FaultNextRead = $false
+            $rules += '||one-shot-postcondition-fault.invalid^'
+        }
+        return [pscustomobject]@{
+            Rules = @($rules)
+            DisabledRules = @($this.State.DisabledRules)
+        }
+    }
+    Add-Member -InputObject $client -MemberType ScriptMethod `
+        -Name AddUserFilterRules -Value {
+        param($rules, $filterId, $filterType)
+        $this.State.Rules = @($this.State.Rules) + @($rules | ForEach-Object {
+                [string] $_
+            })
+    }
+    Add-Member -InputObject $client -MemberType ScriptMethod `
+        -Name RemoveUserFilterRules -Value {
+        param($rules, $filterId, $filterType)
+        $remove = @($rules | ForEach-Object { [string] $_ })
+        $this.State.Rules = @($this.State.Rules | Where-Object {
+                $remove -cnotcontains [string] $_
+            })
+        $this.State.DisabledRules = @($this.State.DisabledRules | Where-Object {
+                $remove -cnotcontains [string] $_
+            })
+    }
+    Add-Member -InputObject $client -MemberType ScriptMethod `
+        -Name EnableFilterRules -Value {
+        param($filterId, $rules, $filterType)
+        $enable = @($rules | ForEach-Object { [string] $_ })
+        $this.State.DisabledRules = @($this.State.DisabledRules | Where-Object {
+                $enable -cnotcontains [string] $_
+            })
+        if ([bool] $this.State.InjectOneShotPostconditionFault) {
+            $this.State.InjectOneShotPostconditionFault = $false
+            $this.State.FaultNextRead = $true
+        }
+    }
+    Add-Member -InputObject $client -MemberType ScriptMethod `
+        -Name DisableFilterRules -Value {
+        param($filterId, $rules, $filterType)
+        foreach ($rule in @($rules | ForEach-Object { [string] $_ })) {
+            if (@($this.State.DisabledRules | Where-Object { $_ -ceq $rule }).Count -eq 0) {
+                $this.State.DisabledRules = @($this.State.DisabledRules) + @($rule)
+            }
+        }
+    }
+    return $client
+}
+
+$dnsFilter = [pscustomobject]@{
+    FilterId = [int]::MinValue
+    FilterType = 'Dns'
+    IsEditable = $true
+    IsCustom = $true
+}
+$dnsState = [pscustomobject]@{
+    Filter = $dnsFilter
+    Rules = @('||preserved.example^', '@@||doubleclick.net^')
+    DisabledRules = @('@@||doubleclick.net^')
+    InjectOneShotPostconditionFault = $false
+    FaultNextRead = $false
+}
+$dnsClient = New-FakeDnsExceptionClient -State $dnsState
+$dnsResult = Enable-AlgumonAdDnsExceptions -Client $dnsClient
+Assert-Contract ([bool] $dnsResult.Changed) 'DNS exception delta was not applied'
+Assert-Contract ([int] $dnsResult.AddedRuleCount -eq 1) `
+    'DNS exception delta did not add only the missing rule'
+Assert-Contract ([int] $dnsResult.EnabledRuleCount -eq 1) `
+    'DNS exception delta did not enable only the disabled rule'
+Assert-Contract (@($dnsState.Rules).Count -eq 3) `
+    'DNS exception delta changed an unrelated rule'
+Assert-Contract (@($dnsState.DisabledRules).Count -eq 0) `
+    'DNS exception delta left a managed rule disabled'
+
+$dnsRollbackState = [pscustomobject]@{
+    Filter = $dnsFilter
+    Rules = @('||preserved.example^', '@@||doubleclick.net^')
+    DisabledRules = @('@@||doubleclick.net^')
+    InjectOneShotPostconditionFault = $true
+    FaultNextRead = $false
+}
+$dnsRollbackClient = New-FakeDnsExceptionClient -State $dnsRollbackState
+Assert-ThrowsLike -Action {
+    [void] (Enable-AlgumonAdDnsExceptions -Client $dnsRollbackClient)
+} -Pattern '*did not persist the exact DNS exception delta*'
+Assert-Contract (Test-ExactStringMultiset `
+        -Left @('||preserved.example^', '@@||doubleclick.net^') `
+        -Right $dnsRollbackState.Rules) `
+    'DNS exception rollback did not restore every original rule'
+Assert-Contract (Test-ExactStringMultiset `
+        -Left @('@@||doubleclick.net^') -Right $dnsRollbackState.DisabledRules) `
+    'DNS exception rollback did not restore the disabled-rule state'
+
+function New-FakeNextDnsClient {
+    param([bool] $FailFirstSave = $false, [bool] $Duplicate = $false)
+    $previous = [pscustomobject]@{
+        Name = 'Previous'; ServerType = 'DnsOverHttps'; Addresses = @('https://previous.example/dns-query')
+    }
+    $target = [pscustomobject]@{
+        Name = 'NextDNS'; ServerType = 'DnsOverHttps'; Addresses = @('https://dns.nextdns.io/6cc53e')
+    }
+    $fake = [pscustomobject]@{
+        Settings = [pscustomobject]@{
+            IsEnabled = $true; ShouldDisableDnsByWifiExclusions = $true; SelectedServer = $previous
+        }
+        Target = $target; SaveCount = 0; FailFirstSave = $FailFirstSave; Duplicate = $Duplicate
+    }
+    $fake | Add-Member ScriptMethod GetDnsSettings { return $this.Settings }
+    $fake | Add-Member ScriptMethod GetDnsProviders {
+        $servers = @($this.Target)
+        if ($this.Duplicate) { $servers += $this.Target }
+        return [pscustomobject]@{ Servers = $servers }
+    }
+    $fake | Add-Member ScriptMethod ValidateDnsServer { param($server); return $true }
+    $fake | Add-Member ScriptMethod SaveDnsSettings {
+        param($settings)
+        $this.SaveCount++
+        $this.Settings = $settings
+        if ($this.FailFirstSave -and $this.SaveCount -eq 1) { throw 'injected NextDNS save failure' }
+    }
+    return $fake
+}
+$nextDnsClient = New-FakeNextDnsClient
+$nextDnsResult = Select-ExistingNextDnsServer -Client $nextDnsClient -ProfileId '6cc53e'
+Assert-Contract $nextDnsResult.Changed 'Existing NextDNS server was not selected'
+Assert-Contract $nextDnsClient.Settings.IsEnabled 'NextDNS selection disabled DNS'
+Assert-Contract $nextDnsClient.Settings.ShouldDisableDnsByWifiExclusions 'NextDNS selection changed Wifi exclusions'
+Assert-Contract ($nextDnsClient.Settings.SelectedServer.Addresses[0] -ceq 'https://dns.nextdns.io/6cc53e') 'Wrong NextDNS profile selected'
+[void] (Select-ExistingNextDnsServer -Client $nextDnsClient -ProfileId '6cc53e')
+Assert-Contract ($nextDnsClient.SaveCount -eq 1) 'NextDNS repeated selection was not idempotent'
+$nextDnsRollback = New-FakeNextDnsClient -FailFirstSave $true
+Assert-ThrowsLike { Select-ExistingNextDnsServer -Client $nextDnsRollback -ProfileId '6cc53e' } '*injected NextDNS save failure*'
+Assert-Contract ($nextDnsRollback.Settings.SelectedServer.Name -ceq 'Previous') 'NextDNS rollback lost the original server'
+Assert-Contract $nextDnsRollback.Settings.IsEnabled 'NextDNS rollback disabled DNS'
+Assert-ThrowsLike { Select-ExistingNextDnsServer -Client (New-FakeNextDnsClient -Duplicate $true) -ProfileId '6cc53e' } '*was not unique*'
+Assert-ThrowsLike { Select-ExistingNextDnsServer -Client (New-FakeNextDnsClient) -ProfileId '000000' } '*was not unique*'
+
 [ordered]@{
     ok = $true
-    tests = @('scope-classification', 'userscript-all-crash-prefixes',
+    tests = @('nextdns-existing-profile-selection-and-rollback', 'scope-classification', 'userscript-all-crash-prefixes',
+        'userscript-emergency-disable',
         'userscript-authenticated-custom-promotion',
         'migration-authenticated-userscript-precondition',
         'userscript-owned-noncustom-reclassification-and-exact-rollback',
@@ -1043,5 +1360,6 @@ finally {
         'prewrite-mutation-rejection', 'actual-release-source-contract',
         'backup-complete-state-hash', 'backup-raw-hash-tamper',
         'https-content-length-runtime-shapes', 'durable-journal',
-        'legacy-all-crash-prefixes', 'idempotent-restore')
+        'legacy-all-crash-prefixes', 'idempotent-restore',
+        'dns-exception-exact-delta-and-rollback')
 } | ConvertTo-Json -Depth 3

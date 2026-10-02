@@ -22,7 +22,6 @@ SPEC.loader.exec_module(cli)
 VALID_USERSCRIPT = b"""// ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @version      2.1.0
-// @match        https://www.algumon.com/*
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
 // @match        https://*.ruliweb.com/*
@@ -121,7 +120,7 @@ class ReaderGateV2DeploymentContractTests(unittest.TestCase):
             ["hotdeal-focus.user.js", "release-manifest.json"],
         )
 
-    def test_userscript_rejects_none_extra_grant_and_protocol_one(self) -> None:
+    def test_userscript_rejects_extra_scope_privilege_and_protocol_one(self) -> None:
         invalid_sources = {
             "grant none": VALID_USERSCRIPT.replace(
                 b"// @grant        GM_addElement", b"// @grant        none"
@@ -132,6 +131,31 @@ class ReaderGateV2DeploymentContractTests(unittest.TestCase):
             ),
             "missing urlchange grant": VALID_USERSCRIPT.replace(
                 b"// @grant        window.onurlchange\n", b""
+            ),
+            "algumon match": VALID_USERSCRIPT.replace(
+                b"// @match        https://*.clien.net/*",
+                b"// @match        https://www.algumon.com/*\n"
+                b"// @match        https://*.clien.net/*",
+            ),
+            "algumon include": VALID_USERSCRIPT.replace(
+                b"// @match        https://*.clien.net/*",
+                b"// @include      https://www.algumon.com/*\n"
+                b"// @match        https://*.clien.net/*",
+            ),
+            "legacy get grant": VALID_USERSCRIPT.replace(
+                b"// @grant        window.onurlchange",
+                b"// @grant        GM_getValue\n"
+                b"// @grant        window.onurlchange",
+            ),
+            "legacy set grant": VALID_USERSCRIPT.replace(
+                b"// @grant        window.onurlchange",
+                b"// @grant        GM_setValue\n"
+                b"// @grant        window.onurlchange",
+            ),
+            "legacy delete grant": VALID_USERSCRIPT.replace(
+                b"// @grant        window.onurlchange",
+                b"// @grant        GM_deleteValue\n"
+                b"// @grant        window.onurlchange",
             ),
             "mutable update url": VALID_USERSCRIPT.replace(
                 cli.RELEASE_USERSCRIPT_URL.encode(),

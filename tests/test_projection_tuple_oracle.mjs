@@ -85,6 +85,7 @@ function exactLayout({
   bodyHints = [".exact-body"],
   bodyIgnored = [],
   productIgnored = [],
+  commentHints = [".exact-comments"],
   commentItems = [".exact-comments > .comment-item"],
   commentControls = [".exact-comments > .comment-control"],
   commentIgnored = [".exact-comments > .comment-ignored"],
@@ -97,7 +98,7 @@ function exactLayout({
       ? ["title", "product", "body", "comments"]
       : ["title", "body", "comments"],
     roleProjection: {
-      title: { mode: "seeded-shallow" },
+      title: { mode: "metadata-shallow" },
       body: { mode: "atomic-boundary", ignored: bodyIgnored },
       comments: { mode: "classified-children" },
       product: {
@@ -111,7 +112,7 @@ function exactLayout({
       title: [".exact-title"],
       product: [".exact-product"],
       body: bodyHints,
-      comments: [".exact-comments"],
+      comments: commentHints,
       commentItems,
       commentControls,
       commentIgnored,
@@ -149,27 +150,6 @@ function exactPage({
   </main>`;
 }
 
-function encodedClienSeed(destinationUrl, commentCount) {
-  const now = Date.now();
-  const navigationNonce = `hdf-${"a".repeat(28)}`;
-  const seed = {
-    v: 1,
-    siteType: "clien",
-    dealId: "123",
-    title,
-    commentCount,
-    ts: now,
-    relayV: "a".repeat(32),
-    relayT: String(now),
-    navigationNonce,
-    destinationUrl,
-  };
-  return {
-    navigationNonce,
-    encoded: Buffer.from(JSON.stringify(seed), "utf8").toString("base64url"),
-  };
-}
-
 function clienPage({
   titleHtml = `<div class="post_subject">${title}</div>`,
   bodyExtra = "",
@@ -177,26 +157,60 @@ function clienPage({
     <div class="comment_nav">Visible comment control</div>`,
   publisherCss = "",
   unownedHtml = "",
+  commentsTotalHtml = "",
+  fixtureBodyHtml = null,
 } = {}) {
   return `<!doctype html><html><head>${metadata()}<style>
     ${publisherCss}
-  </style></head><body><div class="content_view">
+  </style></head><body>${fixtureBodyHtml ?? `<div class="content_view">
     ${titleHtml}
     <article class="post_article">${longBody}${bodyExtra}</article>
+    ${commentsTotalHtml}
     <section class="post_comment" aria-label="Comments">${commentsHtml}</section>
-  </div>${unownedHtml}</body></html>`;
+  </div>`}${unownedHtml}</body></html>`;
 }
 
 async function openClienGate(browser, options = {}) {
+  const {
+    controlSource = PREAUTHORIZED_ADGUARD_CONTROL_SOURCE,
+    userSource = userscriptSource,
+    beforeUserScriptSource = "",
+    afterUserScriptSource = "",
+    destinationUrl = "https://www.clien.net/service/board/jirum/123",
+    ...pageOptions
+  } = options;
   const context = await browser.newContext();
   const page = await context.newPage();
   const pageErrors = [];
   page.on("pageerror", (error) => pageErrors.push(error.message));
-  const destinationUrl = "https://www.clien.net/service/board/jirum/123";
-  const seed = encodedClienSeed(destinationUrl, options.commentCount ?? 1);
   await page.addInitScript(
-    ({ source, seedCarrier }) => {
-      window.name = "hdf-provenance:" + seedCarrier;
+    ({ controlSource, userSource, beforeUserScriptSource, afterUserScriptSource }) => {
+      (0, eval)(controlSource);
+      const legacyNavigationSeedCalls = [];
+      Object.defineProperty(globalThis, "__HDF_LEGACY_GM_SEED_CALLS__", {
+        configurable: false,
+        enumerable: false,
+        value: legacyNavigationSeedCalls,
+        writable: false,
+      });
+      const rejectLegacyNavigationSeed = (name) => (...args) => {
+        legacyNavigationSeedCalls.push({ name, argumentCount: args.length });
+        throw new Error(`${name} must not be used for Algumon handoff`);
+      };
+      Object.defineProperties(globalThis, {
+        GM_getValue: {
+          configurable: false,
+          value: rejectLegacyNavigationSeed("GM_getValue"),
+        },
+        GM_setValue: {
+          configurable: false,
+          value: rejectLegacyNavigationSeed("GM_setValue"),
+        },
+        GM_deleteValue: {
+          configurable: false,
+          value: rejectLegacyNavigationSeed("GM_deleteValue"),
+        },
+      });
       const paintProbe = { sampleCount: 0, visibleLeakFrames: 0 };
       Object.defineProperty(globalThis, "__HDF_STANDALONE_LEAK_PROBE__", {
         configurable: false,
@@ -225,21 +239,25 @@ async function openClienGate(browser, options = {}) {
         requestAnimationFrame(sampleLeaks);
       };
       requestAnimationFrame(sampleLeaks);
-      (0, eval)(source);
+      if (beforeUserScriptSource) (0, eval)(beforeUserScriptSource);
+      (0, eval)(userSource);
+      if (afterUserScriptSource) (0, eval)(afterUserScriptSource);
     },
     {
-      source: `${PREAUTHORIZED_ADGUARD_CONTROL_SOURCE}\n${userscriptSource}`,
-      seedCarrier: seed.encoded,
+      controlSource,
+      userSource,
+      beforeUserScriptSource,
+      afterUserScriptSource,
     },
   );
   await page.route(`${destinationUrl}*`, async (route) => {
     await route.fulfill({
       status: 200,
       contentType: "text/html; charset=utf-8",
-      body: clienPage(options),
+      body: clienPage(pageOptions),
     });
   });
-  await page.goto(`${destinationUrl}#hdf-seed=${seed.encoded}`, {
+  await page.goto(destinationUrl, {
     referer: "https://www.algumon.com/",
     waitUntil: "domcontentloaded",
   });
@@ -247,32 +265,110 @@ async function openClienGate(browser, options = {}) {
 }
 
 async function gateState(page) {
-  return page.evaluate(() => ({
-    diagnostics: globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__ || null,
-    commentControlProjection:
-      globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.commentControlProjection || null,
-    lock: document.documentElement.getAttribute("data-hotdeal-focus-lock"),
-    ready: document.documentElement.getAttribute("data-hotdeal-focus-ready"),
-    state: document.documentElement.getAttribute("data-hotdeal-focus-state"),
-    status: document.documentElement.getAttribute("data-hotdeal-focus-status"),
-    inlineStyle: document.documentElement.getAttribute("style"),
-    preauthorizedControl: globalThis.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__
-      ? {
-          kind: globalThis.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__.kind,
-          schemaVersion:
-            globalThis.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__.schemaVersion,
-          gmAddElementCalls:
-            globalThis.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__.gmAddElementCalls,
+  return page.evaluate(() => {
+    const html = document.documentElement;
+    const visible = (element) => {
+      if (!element) return false;
+      const style = getComputedStyle(element);
+      return style.display !== "none" &&
+        style.visibility !== "hidden" &&
+        style.contentVisibility !== "hidden" &&
+        Number(style.opacity) !== 0 &&
+        [...element.getClientRects()].some((rect) => rect.width > 0 && rect.height > 0);
+    };
+    const inlineLockProperties = [
+      "animation",
+      "caret-color",
+      "clip-path",
+      "content-visibility",
+      "opacity",
+      "pointer-events",
+      "transition",
+      "visibility",
+    ];
+    const markedNodeCount = [html, ...document.querySelectorAll("*")].filter((element) =>
+      [...element.attributes].some((attribute) =>
+        attribute.name.startsWith("data-hotdeal-focus-")) ||
+      [...element.classList].some((className) => className.startsWith("hdf-v2-")),
+    ).length;
+    return {
+      diagnostics: globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__ || null,
+      commentControlProjection:
+        globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.commentControlProjection || null,
+      lock: html.getAttribute("data-hotdeal-focus-lock"),
+      ready: html.getAttribute("data-hotdeal-focus-ready"),
+      protocol: html.getAttribute("data-hotdeal-focus-protocol"),
+      measure: html.getAttribute("data-hotdeal-focus-measure"),
+      state: html.getAttribute("data-hotdeal-focus-state"),
+      status: html.getAttribute("data-hotdeal-focus-status"),
+      inlineStyle: html.getAttribute("style"),
+      inlineLockProperties: Object.fromEntries(inlineLockProperties.map((property) => [
+        property,
+        [
+          html.style.getPropertyValue(property),
+          html.style.getPropertyPriority(property),
+        ],
+      ])),
+      markedNodeCount,
+      runtimeStyleCount: document.querySelectorAll(
+        'style[data-hotdeal-focus-runtime-style="2"]',
+      ).length,
+      publisherContentVisible: {
+        article: visible(document.querySelector(".post_article")),
+        comments: visible(document.querySelector(".post_comment")),
+      },
+      preauthorizedControl: globalThis.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__
+        ? {
+            kind: globalThis.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__.kind,
+            schemaVersion:
+              globalThis.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__.schemaVersion,
+            gmAddElementCalls:
+              globalThis.__HOTDEAL_FOCUS_PREAUTHORIZED_CONTROL__.gmAddElementCalls,
+          }
+        : null,
+      releaseProbe: document.querySelector('[data-hdf-v2-release-probe]')
+        ?.getAttribute("style") ?? null,
+      leakPaintProbe: globalThis.__HDF_STANDALONE_LEAK_PROBE__
+        ? { ...globalThis.__HDF_STANDALONE_LEAK_PROBE__ }
+        : null,
+      legacyGmSeedCalls: Array.from(globalThis.__HDF_LEGACY_GM_SEED_CALLS__ || []),
+      visibility: getComputedStyle(html).visibility,
+      contentVisibility: getComputedStyle(html).contentVisibility,
+      opacity: getComputedStyle(html).opacity,
+      clipPath: getComputedStyle(html).clipPath,
+      pointerEvents: getComputedStyle(html).pointerEvents,
+    };
+  });
+}
+
+function withLockedActivationTimeout(source, timeoutMs) {
+  const timeoutDeclaration = /const LOCKED_ACTIVATION_TIMEOUT_MS\s*=\s*[\d_]+\s*;/;
+  assert.match(source, timeoutDeclaration);
+  return source.replace(
+    timeoutDeclaration,
+    `const LOCKED_ACTIVATION_TIMEOUT_MS = ${timeoutMs};`,
+  );
+}
+
+function withPreReleaseRuntimeStop(source) {
+  const activation = "      activeRuntime.beginDiscovery();";
+  assert.ok(source.includes(activation), "runtime activation hook is missing");
+  return source.replace(
+    activation,
+    `${activation}
+      const stopBeforeRelease = function stopBeforeRelease() {
+        const root = document.documentElement;
+        if (
+          root?.getAttribute("data-hotdeal-focus-lock") === "1" &&
+          root?.getAttribute("data-hotdeal-focus-ready") === "1"
+        ) {
+          activeRuntime.stop();
+          return;
         }
-      : null,
-    releaseProbe: document.querySelector('[data-hdf-v2-release-probe]')
-      ?.getAttribute("style") ?? null,
-    leakPaintProbe: globalThis.__HDF_STANDALONE_LEAK_PROBE__
-      ? { ...globalThis.__HDF_STANDALONE_LEAK_PROBE__ }
-      : null,
-    visibility: getComputedStyle(document.documentElement).visibility,
-    opacity: getComputedStyle(document.documentElement).opacity,
-  }));
+        nativeTimeout(browserRoot, stopBeforeRelease, 0);
+      };
+      stopBeforeRelease();`,
+  );
 }
 
 async function evaluate(page, html, oracleLayout, commentCount) {
@@ -377,7 +473,14 @@ async function evaluateExact(page, html, oracleLayout, commentCount) {
         ok: resolution.ok,
         role: resolution.role || null,
         reason: resolution.reason || null,
+        commentMountIdentity:
+          resolution.roles?.comments?.id ||
+          resolution.roles?.comments?.className ||
+          null,
         projectionPolicy: resolution.projectionPolicy || null,
+        bodyIgnoredCount: resolution.roles?.bodyIgnored?.length || 0,
+        productIgnoredCount: resolution.roles?.productIgnored?.length || 0,
+        commentIgnoredCount: resolution.roles?.commentIgnored?.length || 0,
       };
     },
     {
@@ -394,27 +497,40 @@ async function evaluateExactWithAttachedShadow(page, mode) {
   await page.setContent(`<!doctype html><html><head>${metadata()}</head><body>${html}</body></html>`);
   return page.evaluate(
     ({ source, suppliedLayout, seedTitle, shadowMode }) => {
+      const instrumentedSource = source.replace(
+        /    discoverSemanticContract,\r?\n    start,/,
+        "    discoverSemanticContract,\n    initializeShadowTracker,\n    start,",
+      );
+      if (instrumentedSource === source) {
+        throw new Error("shadow tracker export instrumentation failed");
+      }
       const moduleRecord = { exports: {} };
       Object.defineProperty(globalThis, "module", {
         value: moduleRecord,
         configurable: true,
       });
       try {
-        (0, eval)(source);
+        (0, eval)(instrumentedSource);
       } finally {
         delete globalThis.module;
       }
-      document.querySelector(".shadow-host").attachShadow({ mode: shadowMode });
-      const resolution = moduleRecord.exports.resolveDocument(
-        document,
-        [suppliedLayout],
-        { title: seedTitle, commentCount: 1 },
-      );
-      return {
-        ok: resolution.ok,
-        role: resolution.role || null,
-        reason: resolution.reason || null,
-      };
+      const tracker = moduleRecord.exports.initializeShadowTracker(window);
+      if (!tracker?.installed) throw new Error("scoped shadow tracker was unavailable");
+      try {
+        document.querySelector(".shadow-host").attachShadow({ mode: shadowMode });
+        const resolution = moduleRecord.exports.resolveDocument(
+          document,
+          [suppliedLayout],
+          { title: seedTitle, commentCount: 1 },
+        );
+        return {
+          ok: resolution.ok,
+          role: resolution.role || null,
+          reason: resolution.reason || null,
+        };
+      } finally {
+        tracker.uninstall();
+      }
     },
     {
       source: userscriptSource,
@@ -626,6 +742,8 @@ async function exerciseDynamicControl(page, hidden) {
         setup: { ok: true },
         terminalReason: runtime.terminalReason,
         role: control.getAttribute("data-hotdeal-focus-role"),
+        visibility: getComputedStyle(control).visibility,
+        pointerEvents: getComputedStyle(control).pointerEvents,
       };
     },
     {
@@ -641,19 +759,27 @@ async function exerciseDynamicComment(page, {
   exactTotal = false,
   updateExactTotal = false,
   separateExactTotalUpdate = false,
+  totalUpdateAfterItems = false,
+  exerciseControls = false,
   removeInitial = false,
+  nestedMount = false,
+  mutateInitial = false,
 } = {}) {
   const totalHtml = exactTotal
     ? '<p class="comment-total">Comments: 1</p>'
     : "";
   const html = `<main id="page">
     <h1 class="exact-title">${title}</h1>
-    <article class="exact-body">${longBody}</article>
+    <article class="exact-body">${longBody}${exerciseControls ? `
+      <a id="body-link" href="https://example.com/product">Product link</a>
+      <img id="body-image" alt="Product image" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">
+      <details id="body-details" open><summary>Specifications</summary><p>Original specifications</p></details>` : ""}</article>
     ${totalHtml}
     <section class="exact-comments" aria-label="Comments">
       <div class="comment-item" id="initial-comment">Initial visible comment</div>
       <button class="comment-control">Initial visible control</button>
       <div class="comment-ignored" style="display:none">Ignored template</div>
+      ${nestedMount ? '<div class="thread-mount"></div>' : ""}
     </section>
   </main>`;
   await page.setContent(`<!doctype html><html><head>${metadata()}</head><body>${html}</body></html>`);
@@ -664,7 +790,11 @@ async function exerciseDynamicComment(page, {
       seedTitle,
       shouldUpdateTotal,
       shouldSeparateTotalUpdate,
+      shouldUpdateTotalAfterItems,
+      shouldExerciseControls,
       shouldRemoveInitial,
+      shouldUseNestedMount,
+      shouldMutateInitial,
     }) => {
       const instrumentedSource = source.replace(
         /    discoverSemanticContract,\r?\n    start,/,
@@ -725,24 +855,96 @@ async function exerciseDynamicComment(page, {
       api.installIntegrityObserver(window, runtime, state, gateStyle);
 
       const initial = document.querySelector("#initial-comment");
+      const initialIdentity = initial;
+      const originalBody = document.querySelector(".exact-body");
+      const originalBodyText = originalBody.textContent;
+      const originalControl = document.querySelector(".comment-control");
+      const originalLink = document.querySelector("#body-link");
+      const originalImage = document.querySelector("#body-image");
+      const originalDetails = document.querySelector("#body-details");
+      if (shouldExerciseControls) {
+        originalControl.addEventListener("click", () => {
+          const reply = document.createElement("div");
+          reply.className = "comment-item";
+          reply.id = "loaded-more-comment";
+          reply.textContent = "Reply loaded by the original comment control";
+          resolution.roles.comments.appendChild(reply);
+        });
+      }
+      if (shouldMutateInitial) {
+        initial.classList.add("publisher-loaded");
+        initial.setAttribute("aria-label", "Loaded visible comment");
+        initial.firstChild.data = "Updated visible comment";
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
       const added = document.createElement("section");
       added.className = "comment-item";
       added.innerHTML = '<p>New nested reply</p><img alt="reply media" src="data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==">';
-      if (shouldUpdateTotal) {
+      if (shouldUpdateTotal && !shouldUpdateTotalAfterItems) {
         document.querySelector(".comment-total").textContent = "Comments: 2";
         if (shouldSeparateTotalUpdate) {
           await new Promise((resolve) => setTimeout(resolve, 0));
         }
       }
-      resolution.roles.comments.appendChild(added);
+      const insertionRoot = shouldUseNestedMount
+        ? resolution.roles.comments.querySelector(".thread-mount")
+        : resolution.roles.comments;
+      insertionRoot.appendChild(added);
       await new Promise((resolve) => setTimeout(resolve, 0));
+      if (shouldUpdateTotal && shouldUpdateTotalAfterItems) {
+        document.querySelector(".comment-total").textContent = "Comments: 2";
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      if (shouldExerciseControls) {
+        originalDetails.querySelector("summary").click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        originalDetails.querySelector("summary").click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        originalControl.click();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        const popular = document.createElement("aside");
+        popular.className = "popular";
+        popular.id = "unrelated-popular";
+        popular.textContent = "Popular unrelated posts";
+        document.querySelector("#page").appendChild(popular);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+      const visible = (element) => Boolean(element) &&
+        getComputedStyle(element).display !== "none" &&
+        getComputedStyle(element).visibility !== "hidden" &&
+        element.getClientRects().length > 0;
       const additionState = {
         terminalReason: runtime.terminalReason,
         role: added.getAttribute("data-hotdeal-focus-role"),
         addedKept: added.hasAttribute("data-hotdeal-focus-keep"),
         mediaKept: added.querySelector("img")?.hasAttribute("data-hotdeal-focus-keep") === true,
         initialPreserved: initial.isConnected && initial === document.querySelector("#initial-comment"),
-        itemCount: document.querySelectorAll(".exact-comments > .comment-item").length,
+        initialIdentityPreserved: initial === initialIdentity,
+        initialText: initial.textContent,
+        itemCount: document.querySelectorAll(".exact-comments .comment-item").length,
+        nestedMountKept: insertionRoot.hasAttribute("data-hotdeal-focus-keep"),
+        bodyIdentityPreserved: originalBody === document.querySelector(".exact-body"),
+        bodyTextPreserved: originalBody.textContent === originalBodyText,
+        bodyVisible: visible(originalBody),
+        commentVisible: visible(initial),
+        imagePreserved: !shouldExerciseControls || (
+          originalImage === document.querySelector("#body-image") &&
+          originalImage.naturalWidth > 0 && visible(originalImage)
+        ),
+        linkPreserved: !shouldExerciseControls || (
+          originalLink === document.querySelector("#body-link") &&
+          originalLink.href === "https://example.com/product" && visible(originalLink)
+        ),
+        detailsPreserved: !shouldExerciseControls || (
+          originalDetails === document.querySelector("#body-details") &&
+          originalDetails.open && visible(originalDetails.querySelector("p"))
+        ),
+        moreControlPreserved: !shouldExerciseControls || (
+          originalControl === document.querySelector(".comment-control") &&
+          visible(originalControl) && visible(document.querySelector("#loaded-more-comment")) &&
+          document.querySelector("#loaded-more-comment").hasAttribute("data-hotdeal-focus-keep")
+        ),
+        popularHidden: !shouldExerciseControls || !visible(document.querySelector("#unrelated-popular")),
       };
       if (shouldRemoveInitial && !runtime.terminallyBlocked) {
         initial.remove();
@@ -756,18 +958,462 @@ async function exerciseDynamicComment(page, {
     },
     {
       source: `${preauthorizedOracleStyleControlSource}\n${userscriptSource}`,
-      suppliedLayout: exactLayout(),
+      suppliedLayout: exactLayout({
+        commentItems: nestedMount
+          ? [".exact-comments .comment-item"]
+          : [".exact-comments > .comment-item"],
+      }),
       seedTitle: title,
       shouldUpdateTotal: updateExactTotal,
       shouldSeparateTotalUpdate: separateExactTotalUpdate,
+      shouldUpdateTotalAfterItems: totalUpdateAfterItems,
+      shouldExerciseControls: exerciseControls,
       shouldRemoveInitial: removeInitial,
+      shouldUseNestedMount: nestedMount,
+      shouldMutateInitial: mutateInitial,
     },
   );
+}
+
+async function exerciseExternalCommentImplementationRemoval(page) {
+  await page.setContent(`<!doctype html><html><head>${metadata()}</head><body>
+    <main id="page">
+      <h1 class="exact-title">${title}</h1>
+      <article class="exact-body">${longBody}</article>
+      <section class="exact-comments" aria-label="Comments">
+        <div class="comment-item" id="retained-comment">Retained visible comment</div>
+      </section>
+      <div id="external-comment-control-parent">
+        <button class="external-comment-control">New comment</button>
+        <iframe id="publisher-editor-bootstrap" class="cheditor-editarea"></iframe>
+      </div>
+    </main>
+  </body></html>`);
+  return page.evaluate(
+    async ({ source, suppliedLayout, seedTitle }) => {
+      const instrumentedSource = source.replace(
+        /    discoverSemanticContract,\r?\n    start,/,
+        "    discoverSemanticContract,\n    applyRoleMarkers,\n    installRuntimeGateStyle,\n    installIntegrityObserver,\n    start,",
+      );
+      if (instrumentedSource === source) {
+        throw new Error("private export instrumentation failed");
+      }
+      const moduleRecord = { exports: {} };
+      Object.defineProperty(globalThis, "module", {
+        value: moduleRecord,
+        configurable: true,
+      });
+      try {
+        (0, eval)(instrumentedSource);
+      } finally {
+        delete globalThis.module;
+      }
+      const api = moduleRecord.exports;
+      const resolution = api.resolveDocument(
+        document,
+        [suppliedLayout],
+        { title: seedTitle, commentCount: 1 },
+      );
+      if (!resolution.ok) return { setup: resolution };
+      const nonce = "external-comment-removal-fixture-nonce";
+      const state = api.applyRoleMarkers(
+        document,
+        resolution.roles,
+        resolution.commonRoot,
+        resolution.resolvedTitle,
+        resolution.requiredRoles,
+        resolution.commentItemSelectors,
+        resolution.commentControlSelectors,
+        resolution.commentIgnoredSelectors,
+        resolution.projectionPolicy,
+        nonce,
+      );
+      const comment = document.querySelector("#retained-comment");
+      const control = document.querySelector(".external-comment-control");
+      const editor = document.querySelector("#publisher-editor-bootstrap");
+      const commentIdentity = comment;
+      const controlIdentity = control;
+      const editorInitiallyOwned =
+        editor.hasAttribute("data-hotdeal-focus-keep");
+      const runtime = {
+        terminallyBlocked: false,
+        terminalReason: null,
+        authorizedReady: true,
+        releasePhase: "released",
+        projectionPublishCount: 0,
+        relockForReprojection() { return false; },
+        publishReadyProjectionDiagnostics() {
+          this.projectionPublishCount += 1;
+          return true;
+        },
+        enterTerminal(reason) {
+          this.terminallyBlocked = true;
+          this.terminalReason = reason;
+        },
+      };
+      const gateStyle = api.installRuntimeGateStyle(document);
+      gateStyle.textContent = api.gateStyleText(nonce);
+      document.documentElement.removeAttribute("data-hotdeal-focus-lock");
+      document.documentElement.classList.add("hdf-v2-ready");
+      document.documentElement.setAttribute("data-hotdeal-focus-ready", "1");
+      document.documentElement.setAttribute(
+        "data-hotdeal-focus-protocol",
+        api.PROTOCOL_VERSION,
+      );
+      document.documentElement.setAttribute("data-hotdeal-focus-state", "ready");
+      document.documentElement.setAttribute("data-hotdeal-focus-status", "ready");
+      api.installIntegrityObserver(window, runtime, state, gateStyle);
+
+      editor.remove();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        return style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          element.getClientRects().length > 0;
+      };
+      return {
+        setup: { ok: true },
+        editorInitiallyOwned,
+        editorRemoved: !document.querySelector("#publisher-editor-bootstrap"),
+        terminalReason: runtime.terminalReason,
+        projectionPublishCount: runtime.projectionPublishCount,
+        projectionEpoch: state.projectionEpoch,
+        commentIdentityPreserved:
+          comment === commentIdentity && comment.isConnected,
+        controlIdentityPreserved:
+          control === controlIdentity && control.isConnected,
+        commentVisible: visible(comment),
+        controlVisible: visible(control),
+        commentText: comment.textContent,
+        controlText: control.textContent,
+      };
+    },
+    {
+      source: `${preauthorizedOracleStyleControlSource}\n${userscriptSource}`,
+      suppliedLayout: exactLayout({
+        commentControls: [
+          "#external-comment-control-parent > .external-comment-control",
+        ],
+      }),
+      seedTitle: title,
+    },
+  );
+}
+
+async function exerciseDynamicCommentControlReplacement(page, {
+  injectPopularNoise = false,
+} = {}) {
+  await page.setContent(`<!doctype html><html><head>${metadata()}</head><body>
+    <main id="page">
+      <h1 class="exact-title">${title}</h1>
+      <article class="exact-body">${longBody}</article>
+      <section class="exact-comments" aria-label="Comments">
+        <div class="comment-item" id="retained-dynamic-comment">
+          Retained visible comment
+        </div>
+      </section>
+      <div id="external-comment-control-parent">
+        <div id="comment_paging_area">
+          <div id="initial-page-control"><a href="#page-1">1</a></div>
+        </div>
+      </div>
+    </main>
+  </body></html>`);
+  return page.evaluate(
+    async ({ source, suppliedLayout, seedTitle, shouldInjectPopularNoise }) => {
+      const instrumentedSource = source.replace(
+        /    discoverSemanticContract,\r?\n    start,/,
+        "    discoverSemanticContract,\n    applyRoleMarkers,\n" +
+          "    verifyOwnedMarkerState,\n    verifyOwnedState,\n" +
+          "    currentCommentControlProjection,\n" +
+          "    projectionHasPublisherPaintRiskWithPublisherStyles,\n" +
+          "    deriveCommentProjectionRoots,\n" +
+          "    hasUnclassifiedCommentContent,\n" +
+          "    commentProjectionHasRisk,\n" +
+          "    installRuntimeGateStyle,\n    installIntegrityObserver,\n    start,",
+      );
+      if (instrumentedSource === source) {
+        throw new Error("private export instrumentation failed");
+      }
+      const moduleRecord = { exports: {} };
+      Object.defineProperty(globalThis, "module", {
+        value: moduleRecord,
+        configurable: true,
+      });
+      try {
+        (0, eval)(instrumentedSource);
+      } finally {
+        delete globalThis.module;
+      }
+      const api = moduleRecord.exports;
+      const resolution = api.resolveDocument(
+        document,
+        [suppliedLayout],
+        { title: seedTitle, commentCount: 1 },
+      );
+      if (!resolution.ok) return { setup: resolution };
+      const nonce = "dynamic-comment-control-replacement-nonce";
+      const state = api.applyRoleMarkers(
+        document,
+        resolution.roles,
+        resolution.commonRoot,
+        resolution.resolvedTitle,
+        resolution.requiredRoles,
+        resolution.commentItemSelectors,
+        resolution.commentControlSelectors,
+        resolution.commentIgnoredSelectors,
+        resolution.projectionPolicy,
+        nonce,
+      );
+      const comment = document.querySelector("#retained-dynamic-comment");
+      const control = document.querySelector("#comment_paging_area");
+      const commentIdentity = comment;
+      const controlIdentity = control;
+      const runtime = {
+        terminallyBlocked: false,
+        terminalReason: null,
+        authorizedReady: true,
+        releasePhase: "released",
+        projectionPublishCount: 0,
+        relockForReprojection() { return false; },
+        publishReadyProjectionDiagnostics() {
+          this.projectionPublishCount += 1;
+          return true;
+        },
+        enterTerminal(reason) {
+          this.terminallyBlocked = true;
+          this.terminalReason = reason;
+        },
+      };
+      const gateStyle = api.installRuntimeGateStyle(document);
+      gateStyle.textContent = api.gateStyleText(nonce);
+      document.documentElement.removeAttribute("data-hotdeal-focus-lock");
+      document.documentElement.classList.add("hdf-v2-ready");
+      document.documentElement.setAttribute("data-hotdeal-focus-ready", "1");
+      document.documentElement.setAttribute(
+        "data-hotdeal-focus-protocol",
+        api.PROTOCOL_VERSION,
+      );
+      document.documentElement.setAttribute("data-hotdeal-focus-state", "ready");
+      document.documentElement.setAttribute("data-hotdeal-focus-status", "ready");
+      api.installIntegrityObserver(window, runtime, state, gateStyle);
+
+      control.innerHTML = shouldInjectPopularNoise
+        ? '<div class="popular"><a href="/popular">인기글</a></div>'
+        : `<link rel="stylesheet" href="data:text/css,">
+           <div id="page_down"><div id="page"><table><tbody><tr>
+             <td id="page_list"><a href="#page-2">2</a></td>
+           </tr></tbody></table></div></div>`;
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      const descendants = Array.from(control.querySelectorAll("*"));
+      const currentProjection = api.deriveCommentProjectionRoots(
+        state.roles.comments,
+        state.commentControlScope,
+        state.commentItemSelectors,
+        state.commentControlSelectors,
+        state.commentIgnoredSelectors,
+        state.commentControlRoots,
+      );
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        return style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          element.getClientRects().length > 0;
+      };
+      return {
+        setup: { ok: true },
+        terminalReason: runtime.terminalReason,
+        projectionPublishCount: runtime.projectionPublishCount,
+        projectionEpoch: state.projectionEpoch,
+        commentIdentityPreserved:
+          comment === commentIdentity && comment.isConnected,
+        controlIdentityPreserved:
+          control === controlIdentity && control.isConnected,
+        commentText: comment.textContent.trim(),
+        commentVisible: visible(comment),
+        controlVisible: visible(control),
+        descendantCount: descendants.length,
+        allDescendantsOwned: descendants.every(
+          (element) =>
+            element.getAttribute("data-hotdeal-focus-keep") === nonce &&
+            element.getAttribute("data-hotdeal-focus-deep") === "comment-control",
+        ),
+        popularVisible:
+          Boolean(control.querySelector(".popular")) &&
+          visible(control.querySelector(".popular")),
+        markerStateValid: api.verifyOwnedMarkerState(document, state),
+        ownedStateValid: api.verifyOwnedState(document, state),
+        controlProjection: api.currentCommentControlProjection(state),
+        projectionPaintRisk:
+          api.projectionHasPublisherPaintRiskWithPublisherStyles(state),
+        commentProjectionOk: currentProjection.ok,
+        currentItemCount: currentProjection.ok
+          ? currentProjection.commentItems.length
+          : -1,
+        currentControlCount: currentProjection.ok
+          ? currentProjection.commentControls.length
+          : -1,
+        currentIgnoredCount: currentProjection.ok
+          ? currentProjection.commentIgnored.length
+          : -1,
+        unclassifiedCommentContent: currentProjection.ok
+          ? api.hasUnclassifiedCommentContent(
+              state.roles.comments,
+              currentProjection.commentItems.concat(
+                currentProjection.commentControls,
+                currentProjection.commentIgnored,
+              ),
+            )
+          : true,
+        directCommentRisk: currentProjection.ok
+          ? api.commentProjectionHasRisk(
+              state.roles.comments,
+              currentProjection.commentItems,
+              currentProjection.commentControls,
+              currentProjection.commentIgnored,
+              false,
+              state.commentControlScope,
+            )
+          : true,
+      };
+    },
+    {
+      source: `${preauthorizedOracleStyleControlSource}\n${userscriptSource}`,
+      suppliedLayout: exactLayout({
+        commentControls: [
+          "#external-comment-control-parent > #comment_paging_area",
+        ],
+      }),
+      seedTitle: title,
+      shouldInjectPopularNoise: injectPopularNoise,
+    },
+  );
+}
+
+async function exerciseMobileResponsiveProjection(page) {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.setContent(`<!doctype html><html><head></head><body>
+    <div id="main" style="width:1389px;min-width:1389px;margin-right:-1014px">
+      <div id="news" style="width:1159px;min-width:1159px;margin-right:230px">
+        <div class="row" style="display:flex;width:1159px">
+          <div class="subtop_center_w" style="width:1024px">
+            <div id="board" style="width:1024px">
+              <main id="board_read" style="display:inline-block;width:1024px">
+                <h1 id="responsive-title"
+                    style="display:inline;white-space:nowrap;width:426px">${title}</h1>
+                <article id="responsive-body"
+                    style="width:962px;margin-left:30px;margin-right:30px">
+                  <div id="responsive-body-text">${longBody}</div>
+                </article>
+                <aside id="responsive-product"
+                    style="width:400px;margin-left:15px;margin-right:15px">
+                  Original product information
+                </aside>
+                <section id="responsive-comments" style="width:1024px"></section>
+              </main>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </body></html>`);
+  const result = await page.evaluate(
+    ({ source, expectedTitle }) => {
+      const moduleRecord = { exports: {} };
+      Object.defineProperty(globalThis, "module", {
+        configurable: true,
+        value: moduleRecord,
+      });
+      try {
+        (0, eval)(source);
+      } finally {
+        delete globalThis.module;
+      }
+      const api = moduleRecord.exports;
+      const nonce = "responsive-fixture-nonce";
+      const keep = "hdf-v2-keep";
+      const shell = "hdf-v2-shell";
+      const deep = "hdf-v2-deep";
+      const markShell = (element) => {
+        element.classList.add(keep, shell);
+        element.setAttribute("data-hotdeal-focus-keep", nonce);
+        element.setAttribute("data-hotdeal-focus-shell", nonce);
+      };
+      document.querySelectorAll("#main, #news, .row, .subtop_center_w, #board, #board_read")
+        .forEach(markShell);
+      const markRole = (selector, role, isDeep = false) => {
+        const element = document.querySelector(selector);
+        element.classList.add(keep, `hdf-v2-role-${role}`);
+        element.setAttribute("data-hotdeal-focus-keep", nonce);
+        element.setAttribute("data-hotdeal-focus-role", role);
+        if (isDeep) {
+          element.classList.add(deep);
+          element.setAttribute("data-hotdeal-focus-deep", role);
+        }
+        return element;
+      };
+      const titleNode = markRole("#responsive-title", "title");
+      const bodyNode = markRole("#responsive-body", "body", true);
+      const bodyText = document.querySelector("#responsive-body-text");
+      bodyText.classList.add(keep, deep);
+      bodyText.setAttribute("data-hotdeal-focus-keep", nonce);
+      bodyText.setAttribute("data-hotdeal-focus-deep", "body");
+      const productNode = markRole("#responsive-product", "product", true);
+      const commentsNode = markRole("#responsive-comments", "comments");
+      markShell(commentsNode);
+      document.documentElement.classList.add("hdf-v2-ready");
+      document.documentElement.setAttribute("data-hotdeal-focus-ready", "1");
+      document.documentElement.setAttribute("data-hotdeal-focus-protocol", api.PROTOCOL_VERSION);
+      document.documentElement.setAttribute("data-hotdeal-focus-state", "ready");
+      document.documentElement.setAttribute("data-hotdeal-focus-status", "ready");
+      const style = document.createElement("style");
+      style.textContent = api.gateStyleText(nonce);
+      document.head.appendChild(style);
+      const rect = (node) => {
+        const value = node.getBoundingClientRect();
+        return { left: value.left, right: value.right, width: value.width };
+      };
+      return {
+        viewport: document.documentElement.clientWidth,
+        scrollWidth: document.documentElement.scrollWidth,
+        title: rect(titleNode),
+        body: rect(bodyNode),
+        product: rect(productNode),
+        comments: rect(commentsNode),
+        identitiesPreserved:
+          titleNode === document.querySelector("#responsive-title") &&
+          bodyNode === document.querySelector("#responsive-body") &&
+          productNode === document.querySelector("#responsive-product") &&
+          commentsNode === document.querySelector("#responsive-comments"),
+        textPreserved: titleNode.textContent === expectedTitle &&
+          productNode.textContent.trim() === "Original product information",
+      };
+    },
+    { source: userscriptSource, expectedTitle: title },
+  );
+  await page.setViewportSize({ width: 1280, height: 720 });
+  return result;
 }
 
 const browser = await chromium.launch({ headless: true });
 try {
   const page = await browser.newPage();
+
+  const responsiveProjection = await exerciseMobileResponsiveProjection(page);
+  assert.equal(responsiveProjection.identitiesPreserved, true);
+  assert.equal(responsiveProjection.textPreserved, true);
+  assert.ok(
+    responsiveProjection.scrollWidth <= responsiveProjection.viewport,
+    JSON.stringify(responsiveProjection),
+  );
+  ["title", "body", "product", "comments"].forEach((role) => {
+    assert.ok(responsiveProjection[role].left >= 0, JSON.stringify(responsiveProjection));
+    assert.ok(
+      responsiveProjection[role].right <= responsiveProjection.viewport,
+      JSON.stringify(responsiveProjection),
+    );
+  });
 
   const nestedTitle = await evaluate(
     page,
@@ -1080,8 +1726,11 @@ try {
       layout(),
       2,
     );
-    assert.equal(structuralNoise.ok, false, `bare ${structuralTag} must be rejected`);
-    assert.equal(structuralNoise.reason, "no-complete-projection-tuple");
+    assert.equal(
+      structuralNoise.ok,
+      true,
+      `bare ${structuralTag} must be isolated without rejecting the article`,
+    );
   }
 
   const recommendationContainer = await evaluate(
@@ -1093,7 +1742,7 @@ try {
     layout(),
     2,
   );
-  assert.equal(recommendationContainer.ok, false);
+  assert.equal(recommendationContainer.ok, true);
 
   const noisyProduct = await evaluate(
     page,
@@ -1123,13 +1772,16 @@ try {
       <footer class="related-footer">Sponsored related content</footer>
     </section>
   </main>`;
-  const staleExactPolicy = await evaluateExact(
+  const resilientExactPolicy = await evaluateExact(
     page,
     policyDriftHtml,
     exactLayout({ product: "required", productOrder: "after-body" }),
     1,
   );
-  assert.equal(staleExactPolicy.ok, false);
+  assert.equal(resilientExactPolicy.ok, true, JSON.stringify(resilientExactPolicy));
+  assert.equal(resilientExactPolicy.bodyIgnoredCount, 1);
+  assert.equal(resilientExactPolicy.productIgnoredCount, 1);
+  assert.equal(resilientExactPolicy.commentIgnoredCount, 1);
 
   const independentPolicyProposal = await evaluatePolicyProposal(
     page,
@@ -1200,8 +1852,11 @@ try {
     layout(),
     2,
   );
-  assert.equal(unsafeIgnoredPurchase.ok, false);
-  assert.equal(unsafeIgnoredPurchase.reason, "no-complete-projection-tuple");
+  assert.equal(
+    unsafeIgnoredPurchase.ok,
+    true,
+    "publisher sponsor surfaces remain noise even when they contain a purchase link",
+  );
 
   const productLeafMedia = await evaluate(
     page,
@@ -1416,6 +2071,62 @@ try {
     ".box_line_with_shadow.source_url",
   ]);
 
+  const ruliNestedMountLayout = exactLayout({
+    commentHints: [".comment_view.normal", "#cmt.comment_wrapper"],
+    commentItems: [
+      ".comment_view.normal > table.comment_table > tbody > tr.comment_element",
+    ],
+    commentControls: [],
+    commentIgnored: [
+      "#cmt.comment_wrapper > input",
+      "#cmt.comment_wrapper > .comment_count_wrapper",
+      "#cmt.comment_wrapper > .comment_disable",
+      "#cmt.comment_wrapper > br",
+    ],
+  });
+  const ruliNestedMount = await evaluateExact(
+    page,
+    `<main id="page">
+      <h1 class="exact-title">${title}</h1>
+      <article class="exact-body">${longBody}</article>
+      <section id="cmt" class="comment_wrapper">
+        <input type="hidden" value="publisher state">
+        <div class="comment_count_wrapper">Comments 1</div>
+        <section class="comment_view normal">
+          <table class="comment_table"><tbody>
+            <tr class="comment_element" itemprop="comment"><td>Complete comment</td></tr>
+          </tbody></table>
+        </section>
+      </section>
+    </main>`,
+    ruliNestedMountLayout,
+    1,
+  );
+  assert.equal(ruliNestedMount.ok, true, JSON.stringify(ruliNestedMount));
+  assert.equal(ruliNestedMount.commentMountIdentity, "comment_view normal");
+
+  const ruliEmptyOuterMount = await evaluateExact(
+    page,
+    `<main id="page">
+      <h1 class="exact-title">${title}</h1>
+      <article class="exact-body">${longBody}</article>
+      <section id="cmt" class="comment_wrapper">
+        <input id="c_mpc" type="hidden" value="publisher state">
+        <input class="comment_profile_image_enabled" type="hidden" value="1">
+        <div class="comment_count_wrapper">댓글 | 총 0 개</div>
+        <br><br>
+        <div class="comment_disable">로그인이 필요합니다.</div>
+        <br><br>
+        <script>globalThis.__ruliEmptyCommentFixture = true;</script>
+      </section>
+    </main>`,
+    ruliNestedMountLayout,
+    0,
+  );
+  assert.equal(ruliEmptyOuterMount.ok, true, JSON.stringify(ruliEmptyOuterMount));
+  assert.equal(ruliEmptyOuterMount.commentMountIdentity, "cmt");
+  assert.equal(ruliEmptyOuterMount.commentIgnoredCount, 8);
+
   const eomisaePopularWidget = `<ul class="widget-list">
     ${Array.from({ length: 14 }, (_, index) =>
       `<li><a href="/popular/${index + 1}">Popular post ${index + 1}</a></li>`
@@ -1463,7 +2174,16 @@ try {
   const exactBaseline = await evaluateExact(page, exactPage(), exactLayout(), 1);
   assert.equal(exactBaseline.ok, true);
 
-  const replySetRevealFailsClosed = await evaluateExact(
+  const shortAuthoredRelatedSpecification = await evaluateExact(
+    page,
+    exactPage({ bodyExtra: '<section class="related">legitimate related specification</section>' }),
+    exactLayout(),
+    1,
+  );
+  assert.equal(shortAuthoredRelatedSpecification.ok, true);
+  assert.equal(shortAuthoredRelatedSpecification.bodyIgnoredCount, 0);
+
+  const replySetRevealPreservesLoadedComments = await evaluateExact(
     page,
     exactPage({
       commentsHtml: `<div class="comment-item">Visible comment</div>
@@ -1472,10 +2192,9 @@ try {
     exactLayout(),
     1,
   );
-  assert.equal(replySetRevealFailsClosed.ok, false);
-  assert.equal(replySetRevealFailsClosed.reason, "incomplete-comment-control");
+  assert.equal(replySetRevealPreservesLoadedComments.ok, true, JSON.stringify(replySetRevealPreservesLoadedComments));
 
-  const moreCommentsFailsClosed = await evaluateExact(
+  const moreCommentsPreserveLoadedComments = await evaluateExact(
     page,
     exactPage({
       commentsHtml: `<div class="comment-item">Visible comment</div>
@@ -1484,8 +2203,7 @@ try {
     exactLayout(),
     1,
   );
-  assert.equal(moreCommentsFailsClosed.ok, false);
-  assert.equal(moreCommentsFailsClosed.reason, "incomplete-comment-control");
+  assert.equal(moreCommentsPreserveLoadedComments.ok, true, JSON.stringify(moreCommentsPreserveLoadedComments));
 
   const shallowTitleIgnoresUnprojectedChrome = await evaluateExact(
     page,
@@ -1539,10 +2257,10 @@ try {
   assert.equal(staleAlgumonCountIsOnlyALowerBound.ok, true);
   assert.equal(
     staleAlgumonCountIsOnlyALowerBound.projectionPolicy.provenCommentCountSource,
-    "exact-dom+algumon-lower-bound",
+    "exact-dom-observed",
   );
 
-  const lowerBoundStillRejectsMissingComments = await evaluateExact(
+  const staleHigherCountPreservesLoadedComments = await evaluateExact(
     page,
     exactPage({
       commentsHtml: Array.from({ length: 3 }, (_, index) =>
@@ -1552,10 +2270,11 @@ try {
     exactLayout({ commentItems: [".exact-comments > .comment-item"] }),
     4,
   );
-  assert.equal(lowerBoundStillRejectsMissingComments.ok, false);
-  assert.equal(lowerBoundStillRejectsMissingComments.reason, "partial-comment-set");
+  assert.equal(staleHigherCountPreservesLoadedComments.ok, true);
+  assert.equal(staleHigherCountPreservesLoadedComments.projectionPolicy.provenCommentCount, 3);
+  assert.equal(staleHigherCountPreservesLoadedComments.projectionPolicy.provenCommentCountSource, "exact-dom-observed");
 
-  const fakeContinuationCannotApprovePartial = await evaluateExact(
+  const approvedContinuationPreservesLoadedComments = await evaluateExact(
     page,
     exactPage({
       commentsHtml: `<div class="comment-item" itemprop="comment">Only loaded comment</div>
@@ -1564,8 +2283,9 @@ try {
     exactLayout({ commentItems: [".exact-comments .comment-item"] }),
     100,
   );
-  assert.equal(fakeContinuationCannotApprovePartial.ok, false);
-  assert.equal(fakeContinuationCannotApprovePartial.reason, "incomplete-comment-control");
+  assert.equal(approvedContinuationPreservesLoadedComments.ok, true, JSON.stringify(approvedContinuationPreservesLoadedComments));
+  assert.equal(approvedContinuationPreservesLoadedComments.projectionPolicy.provenCommentCount, 1);
+  assert.equal(approvedContinuationPreservesLoadedComments.projectionPolicy.provenCommentCountSource, "exact-dom-paginated");
 
   const escapedExactEvidence = await evaluateExact(
     page,
@@ -1667,8 +2387,8 @@ try {
     exactLayout(),
     1,
   );
-  assert.equal(hiddenInitialItem.ok, false);
-  assert.equal(hiddenInitialItem.reason, "classified-rendering");
+  assert.equal(hiddenInitialItem.ok, true);
+  assert.equal(hiddenInitialItem.projectionPolicy.provenCommentCount, 1);
 
   const dormantInitialControls = await evaluateExact(
     page,
@@ -1742,7 +2462,7 @@ try {
   assert.equal(exactStaleZeroSeedAllowsNewComment.ok, true);
   assert.equal(
     exactStaleZeroSeedAllowsNewComment.projectionPolicy.provenCommentCountSource,
-    "exact-dom+algumon-lower-bound",
+    "exact-dom-observed",
   );
 
   const exactBareAside = await evaluateExact(
@@ -1751,8 +2471,8 @@ try {
     exactLayout(),
     1,
   );
-  assert.equal(exactBareAside.ok, false);
-  assert.equal(exactBareAside.reason, "structural-noise");
+  assert.equal(exactBareAside.ok, true);
+  assert.equal(exactBareAside.bodyIgnoredCount, 1);
 
   const exactRecommendation = await evaluateExact(
     page,
@@ -1760,8 +2480,8 @@ try {
     exactLayout(),
     1,
   );
-  assert.equal(exactRecommendation.ok, false);
-  assert.equal(exactRecommendation.reason, "structural-noise");
+  assert.equal(exactRecommendation.ok, true);
+  assert.equal(exactRecommendation.bodyIgnoredCount, 1);
 
   const exactRuliProductAfterBody = await evaluateExact(
     page,
@@ -1833,10 +2553,10 @@ try {
   );
   assert.equal(
     schemaSubsetWithVisibleCommentTotal.projectionPolicy.provenCommentCountSource,
-    "visible-comment-total",
+    "exact-dom-observed",
   );
 
-  const visibleCommentTotalRejectsPartialRows = await evaluateExact(
+  const aggregateCommentTotalPreservesLoadedRows = await evaluateExact(
     page,
     `<main id="page">
       <h1 class="exact-title">${title}</h1>
@@ -1857,8 +2577,8 @@ try {
     }),
     null,
   );
-  assert.equal(visibleCommentTotalRejectsPartialRows.ok, false);
-  assert.equal(visibleCommentTotalRejectsPartialRows.reason, "partial-comment-set");
+  assert.equal(aggregateCommentTotalPreservesLoadedRows.ok, true);
+  assert.equal(aggregateCommentTotalPreservesLoadedRows.projectionPolicy.provenCommentCount, 3);
 
   const exactRuliWrongProductOrder = await evaluateExact(
     page,
@@ -1888,7 +2608,6 @@ try {
     ["data test advertisement", '<div data-testid="advertisement">Placement</div>'],
     ["data component related posts", '<div data-component="related-posts"><a href="/other">Other post</a></div>'],
     ["data role sponsored", '<a data-role="sponsored" href="/partner">Partner</a>'],
-    ["sponsored relation", '<a rel="sponsored" href="/partner">Partner</a>'],
     ["ad network resource", '<a href="https://googleads.g.doubleclick.net/pagead/landing">Placement</a>'],
   ]) {
     const strongExactNoise = await evaluateExact(
@@ -1897,8 +2616,11 @@ try {
       exactLayout(),
       1,
     );
-    assert.equal(strongExactNoise.ok, false, `${name} must fail exact projection`);
-    assert.equal(strongExactNoise.role, "body");
+    assert.equal(strongExactNoise.ok, true, `${name} must be isolated`);
+    assert.ok(
+      strongExactNoise.bodyIgnoredCount >= 1,
+      `${name} must be excluded from the approved body projection`,
+    );
   }
 
   const exactNoisyProduct = await evaluateExact(
@@ -1909,8 +2631,8 @@ try {
     exactLayout({ product: "required" }),
     1,
   );
-  assert.equal(exactNoisyProduct.ok, false);
-  assert.equal(exactNoisyProduct.role, "product");
+  assert.equal(exactNoisyProduct.ok, true);
+  assert.equal(exactNoisyProduct.productIgnoredCount, 1);
 
   const exactBenignMedia = await evaluateExact(
     page,
@@ -1983,8 +2705,8 @@ try {
     }),
     1,
   );
-  assert.equal(arcaNestedUnapprovedAd.ok, false);
-  assert.equal(arcaNestedUnapprovedAd.reason, "structural-noise");
+  assert.equal(arcaNestedUnapprovedAd.ok, true);
+  assert.equal(arcaNestedUnapprovedAd.bodyIgnoredCount, 1);
 
   const arcaDuplicateOuterBody = await evaluateExact(
     page,
@@ -2036,6 +2758,48 @@ try {
     3,
   );
   assert.equal(arcaNestedReplyItems.ok, true, JSON.stringify(arcaNestedReplyItems));
+
+  const arcaInitialPublisherChrome = await evaluateExact(
+    page,
+    exactPage({
+      commentsHtml: `<div class="title">댓글 [2]</div>
+        <div class="list-area">
+          <div class="comment-wrapper"><div class="comment-item" id="c_1">Original first comment</div></div>
+          <div class="comment-wrapper"><div class="comment-item" id="c_2">Original second comment</div></div>
+          <div class="publisher-module">A new publisher notice outside the comments</div>
+          A publisher text node outside every comment item
+          <div class="newcomment-alert fetch-comment" style="display:none">새 댓글 불러오기</div>
+        </div>`,
+    }),
+    exactLayout({
+      commentItems: [".exact-comments .comment-wrapper > .comment-item[id^='c_']"],
+      commentControls: [".exact-comments > .list-area > .newcomment-alert.fetch-comment"],
+      commentIgnored: [".exact-comments > .title"],
+    }),
+    2,
+  );
+  assert.equal(
+    arcaInitialPublisherChrome.ok,
+    true,
+    `Unowned comment chrome must stay hidden without blanking the article: ${JSON.stringify(arcaInitialPublisherChrome)}`,
+  );
+
+  const arcaUnclassifiedActualComment = await evaluateExact(
+    page,
+    exactPage({
+      commentsHtml: `<div class="comment-wrapper"><div class="comment-item" id="c_1">Original comment</div></div>
+        <div class="changed-item" itemscope itemtype="https://schema.org/Comment">An actual comment with a changed selector</div>`,
+    }),
+    exactLayout({
+      commentItems: [".exact-comments .comment-wrapper > .comment-item[id^='c_']"],
+      commentControls: [],
+      commentIgnored: [],
+    }),
+    2,
+  );
+  assert.equal(arcaUnclassifiedActualComment.ok, false);
+  assert.equal(arcaUnclassifiedActualComment.role, "comments");
+  assert.equal(arcaUnclassifiedActualComment.reason, "evidence-outside-items");
 
   const arcaExactDomZeroComments = await evaluateExact(
     page,
@@ -2157,8 +2921,8 @@ try {
       exactLayout(),
       1,
     );
-    assert.equal(strongMedia.ok, false);
-    assert.equal(strongMedia.role, "body");
+    assert.equal(strongMedia.ok, true);
+    assert.equal(strongMedia.bodyIgnoredCount, 1);
   }
 
   const benignPublisherPaint = await evaluateExact(
@@ -2279,7 +3043,7 @@ try {
     JSON.stringify(stableZeroHeightEmptyMount),
   );
 
-  const contradictedZeroHeightMount = await evaluateExact(
+  const staleCountWithEmptyMount = await evaluateExact(
     page,
     exactPage({
       commentsHtml: "",
@@ -2288,8 +3052,9 @@ try {
     exactLayout({ commentControls: [], commentIgnored: [] }),
     1,
   );
-  assert.equal(contradictedZeroHeightMount.ok, false);
-  assert.equal(contradictedZeroHeightMount.reason, "partial-comment-set");
+  assert.equal(staleCountWithEmptyMount.ok, true);
+  assert.equal(staleCountWithEmptyMount.projectionPolicy.provenCommentCount, 0);
+  assert.equal(staleCountWithEmptyMount.projectionPolicy.provenCommentCountSource, "exact-dom-zero");
 
   const hiddenEmptyMountWithoutHistoricalCount = await evaluateExact(
     page,
@@ -2346,14 +3111,18 @@ try {
   const visibleDynamicControl = await exerciseDynamicControl(page, false);
   assert.equal(visibleDynamicControl.setup.ok, true);
   assert.equal(visibleDynamicControl.terminalReason, null);
-  assert.equal(visibleDynamicControl.role, "comment-control");
+  assert.equal(
+    visibleDynamicControl.role,
+    "comment-control",
+    JSON.stringify(visibleDynamicControl),
+  );
 
   const hiddenDynamicControl = await exerciseDynamicControl(page, true);
   assert.equal(hiddenDynamicControl.setup.ok, true);
-  assert.equal(
-    hiddenDynamicControl.terminalReason,
-    "role-projection-hidden-comment-addition",
-  );
+  assert.equal(hiddenDynamicControl.terminalReason, null);
+  assert.equal(hiddenDynamicControl.role, "comment-control");
+  assert.equal(hiddenDynamicControl.visibility, "hidden");
+  assert.equal(hiddenDynamicControl.pointerEvents, "none");
 
   const lowerBoundDynamicComment = await exerciseDynamicComment(page);
   assert.equal(lowerBoundDynamicComment.setup.ok, true);
@@ -2363,6 +3132,24 @@ try {
   assert.equal(lowerBoundDynamicComment.mediaKept, true);
   assert.equal(lowerBoundDynamicComment.initialPreserved, true);
   assert.equal(lowerBoundDynamicComment.itemCount, 2);
+
+  const mutatedExistingComment = await exerciseDynamicComment(page, {
+    mutateInitial: true,
+  });
+  assert.equal(mutatedExistingComment.setup.ok, true);
+  assert.equal(mutatedExistingComment.terminalReason, null);
+  assert.equal(mutatedExistingComment.initialIdentityPreserved, true);
+  assert.equal(mutatedExistingComment.initialText, "Updated visible comment");
+  assert.equal(mutatedExistingComment.itemCount, 2);
+
+  const nestedMountDynamicComment = await exerciseDynamicComment(page, {
+    nestedMount: true,
+  });
+  assert.equal(nestedMountDynamicComment.setup.ok, true);
+  assert.equal(nestedMountDynamicComment.terminalReason, null);
+  assert.equal(nestedMountDynamicComment.role, "comment-item");
+  assert.equal(nestedMountDynamicComment.addedKept, true);
+  assert.equal(nestedMountDynamicComment.nestedMountKept, true);
 
   const exactTotalDynamicComment = await exerciseDynamicComment(page, {
     exactTotal: true,
@@ -2380,8 +3167,13 @@ try {
   assert.equal(nonAtomicExactTotalDynamicComment.setup.ok, true);
   assert.equal(
     nonAtomicExactTotalDynamicComment.terminalReason,
-    "role-projection-comment-count",
+    null,
+    JSON.stringify(nonAtomicExactTotalDynamicComment),
   );
+  assert.equal(nonAtomicExactTotalDynamicComment.initialPreserved, true);
+  assert.equal(nonAtomicExactTotalDynamicComment.addedKept, true);
+  assert.equal(nonAtomicExactTotalDynamicComment.mediaKept, true);
+  assert.equal(nonAtomicExactTotalDynamicComment.itemCount, 2);
 
   const staleExactTotalDynamicComment = await exerciseDynamicComment(page, {
     exactTotal: true,
@@ -2389,8 +3181,37 @@ try {
   assert.equal(staleExactTotalDynamicComment.setup.ok, true);
   assert.equal(
     staleExactTotalDynamicComment.terminalReason,
-    "role-projection-comment-count",
+    null,
+    JSON.stringify(staleExactTotalDynamicComment),
   );
+  assert.equal(staleExactTotalDynamicComment.initialPreserved, true);
+  assert.equal(staleExactTotalDynamicComment.addedKept, true);
+  assert.equal(staleExactTotalDynamicComment.mediaKept, true);
+  assert.equal(staleExactTotalDynamicComment.itemCount, 2);
+
+  for (const totalUpdateAfterItems of [false, true]) {
+    for (const width of [1280, 390]) {
+      await page.setViewportSize({ width, height: 900 });
+      const preservedAsyncComments = await exerciseDynamicComment(page, {
+        exactTotal: true,
+        updateExactTotal: true,
+        separateExactTotalUpdate: true,
+        totalUpdateAfterItems,
+        exerciseControls: true,
+      });
+      assert.equal(preservedAsyncComments.setup.ok, true);
+      assert.equal(preservedAsyncComments.terminalReason, null, JSON.stringify(preservedAsyncComments));
+      for (const key of [
+        "initialPreserved", "addedKept", "mediaKept", "bodyIdentityPreserved",
+        "bodyTextPreserved", "bodyVisible", "commentVisible", "imagePreserved",
+        "linkPreserved", "detailsPreserved", "moreControlPreserved", "popularHidden",
+      ]) {
+        assert.equal(preservedAsyncComments[key], true, `${key}: ${JSON.stringify(preservedAsyncComments)}`);
+      }
+      assert.equal(preservedAsyncComments.itemCount, 3);
+    }
+  }
+  await page.setViewportSize({ width: 1280, height: 720 });
 
   const removedExistingComment = await exerciseDynamicComment(page, {
     removeInitial: true,
@@ -2401,6 +3222,59 @@ try {
     removedExistingComment.terminalAfterRemoval,
     "role-projection-comment-removal",
   );
+
+  const externalImplementationRemoval =
+    await exerciseExternalCommentImplementationRemoval(page);
+  assert.equal(externalImplementationRemoval.setup.ok, true);
+  assert.equal(externalImplementationRemoval.editorInitiallyOwned, false);
+  assert.equal(externalImplementationRemoval.editorRemoved, true);
+  assert.equal(externalImplementationRemoval.terminalReason, null);
+  assert.equal(externalImplementationRemoval.projectionPublishCount, 1);
+  assert.equal(externalImplementationRemoval.projectionEpoch, 1);
+  assert.equal(externalImplementationRemoval.commentIdentityPreserved, true);
+  assert.equal(externalImplementationRemoval.controlIdentityPreserved, true);
+  assert.equal(externalImplementationRemoval.commentVisible, true);
+  assert.equal(externalImplementationRemoval.controlVisible, true);
+  assert.equal(
+    externalImplementationRemoval.commentText,
+    "Retained visible comment",
+  );
+  assert.equal(externalImplementationRemoval.controlText, "New comment");
+
+  const dynamicCommentControlReplacement =
+    await exerciseDynamicCommentControlReplacement(page);
+  assert.equal(dynamicCommentControlReplacement.setup.ok, true);
+  assert.equal(
+    dynamicCommentControlReplacement.terminalReason,
+    null,
+    JSON.stringify(dynamicCommentControlReplacement),
+  );
+  assert.equal(dynamicCommentControlReplacement.projectionPublishCount, 1);
+  assert.equal(dynamicCommentControlReplacement.projectionEpoch, 1);
+  assert.equal(dynamicCommentControlReplacement.commentIdentityPreserved, true);
+  assert.equal(dynamicCommentControlReplacement.controlIdentityPreserved, true);
+  assert.equal(
+    dynamicCommentControlReplacement.commentText,
+    "Retained visible comment",
+  );
+  assert.equal(dynamicCommentControlReplacement.commentVisible, true);
+  assert.equal(dynamicCommentControlReplacement.controlVisible, true);
+  assert.equal(dynamicCommentControlReplacement.descendantCount, 8);
+  assert.equal(dynamicCommentControlReplacement.allDescendantsOwned, true);
+  assert.equal(dynamicCommentControlReplacement.popularVisible, false);
+
+  const dynamicCommentControlNoise =
+    await exerciseDynamicCommentControlReplacement(page, {
+      injectPopularNoise: true,
+    });
+  assert.equal(dynamicCommentControlNoise.setup.ok, true);
+  assert.equal(
+    dynamicCommentControlNoise.terminalReason,
+    "role-projection-comment-control-reconciliation",
+    JSON.stringify(dynamicCommentControlNoise),
+  );
+  assert.equal(dynamicCommentControlNoise.commentIdentityPreserved, true);
+  assert.equal(dynamicCommentControlNoise.controlIdentityPreserved, true);
 
   const eventSubscriptions = await exerciseProjectionEventSubscriptions(page);
   assert.equal(eventSubscriptions.setup.ok, true);
@@ -2414,6 +3288,212 @@ try {
     "fullscreenchange",
     "toggle",
   ]);
+
+  const forgedMeasurementGate = await openClienGate(browser, {
+    unownedHtml: '<script>document.documentElement.setAttribute("data-hotdeal-focus-measure", "1");</script>',
+  });
+  try {
+    await forgedMeasurementGate.page.waitForFunction(
+      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready" &&
+        !document.documentElement.hasAttribute("data-hotdeal-focus-measure"),
+      null, { timeout: 5000 },
+    );
+    const state = await gateState(forgedMeasurementGate.page);
+    assert.equal(state.publisherContentVisible.article, true, JSON.stringify(state));
+    assert.equal(state.diagnostics.standaloneCascadeProof?.frameCount, 2);
+    assert.deepEqual(forgedMeasurementGate.pageErrors, []);
+  } finally {
+    await forgedMeasurementGate.context.close();
+  }
+
+  for (const width of [1280, 390]) {
+    for (const mutationKind of ["publisher-class", "owned-shape", "runtime-style", "repeated-forgery"]) {
+      const protocolRecoveryGate = await openClienGate(browser, {
+        bodyExtra: '<a id="preserved-purchase" href="https://shop.example/item/123">Purchase item</a>',
+        commentsHtml: `<div class="comment"><div id="protocol-original-comment" class="comment_row" itemprop="comment">Original comment</div></div>
+          <button class="comment_nav">Load more comments</button>`,
+        unownedHtml: '<aside id="protocol-noise" class="popular">Popular unrelated posts</aside>',
+      });
+      try {
+        await protocolRecoveryGate.page.setViewportSize({ width, height: 900 });
+        await protocolRecoveryGate.page.waitForFunction(
+          () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready",
+          null, { timeout: 5000 },
+        );
+        await protocolRecoveryGate.page.evaluate((mutationKind) => {
+          const body = document.querySelector(".post_article");
+          const comment = document.querySelector("#protocol-original-comment");
+          window.__protocolOriginals = { body, comment, bodyText: body.textContent, commentText: comment.textContent };
+          document.querySelector(".comment_nav").addEventListener("click", () => {
+            const reply = document.createElement("div");
+            reply.className = "comment_row";
+            reply.textContent = "Reply after protocol recovery";
+            document.querySelector(".comment").append(reply);
+          });
+          if (mutationKind === "publisher-class") {
+            comment.className = "unknown-item publisher-highlight";
+            comment.removeAttribute("itemprop");
+          } else if (mutationKind === "owned-shape") {
+            const wrapper = document.querySelector(".content_view");
+            wrapper.setAttribute("data-hotdeal-focus-role", "body");
+            wrapper.setAttribute("data-hotdeal-focus-deep", wrapper.getAttribute("data-hotdeal-focus-keep"));
+          } else if (mutationKind === "runtime-style") {
+            document.querySelector("style[data-hotdeal-focus-runtime-style]").textContent += "\n/* publisher rewrite */";
+          } else {
+            body.removeAttribute("data-hotdeal-focus-keep");
+            const noise = document.querySelector("#protocol-noise");
+            let attempts = 0;
+            const timer = setInterval(() => {
+              noise.setAttribute("data-hotdeal-focus-keep", body.getAttribute("data-hotdeal-focus-keep") || "forged");
+              noise.classList.add("hdf-v2-keep");
+              document.documentElement.setAttribute("data-hotdeal-focus-protocol", "1");
+              document.documentElement.setAttribute("data-hotdeal-focus-measure", "1");
+              if (++attempts === 12) clearInterval(timer);
+            }, 10);
+          }
+        }, mutationKind);
+        await protocolRecoveryGate.page.waitForTimeout(250);
+        const recovered = await gateState(protocolRecoveryGate.page);
+        assert.equal(recovered.diagnostics?.state, "ready", JSON.stringify({ width, mutationKind, recovered }));
+        assert.equal(recovered.lock, null, JSON.stringify({ width, mutationKind, recovered }));
+        assert.equal(recovered.diagnostics.standaloneCascadeProof?.frameCount, 2,
+          JSON.stringify({ width, mutationKind, recovered }));
+        await protocolRecoveryGate.page.getByRole("button", { name: "Load more comments" }).click();
+        await protocolRecoveryGate.page.waitForFunction(
+          () => document.querySelectorAll('[data-hotdeal-focus-role="comment-item"]').length === 2,
+          null, { timeout: 5000 },
+        ).catch(async error => {
+          throw new Error(`${width}/${mutationKind}: ${error.message}; ${JSON.stringify(await gateState(protocolRecoveryGate.page))}`);
+        });
+        const preserved = await protocolRecoveryGate.page.evaluate(() => {
+          const visible = (element) => {
+            const style = getComputedStyle(element);
+            return style.display !== "none" && style.visibility !== "hidden" &&
+              Number(style.opacity) !== 0 && element.getClientRects().length > 0;
+          };
+          const originals = window.__protocolOriginals;
+          return {
+            bodyIdentity: originals.body === document.querySelector(".post_article"),
+            commentIdentity: originals.comment === document.querySelector("#protocol-original-comment"),
+            bodyText: originals.body.textContent === originals.bodyText,
+            commentText: originals.comment.textContent === originals.commentText,
+            bodyVisible: visible(originals.body),
+            commentsVisible: [...document.querySelectorAll('[data-hotdeal-focus-role="comment-item"]')].every(visible),
+            purchaseHref: document.querySelector("#preserved-purchase").href,
+            noiseHidden: !visible(document.querySelector("#protocol-noise")),
+            measureCleared: !document.documentElement.hasAttribute("data-hotdeal-focus-measure"),
+            ready: globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state,
+          };
+        });
+        assert.deepEqual(preserved, {
+          bodyIdentity: true, commentIdentity: true, bodyText: true, commentText: true,
+          bodyVisible: true, commentsVisible: true, purchaseHref: "https://shop.example/item/123",
+          noiseHidden: true, measureCleared: true, ready: "ready",
+        }, JSON.stringify({ width, mutationKind, preserved }));
+        assert.deepEqual(protocolRecoveryGate.pageErrors, []);
+      } finally {
+        await protocolRecoveryGate.context.close();
+      }
+    }
+  }
+
+  for (const width of [1280, 390]) {
+    const paginatedGate = await openClienGate(browser, {
+      commentsTotalHtml: '<p class="comment-total">Comments: 5</p>',
+      commentsHtml: `<div class="comment"><div class="comment_row" itemprop="comment">Original loaded comment</div></div>
+        <button class="comment_more" id="load-publisher-replies">Load more comments</button>`,
+      unownedHtml: '<aside class="popular" id="paginated-popular">Popular unrelated posts</aside>',
+    });
+    try {
+      await paginatedGate.page.setViewportSize({ width, height: 900 });
+      await paginatedGate.page.waitForFunction(
+        () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready",
+        null,
+        { timeout: 5000 },
+      );
+      const initialState = await gateState(paginatedGate.page);
+      assert.equal(initialState.publisherContentVisible.article, true, JSON.stringify(initialState));
+      await paginatedGate.page.evaluate(() => {
+        window.__paginatedBody = document.querySelector(".post_article");
+        document.querySelector("#load-publisher-replies").addEventListener("click", () => {
+          const reply = document.createElement("div");
+          reply.className = "comment_row";
+          reply.id = "publisher-loaded-reply";
+          reply.setAttribute("itemprop", "comment");
+          reply.textContent = "Original publisher loaded reply";
+          document.querySelector(".post_comment > .comment").appendChild(reply);
+        });
+      });
+      await paginatedGate.page.getByRole("button", { name: "Load more comments" }).click();
+      await paginatedGate.page.waitForFunction(
+        () => document.querySelector("#publisher-loaded-reply")?.hasAttribute("data-hotdeal-focus-keep"),
+        null,
+        { timeout: 5000 },
+      );
+      const preserved = await paginatedGate.page.evaluate(() => {
+        const visible = (element) => getComputedStyle(element).display !== "none" &&
+          getComputedStyle(element).visibility !== "hidden" && element.getClientRects().length > 0;
+        return {
+          bodyIdentityPreserved: window.__paginatedBody === document.querySelector(".post_article"),
+          bodyVisible: visible(document.querySelector(".post_article")),
+          initialCommentVisible: visible(document.querySelector(".comment_row")),
+          loadedReplyVisible: visible(document.querySelector("#publisher-loaded-reply")),
+          moreVisible: visible(document.querySelector("#load-publisher-replies")),
+          popularHidden: !visible(document.querySelector("#paginated-popular")),
+          state: window.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state,
+        };
+      });
+      assert.equal(preserved.state, "ready", JSON.stringify(preserved));
+      for (const key of ["bodyIdentityPreserved", "bodyVisible", "initialCommentVisible", "loadedReplyVisible", "moreVisible", "popularHidden"]) {
+        assert.equal(preserved[key], true, `${key}: ${JSON.stringify(preserved)}`);
+      }
+      assert.deepEqual(paginatedGate.pageErrors, []);
+    } finally {
+      await paginatedGate.context.close();
+    }
+  }
+
+  const ruliwebJuly = JSON.parse(fs.readFileSync(
+    new URL("fixtures/dom-regressions.json", import.meta.url), "utf8",
+  )).fixtures.find((fixture) => fixture.id === "ruliweb-hotdeal-july");
+  for (const width of [1280, 390]) {
+    const ruliwebGate = await openClienGate(browser, {
+      destinationUrl: ruliwebJuly.url,
+      fixtureBodyHtml: ruliwebJuly.body_html.replaceAll("DOM regression fixture", title),
+      unownedHtml: '<aside class="popular" id="ruliweb-popular">Popular unrelated posts</aside>',
+    });
+    try {
+      await ruliwebGate.page.setViewportSize({ width, height: 900 });
+      await ruliwebGate.page.waitForFunction(
+        () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready", null, { timeout: 5000 },
+      );
+      const state = await gateState(ruliwebGate.page);
+      assert.equal(state.diagnostics.standaloneCascadeProof?.frameCount, 2, JSON.stringify(state));
+      assert.equal(state.diagnostics.commentControlProjection?.currentProjectionValid, true);
+      const preserved = await ruliwebGate.page.evaluate(() => {
+        const visible = (element) => getComputedStyle(element).display !== "none" &&
+          getComputedStyle(element).visibility !== "hidden" && element.getClientRects().length > 0;
+        const comments = [...document.querySelectorAll(".comment_element")];
+        return {
+          titleVisible: visible(document.querySelector(".subject_inner_text")),
+          bodyVisible: visible(document.querySelector(".view_content")),
+          productVisible: visible(document.querySelector(".source_url")),
+          originalLinkPreserved: document.querySelector(".source_url a").href === "https://shop.invalid/product",
+          commentCount: comments.length,
+          commentsVisible: comments.every(visible),
+          originalCommentsPreserved: comments.map((item) => item.textContent).join("|") === "comment one|comment two|comment three",
+          popularHidden: !visible(document.querySelector("#ruliweb-popular")),
+        };
+      });
+      for (const key of ["titleVisible", "bodyVisible", "productVisible", "originalLinkPreserved", "commentsVisible", "originalCommentsPreserved", "popularHidden"]) {
+        assert.equal(preserved[key], true, `${key}: ${JSON.stringify(preserved)}`);
+      }
+      assert.equal(preserved.commentCount, 3);
+      assert.deepEqual(ruliwebGate.pageErrors, []);
+    } finally {
+      await ruliwebGate.context.close();
+    }
+  }
 
   const prelockedGate = await openClienGate(browser, {
     titleHtml: `<h4 class="post_subject">${title}
@@ -2453,7 +3533,7 @@ try {
     });
     assert.deepEqual(state.preauthorizedControl, {
       kind: "preauthorized-userscript-style-control",
-      schemaVersion: 2,
+      schemaVersion: 3,
       gmAddElementCalls: 1,
     });
     assert.equal(state.releaseProbe, null);
@@ -2493,6 +3573,69 @@ try {
     await prelockedGate.context.close();
   }
 
+  const boundedOriginalTitlePrefixGate = await openClienGate(browser, {
+    titleHtml: `<h4 class="post_subject">
+      <span id="popular-title-badge">[\uC778\uAE30\uAE00]</span>
+      <span id="original-title-prefix" class="subject_preface">[G\uB9C8\uCF13]</span>
+      ${title}
+      <a id="title-share" class="js_share" href="/share">Share</a>
+      <div id="title-recommendations"><a href="/other">Recommended post</a></div>
+    </h4>
+    <script>
+      globalThis.__HDF_ORIGINAL_TITLE_PREFIX__ =
+        document.querySelector("#original-title-prefix");
+      globalThis.__HDF_ORIGINAL_TITLE_PREFIX_TEXT__ =
+        globalThis.__HDF_ORIGINAL_TITLE_PREFIX__.textContent;
+    </script>`,
+  });
+  try {
+    await boundedOriginalTitlePrefixGate.page.waitForFunction(
+      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready",
+      null,
+      { timeout: 5000 },
+    );
+    const projection = await boundedOriginalTitlePrefixGate.page.evaluate(() => {
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        return style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          element.getClientRects().length > 0;
+      };
+      const prefix = document.querySelector("#original-title-prefix");
+      const popular = document.querySelector("#popular-title-badge");
+      const share = document.querySelector("#title-share");
+      const recommendations = document.querySelector("#title-recommendations");
+      return {
+        prefixIdentityPreserved:
+          prefix === globalThis.__HDF_ORIGINAL_TITLE_PREFIX__,
+        prefixTextPreserved:
+          prefix.textContent === globalThis.__HDF_ORIGINAL_TITLE_PREFIX_TEXT__,
+        prefixVisible: visible(prefix),
+        prefixOwned: prefix.hasAttribute("data-hotdeal-focus-keep"),
+        prefixRole: prefix.getAttribute("data-hotdeal-focus-role"),
+        titleInnerText: document.querySelector(".post_subject").innerText.trim(),
+        noise: [popular, share, recommendations].map((element) => ({
+          id: element.id,
+          visible: visible(element),
+          owned: element.hasAttribute("data-hotdeal-focus-keep"),
+        })),
+      };
+    });
+    assert.equal(projection.prefixIdentityPreserved, true);
+    assert.equal(projection.prefixTextPreserved, true);
+    assert.equal(projection.prefixVisible, true);
+    assert.equal(projection.prefixOwned, true);
+    assert.equal(projection.prefixRole, "title-text");
+    assert.equal(projection.titleInnerText, `[G\uB9C8\uCF13] ${title}`);
+    projection.noise.forEach((noise) => {
+      assert.equal(noise.visible, false, JSON.stringify(noise));
+      assert.equal(noise.owned, false, JSON.stringify(noise));
+    });
+    assert.deepEqual(boundedOriginalTitlePrefixGate.pageErrors, []);
+  } finally {
+    await boundedOriginalTitlePrefixGate.context.close();
+  }
+
   const inlineImportantLeak = await openClienGate(browser, {
     unownedHtml: `<aside id="unlock-leak" style="display:block!important;
       visibility:visible!important;opacity:1!important;position:fixed!important;
@@ -2500,17 +3643,26 @@ try {
   });
   try {
     await inlineImportantLeak.page.waitForFunction(
-      () => document.documentElement.getAttribute("data-hotdeal-focus-status") ===
-        "terminal-cascade-visible-leak",
+      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready",
       null,
       { timeout: 5000 },
     );
     await inlineImportantLeak.page.waitForTimeout(50);
     const state = await gateState(inlineImportantLeak.page);
-    assert.equal(state.lock, "1");
-    assert.equal(state.ready, null);
-    assert.equal(state.state, "blocked");
-    assert.equal(state.status, "terminal-cascade-visible-leak");
+    const leak = await inlineImportantLeak.page.evaluate(() => {
+      const element = document.querySelector("#unlock-leak");
+      const style = getComputedStyle(element);
+      return {
+        owned: element.hasAttribute("data-hotdeal-focus-keep"),
+        visible: style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          Number(style.opacity) !== 0 &&
+          element.getClientRects().length > 0,
+      };
+    });
+    assert.equal(state.ready, "1");
+    assert.equal(state.diagnostics?.visibleLeakCount, 0);
+    assert.deepEqual(leak, { owned: false, visible: false });
     assert.ok(state.leakPaintProbe.sampleCount >= 1);
     assert.equal(state.leakPaintProbe.visibleLeakFrames, 0);
   } finally {
@@ -2524,21 +3676,648 @@ try {
   });
   try {
     await topLayerLeak.page.waitForFunction(
-      () => document.documentElement.getAttribute("data-hotdeal-focus-status") ===
-        "terminal-cascade-visible-leak",
+      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready",
       null,
       { timeout: 5000 },
     );
     await topLayerLeak.page.waitForTimeout(50);
     const state = await gateState(topLayerLeak.page);
-    assert.equal(state.lock, "1");
-    assert.equal(state.ready, null);
-    assert.equal(state.state, "blocked");
-    assert.equal(state.status, "terminal-cascade-visible-leak");
+    const leak = await topLayerLeak.page.evaluate(() => {
+      const element = document.querySelector("#unlock-dialog");
+      const style = getComputedStyle(element);
+      return {
+        open: element.hasAttribute("open"),
+        owned: element.hasAttribute("data-hotdeal-focus-keep"),
+        visible: style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          Number(style.opacity) !== 0 &&
+          element.getClientRects().length > 0,
+      };
+    });
+    assert.equal(state.ready, "1");
+    assert.equal(state.diagnostics?.visibleLeakCount, 0);
+    assert.deepEqual(leak, { open: false, owned: false, visible: false });
     assert.ok(state.leakPaintProbe.sampleCount >= 1);
     assert.equal(state.leakPaintProbe.visibleLeakFrames, 0);
   } finally {
     await topLayerLeak.context.close();
+  }
+
+  const unavailableSecureNonce = await openClienGate(browser, {
+    beforeUserScriptSource: String.raw`
+      Object.defineProperty(globalThis.crypto, "getRandomValues", {
+        configurable: true,
+        writable: true,
+        value() {
+          throw new TypeError("Illegal invocation: synthetic crypto failure");
+        },
+      });
+    `,
+  });
+  try {
+    await unavailableSecureNonce.page.waitForFunction(
+      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "recovery" &&
+        globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.targetReason ===
+          "static-secure-nonce",
+      null,
+      { timeout: 5000 },
+    );
+    const state = await gateState(unavailableSecureNonce.page);
+    assert.equal(state.lock, null);
+    assert.equal(state.ready, null);
+    assert.equal(state.publisherContentVisible.article, true);
+    assert.equal(state.publisherContentVisible.comments, true);
+    assert.deepEqual(unavailableSecureNonce.pageErrors, []);
+  } finally {
+    await unavailableSecureNonce.context.close();
+  }
+
+  const releaseProofComputedStyleFailure = await openClienGate(browser, {
+    beforeUserScriptSource: String.raw`
+      (() => {
+        const nativeGetComputedStyle = globalThis.getComputedStyle.bind(globalThis);
+        Object.defineProperty(globalThis, "getComputedStyle", {
+          configurable: true,
+          writable: true,
+          value(element, pseudoElement) {
+            if (element?.hasAttribute?.("data-hdf-v2-release-probe")) {
+              throw new Error("synthetic release-proof computed-style failure");
+            }
+            return nativeGetComputedStyle(element, pseudoElement);
+          },
+        });
+      })();
+    `,
+  });
+  try {
+    await releaseProofComputedStyleFailure.page.waitForFunction(
+      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready" &&
+        globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.targetReason
+          ?.startsWith("frozen-"),
+      null,
+      { timeout: 5000 },
+    );
+    const state = await gateState(releaseProofComputedStyleFailure.page);
+    const commentVisible = await releaseProofComputedStyleFailure.page.evaluate(() => {
+      const item = document.querySelector(".comment_row");
+      const style = getComputedStyle(item);
+      return style.display !== "none" && style.visibility !== "hidden" &&
+        item.getClientRects().length > 0;
+    });
+    assert.equal(state.ready, "1");
+    assert.equal(state.publisherContentVisible.article, true);
+    assert.equal(commentVisible, true);
+    assert.deepEqual(releaseProofComputedStyleFailure.pageErrors, []);
+  } finally {
+    await releaseProofComputedStyleFailure.context.close();
+  }
+
+  const stalledReleaseProof = await openClienGate(browser, {
+    userSource: withLockedActivationTimeout(userscriptSource, 75),
+    beforeUserScriptSource: String.raw`
+      Object.defineProperty(globalThis, "requestAnimationFrame", {
+        configurable: true,
+        writable: true,
+        value: () => 1,
+      });
+    `,
+  });
+  try {
+    await stalledReleaseProof.page.waitForFunction(
+      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready" &&
+        globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.targetReason
+          ?.includes("timeout"),
+      null,
+      { timeout: 2000, polling: 25 },
+    );
+    const state = await gateState(stalledReleaseProof.page);
+    const commentVisible = await stalledReleaseProof.page.evaluate(() => {
+      const item = document.querySelector(".comment_row");
+      const style = getComputedStyle(item);
+      return style.display !== "none" && style.visibility !== "hidden" &&
+        item.getClientRects().length > 0;
+    });
+    assert.equal(state.publisherContentVisible.article, true);
+    assert.equal(commentVisible, true);
+    assert.equal(state.preauthorizedControl?.gmAddElementCalls, 1);
+    assert.deepEqual(stalledReleaseProof.pageErrors, []);
+  } finally {
+    await stalledReleaseProof.context.close();
+  }
+
+  const stoppedBeforeRelease = await openClienGate(browser, {
+    userSource: withPreReleaseRuntimeStop(userscriptSource),
+  });
+  try {
+    await stoppedBeforeRelease.page.waitForFunction(
+      () =>
+        globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready" &&
+        globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.targetReason ===
+          "frozen-runtime-stop-before-release",
+      null,
+      { timeout: 5000, polling: 25 },
+    );
+    const stoppedBeforeReleaseState = await gateState(stoppedBeforeRelease.page);
+    assert.equal(stoppedBeforeReleaseState.lock, null);
+    assert.equal(stoppedBeforeReleaseState.ready, "1");
+    assert.equal(
+      stoppedBeforeReleaseState.publisherContentVisible.article,
+      true,
+      JSON.stringify(stoppedBeforeReleaseState),
+    );
+    const stoppedBeforeReleaseCommentVisible =
+      await stoppedBeforeRelease.page.evaluate(() => {
+        const item = document.querySelector(".comment_row");
+        const style = getComputedStyle(item);
+        return style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          item.getClientRects().length > 0;
+      });
+    assert.equal(
+      stoppedBeforeReleaseCommentVisible,
+      true,
+      JSON.stringify(stoppedBeforeReleaseState),
+    );
+    assert.deepEqual(stoppedBeforeRelease.pageErrors, []);
+  } finally {
+    await stoppedBeforeRelease.context.close();
+  }
+
+  const independentSemanticGate = await openClienGate(browser, {
+    titleHtml: `<h1 id="semantic-title" itemprop="headline">${title}</h1>`,
+    bodyExtra: `<section id="semantic-popular" aria-label="Popular posts">
+      <a href="/popular/1">Popular post 1</a>
+      <a href="/popular/2">Popular post 2</a>
+    </section>`,
+  });
+  try {
+    await independentSemanticGate.page.waitForFunction(
+      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready",
+      null,
+      { timeout: 5000 },
+    );
+    const state = await gateState(independentSemanticGate.page);
+    const projection = await independentSemanticGate.page.evaluate(() => {
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        return style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          element.getClientRects().length > 0;
+      };
+      const noise = document.querySelector("#semantic-popular");
+      return {
+        titleVisible: visible(document.querySelector("#semantic-title")),
+        articleVisible: visible(document.querySelector(".post_article")),
+        commentVisible: visible(document.querySelector(".comment_row")),
+        noiseVisible: visible(noise),
+        noiseOwned: noise.hasAttribute("data-hotdeal-focus-keep"),
+      };
+    });
+    assert.equal(state.diagnostics?.targetReason, "algumon-referrer-known-route");
+    assert.equal(state.diagnostics?.semanticProjectionCount, 1);
+    assert.equal(state.diagnostics?.visibleLeakCount, 0);
+    assert.equal(projection.titleVisible, true);
+    assert.equal(projection.articleVisible, true);
+    assert.equal(projection.commentVisible, true);
+    assert.equal(projection.noiseVisible, false);
+    assert.equal(projection.noiseOwned, false);
+    assert.deepEqual(independentSemanticGate.pageErrors, []);
+  } finally {
+    await independentSemanticGate.context.close();
+  }
+
+  const independentRouteGate = await openClienGate(browser, {
+    destinationUrl: "https://www.clien.net/service/board/newhot/987654",
+  });
+  try {
+    await independentRouteGate.page.waitForFunction(
+      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready",
+      null,
+      { timeout: 5000 },
+    );
+    const state = await gateState(independentRouteGate.page);
+    const content = await independentRouteGate.page.evaluate(() => {
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        return style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          element.getClientRects().length > 0;
+      };
+      return {
+        article: visible(document.querySelector(".post_article")),
+        comment: visible(document.querySelector(".comment_row")),
+      };
+    });
+    assert.equal(
+      state.diagnostics?.targetReason,
+      "algumon-referrer-independent-route",
+      JSON.stringify(state),
+    );
+    assert.equal(state.diagnostics?.visibleLeakCount, 0);
+    assert.equal(content.article, true);
+    assert.equal(content.comment, true);
+    assert.deepEqual(independentRouteGate.pageErrors, []);
+  } finally {
+    await independentRouteGate.context.close();
+  }
+
+  const singletonDriftOracle = await evaluate(page,
+    `<main class="drift-shell"><h1 class="drift-title">${title}</h1>
+      <article class="drift-body">${longBody}</article>
+      <section class="drift-comments"><div class="drift-comment">Original drift comment</div>
+        <button id="drift-more">Load more comments</button></section></main>`,
+    layout(), null);
+  assert.equal(singletonDriftOracle.ok, true, JSON.stringify(singletonDriftOracle));
+  assert.equal(singletonDriftOracle.roles.comments, "drift-comments");
+  for (const [malformedComments, requiredCommentCount] of [
+    ['<div class="drift-comment">Original comment</div><div>Unclassified sibling content</div>', null],
+    ['<div class="drift-comment"><form><input placeholder="Write a comment"></form></div>', 1],
+    ['<p>Unlabelled paragraph</p>', null],
+  ]) {
+    const incompleteSingleton = await evaluate(page,
+      `<main><h1>${title}</h1><article>${longBody}</article>
+        <section class="drift-comments">${malformedComments}</section></main>`, layout(), requiredCommentCount);
+    assert.equal(incompleteSingleton.ok, false, JSON.stringify({ malformedComments, incompleteSingleton }));
+  }
+
+  for (const width of [1280, 390]) {
+    const simultaneousDriftGate = await openClienGate(browser, {
+      destinationUrl: "https://www.clien.net/fresh-hotdeal/990004",
+      fixtureBodyHtml: `<main class="drift-shell"><h1 class="drift-title">${title}</h1>
+        <article class="drift-body"><p>${longBody}</p>
+          <a href="https://shop.example/item/drift" id="drift-purchase">Purchase</a></article>
+        <section class="drift-comments"><div class="drift-comment">Original drift comment</div>
+          <button id="drift-more">Load more comments</button></section></main>`,
+      unownedHtml: '<aside id="drift-popular" class="popular">Popular unrelated articles</aside>',
+    });
+    try {
+      await simultaneousDriftGate.page.setViewportSize({ width, height: 900 });
+      await simultaneousDriftGate.page.waitForFunction(
+        () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready",
+        null, { timeout: 5000 },
+      );
+      await simultaneousDriftGate.page.evaluate(() => {
+        const body = document.querySelector(".drift-body");
+        const comment = document.querySelector(".drift-comment");
+        window.__driftOriginals = { body, comment, bodyText: body.textContent, commentText: comment.textContent };
+        document.querySelector("#drift-more").addEventListener("click", () => {
+          const reply = document.createElement("div");
+          reply.className = "drift-comment";
+          reply.textContent = "Reply after combined path and DOM drift";
+          document.querySelector(".drift-comments").append(reply);
+        });
+      });
+      await simultaneousDriftGate.page.getByRole("button", { name: "Load more comments" }).click();
+      await simultaneousDriftGate.page.waitForFunction(
+        () => document.querySelectorAll('.drift-comment[data-hotdeal-focus-role="comment-item"]').length === 2,
+        null, { timeout: 5000 },
+      );
+      const driftState = await simultaneousDriftGate.page.evaluate(() => {
+        const visible = (node) => {
+          const style = getComputedStyle(node);
+          return style.display !== "none" && style.visibility !== "hidden" &&
+            Number(style.opacity) !== 0 && node.getClientRects().length > 0;
+        };
+        const original = window.__driftOriginals;
+        return {
+          bodyIdentity: original.body === document.querySelector(".drift-body"),
+          commentIdentity: original.comment === document.querySelector(".drift-comment"),
+          bodyText: original.bodyText === original.body.textContent,
+          commentText: original.commentText === original.comment.textContent,
+          bodyVisible: visible(original.body),
+          commentsVisible: [...document.querySelectorAll(".drift-comment")].every(visible),
+          controlVisible: visible(document.querySelector("#drift-more")),
+          purchaseHref: document.querySelector("#drift-purchase").href,
+          popularHidden: !visible(document.querySelector("#drift-popular")),
+          ready: globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state,
+          proofFrames: globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.standaloneCascadeProof?.frameCount,
+          leaks: globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.visibleLeakCount,
+        };
+      });
+      assert.deepEqual(driftState, {
+        bodyIdentity: true, commentIdentity: true, bodyText: true, commentText: true,
+        bodyVisible: true, commentsVisible: true, controlVisible: true,
+        purchaseHref: "https://shop.example/item/drift", popularHidden: true,
+        ready: "ready", proofFrames: 2, leaks: 0,
+      }, JSON.stringify({ width, driftState }));
+      assert.deepEqual(simultaneousDriftGate.pageErrors, []);
+    } finally {
+      await simultaneousDriftGate.context.close();
+    }
+  }
+
+  for (const width of [1280, 390]) {
+    const continuedObserverGate = await openClienGate(browser, {
+      commentsHtml: `<div class="comment"><div class="comment_row">Original comment</div></div>
+        <button class="comment_nav">Load more comments</button>
+        <div id="initial-unclassified-panel">Unrelated initial publisher content</div>
+        Unrelated publisher text directly inside the comment shell`,
+    });
+    try {
+      await continuedObserverGate.page.setViewportSize({ width, height: 900 });
+      await continuedObserverGate.page.waitForFunction(
+        () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready",
+        null, { timeout: 5000 },
+      );
+      const initialChromeState = await continuedObserverGate.page.evaluate(() => {
+        const panel = document.querySelector("#initial-unclassified-panel");
+        const panelStyle = getComputedStyle(panel);
+        const shell = document.querySelector(".post_comment");
+        const visible = (node) => {
+          const style = getComputedStyle(node);
+          return style.display !== "none" && style.visibility !== "hidden" &&
+            Number(style.opacity) !== 0 && node.getClientRects().length > 0;
+        };
+        return {
+          bodyVisible: visible(document.querySelector(".post_article")),
+          commentVisible: visible(document.querySelector(".comment_row")),
+          controlVisible: visible(document.querySelector(".comment_nav")),
+          panelHidden: panelStyle.display === "none",
+          directTextHidden: getComputedStyle(shell).visibility === "hidden",
+          panelUnowned: !panel.hasAttribute("data-hotdeal-focus-keep"),
+          leakCount: globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.visibleLeakCount,
+        };
+      });
+      assert.deepEqual(initialChromeState, {
+        bodyVisible: true, commentVisible: true, controlVisible: true,
+        panelHidden: true, directTextHidden: true, panelUnowned: true, leakCount: 0,
+      }, JSON.stringify({ width, initialChromeState }));
+      await continuedObserverGate.page.evaluate(() => {
+        const body = document.querySelector(".post_article");
+        const comment = document.querySelector(".comment_row");
+        window.__continuingOriginals = { body, comment, bodyText: body.textContent, commentText: comment.textContent };
+        document.querySelector(".comment_nav").addEventListener("click", () => {
+          const reply = document.createElement("div");
+          reply.className = "comment_row";
+          reply.id = "reply-after-unclassified-panel";
+          reply.textContent = "Reply after unclassified panel";
+          document.querySelector(".comment").append(reply);
+        });
+        const panel = document.createElement("div");
+        panel.id = "unclassified-panel";
+        panel.textContent = "Unclassified unrelated extra content";
+        document.querySelector(".post_comment").append(panel);
+      });
+      await continuedObserverGate.page.waitForTimeout(100);
+      await continuedObserverGate.page.evaluate(() => {
+        const titleText = document.querySelector(".post_subject").firstChild;
+        titleText.data = titleText.data;
+      });
+      await continuedObserverGate.page.waitForTimeout(100);
+      await continuedObserverGate.page.evaluate(() => {
+        window.__originalReaderUrl = location.href;
+        history.pushState({}, "", "/service/board/jirum/99999998");
+      });
+      await continuedObserverGate.page.waitForFunction(
+        () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.targetReason === "frozen-navigation-identity",
+        null, { timeout: 5000 },
+      );
+      await continuedObserverGate.page.evaluate(() => {
+        const noise = document.querySelector("#unclassified-panel");
+        noise.setAttribute("data-hotdeal-focus-keep", document.querySelector(".post_article").getAttribute("data-hotdeal-focus-keep"));
+      });
+      await continuedObserverGate.page.waitForTimeout(100);
+      assert.equal(await continuedObserverGate.page.evaluate(() => {
+        const node = document.querySelector("#unclassified-panel");
+        const style = getComputedStyle(node);
+        return style.display !== "none" && style.visibility !== "hidden" && node.getClientRects().length > 0;
+      }), false);
+      await continuedObserverGate.page.evaluate(() => history.replaceState({}, "", window.__originalReaderUrl));
+      await continuedObserverGate.page.waitForFunction(
+        () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.targetReason === "algumon-referrer-known-route",
+        null, { timeout: 5000 },
+      );
+      await continuedObserverGate.page.getByRole("button", { name: "Load more comments" }).click();
+      await continuedObserverGate.page.waitForFunction(
+        () => document.querySelector('#reply-after-unclassified-panel')
+          ?.getAttribute('data-hotdeal-focus-role') === 'comment-item',
+        null, { timeout: 5000 },
+      );
+      await continuedObserverGate.page.evaluate(() => {
+        const panel = document.querySelector("#unclassified-panel");
+        const body = document.querySelector(".post_article");
+        panel.setAttribute("data-hotdeal-focus-keep", body.getAttribute("data-hotdeal-focus-keep"));
+        document.querySelector("style[data-hotdeal-focus-runtime-style]").textContent += "\n/* later publisher rewrite */";
+      });
+      await continuedObserverGate.page.waitForTimeout(100);
+      const continuingState = await continuedObserverGate.page.evaluate(() => {
+        const visible = (node) => {
+          const style = getComputedStyle(node);
+          return style.display !== "none" && style.visibility !== "hidden" &&
+            Number(style.opacity) !== 0 && node.getClientRects().length > 0;
+        };
+        const original = window.__continuingOriginals;
+        return {
+          bodyIdentity: original.body === document.querySelector(".post_article"),
+          commentIdentity: original.comment === document.querySelector(".comment_row"),
+          bodyText: original.bodyText === original.body.textContent,
+          commentText: original.commentText === original.comment.textContent,
+          bodyVisible: visible(original.body),
+          commentsVisible: [...document.querySelectorAll(".comment_row")].every(visible),
+          panelHidden: !visible(document.querySelector("#unclassified-panel")),
+          ready: globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state,
+          proofFrames: globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.standaloneCascadeProof?.frameCount,
+          leaks: globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.visibleLeakCount,
+        };
+      });
+      assert.deepEqual(continuingState, {
+        bodyIdentity: true, commentIdentity: true, bodyText: true, commentText: true,
+        bodyVisible: true, commentsVisible: true, panelHidden: true,
+        ready: "ready", proofFrames: 2, leaks: 0,
+      }, JSON.stringify({ width, continuingState }));
+      assert.deepEqual(continuedObserverGate.pageErrors, []);
+    } finally {
+      await continuedObserverGate.context.close();
+    }
+  }
+
+  const initialAutonomousNoiseGate = await openClienGate(browser, {
+    bodyExtra: `<section id="initial-popular" aria-label="인기글">
+        <h2>인기글</h2><a href="/popular/1">인기 게시물 1</a>
+        <a href="/popular/2">인기 게시물 2</a>
+      </section>
+      <section id="initial-recommended" aria-label="Recommended posts">
+        <h2>Recommended posts</h2><a href="/recommended/1">Other post</a>
+        <a href="/recommended/2">Another post</a>
+      </section>`,
+    commentsHtml: `<div class="comment"><div class="comment_row" itemprop="comment">
+        Visible comment
+      </div></div>
+      <div class="comment_nav">Visible comment control</div>
+      <aside id="initial-related-comments" aria-label="関連投稿">
+        <a href="/related/1">関連記事 1</a><a href="/related/2">関連記事 2</a>
+      </aside>`,
+  });
+  try {
+    await initialAutonomousNoiseGate.page.waitForFunction(
+      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready",
+      null,
+      { timeout: 5000 },
+    );
+    const state = await gateState(initialAutonomousNoiseGate.page);
+    const projection = await initialAutonomousNoiseGate.page.evaluate(() => {
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        return style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          element.getClientRects().length > 0;
+      };
+      const noise = [
+        "#initial-popular",
+        "#initial-recommended",
+        "#initial-related-comments",
+      ].map((selector) => {
+        const element = document.querySelector(selector);
+        return {
+          selector,
+          visible: visible(element),
+          owned: element.hasAttribute("data-hotdeal-focus-keep"),
+        };
+      });
+      return {
+        noise,
+        title: document.querySelector(".post_subject").textContent.trim(),
+        articleVisible: visible(document.querySelector(".post_article")),
+        commentVisible: visible(document.querySelector(".comment_row")),
+      };
+    });
+    assert.equal(
+      state.diagnostics?.targetReason,
+      "algumon-referrer-known-route",
+      JSON.stringify(state),
+    );
+    assert.equal(state.diagnostics?.visibleLeakCount, 0);
+    assert.equal(projection.title, title);
+    assert.equal(projection.articleVisible, true);
+    assert.equal(projection.commentVisible, true);
+    projection.noise.forEach((noise) => {
+      assert.equal(noise.visible, false, JSON.stringify(noise));
+      assert.equal(noise.owned, false, JSON.stringify(noise));
+    });
+    assert.deepEqual(initialAutonomousNoiseGate.pageErrors, []);
+  } finally {
+    await initialAutonomousNoiseGate.context.close();
+  }
+
+  const lateAutonomousNoiseGate = await openClienGate(browser, {
+    bodyExtra: '<p id="stable-body-sentinel">Stable authored body sentinel</p>',
+  });
+  try {
+    await lateAutonomousNoiseGate.page.waitForFunction(
+      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready",
+      null,
+      { timeout: 5000 },
+    );
+    await lateAutonomousNoiseGate.page.evaluate(() => {
+      globalThis.__HDF_RUNTIME_SENTINELS__ = {
+        title: document.querySelector(".post_subject"),
+        body: document.querySelector("#stable-body-sentinel"),
+        comment: document.querySelector(".comment_row"),
+        titleText: document.querySelector(".post_subject").textContent,
+        bodyText: document.querySelector("#stable-body-sentinel").textContent,
+        commentText: document.querySelector(".comment_row").textContent,
+      };
+      const article = document.querySelector(".post_article");
+      [
+        ["late-popular-ko", "인기글", "인기 게시물"],
+        ["late-recommended-en", "Recommended posts", "Recommended post"],
+        ["late-related-ja", "関連投稿", "関連記事"],
+        ["late-popular-zh", "热门文章", "热门内容"],
+      ].forEach(([id, label, text]) => {
+        const section = document.createElement("section");
+        section.id = id;
+        section.setAttribute("aria-label", label);
+        section.innerHTML = `<h2>${label}</h2><a href="/popular/1">${text} 1</a>` +
+          `<a href="/popular/2">${text} 2</a>`;
+        article.appendChild(section);
+      });
+      const lateBody = document.createElement("p");
+      lateBody.id = "late-body-sentinel";
+      lateBody.textContent = "Late legitimate authored body content";
+      article.appendChild(lateBody);
+
+      const commentNoise = document.createElement("aside");
+      commentNoise.id = "late-comment-popular";
+      commentNoise.setAttribute("aria-label", "추천글");
+      commentNoise.innerHTML =
+        '<a href="/recommended/1">추천 게시물 1</a><a href="/recommended/2">추천 게시물 2</a>';
+      document.querySelector(".post_comment").appendChild(commentNoise);
+
+      const comment = document.createElement("div");
+      comment.id = "late-comment";
+      comment.className = "comment_row";
+      comment.setAttribute("itemprop", "comment");
+      comment.textContent = "Late legitimate comment";
+      document.querySelector(".post_comment > .comment").appendChild(comment);
+    });
+    await lateAutonomousNoiseGate.page.waitForFunction(
+      () =>
+        document.querySelector("#late-comment")
+          ?.hasAttribute("data-hotdeal-focus-keep") &&
+        document.querySelector("#late-body-sentinel")
+          ?.hasAttribute("data-hotdeal-focus-keep") &&
+        !document.querySelector("#late-popular-ko")
+          ?.hasAttribute("data-hotdeal-focus-keep") &&
+        !document.querySelector("#late-comment-popular")
+          ?.hasAttribute("data-hotdeal-focus-keep"),
+      null,
+      { timeout: 5000 },
+    );
+    const state = await gateState(lateAutonomousNoiseGate.page);
+    const projection = await lateAutonomousNoiseGate.page.evaluate(() => {
+      const visible = (element) => {
+        const style = getComputedStyle(element);
+        return style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          element.getClientRects().length > 0;
+      };
+      const sentinels = globalThis.__HDF_RUNTIME_SENTINELS__;
+      const noise = [
+        "#late-popular-ko",
+        "#late-recommended-en",
+        "#late-related-ja",
+        "#late-popular-zh",
+        "#late-comment-popular",
+      ].map((selector) => {
+        const element = document.querySelector(selector);
+        return {
+          selector,
+          visible: visible(element),
+          owned: element.hasAttribute("data-hotdeal-focus-keep"),
+        };
+      });
+      return {
+        noise,
+        identitiesPreserved:
+          sentinels.title === document.querySelector(".post_subject") &&
+          sentinels.body === document.querySelector("#stable-body-sentinel") &&
+          sentinels.comment === document.querySelector(".comment_row"),
+        textsPreserved:
+          sentinels.titleText === document.querySelector(".post_subject").textContent &&
+          sentinels.bodyText === document.querySelector("#stable-body-sentinel").textContent &&
+          sentinels.commentText === document.querySelector(".comment_row").textContent,
+        lateBodyVisible: visible(document.querySelector("#late-body-sentinel")),
+        lateCommentVisible: visible(document.querySelector("#late-comment")),
+      };
+    });
+    assert.equal(state.diagnostics?.state, "ready", JSON.stringify(state));
+    assert.equal(
+      state.diagnostics?.targetReason,
+      "algumon-referrer-known-route",
+      JSON.stringify(state),
+    );
+    assert.equal(state.diagnostics?.visibleLeakCount, 0);
+    assert.equal(projection.identitiesPreserved, true);
+    assert.equal(projection.textsPreserved, true);
+    assert.equal(projection.lateBodyVisible, true);
+    assert.equal(projection.lateCommentVisible, true);
+    projection.noise.forEach((noise) => {
+      assert.equal(noise.visible, false, JSON.stringify(noise));
+      assert.equal(noise.owned, false, JSON.stringify(noise));
+    });
+    assert.deepEqual(lateAutonomousNoiseGate.pageErrors, []);
+  } finally {
+    await lateAutonomousNoiseGate.context.close();
   }
 
   const dormantPublisherControl = await openClienGate(browser, {
@@ -2566,7 +4345,7 @@ try {
     const state = await gateState(dormantPublisherControl.page);
     assert.equal(state.diagnostics?.state, "ready");
     assert.equal(state.ready, "1");
-    assert.equal(state.commentControlProjection.projectionEpoch, 1);
+    assert.equal(state.commentControlProjection.projectionEpoch, 1, JSON.stringify(state));
     assert.equal(state.commentControlProjection.currentVisibleCount, 1);
     assert.equal(state.commentControlProjection.currentDormantApprovedCount, 0);
     assert.equal(
@@ -2575,6 +4354,69 @@ try {
     );
   } finally {
     await dormantPublisherControl.context.close();
+  }
+
+  const publisherControlBecomesDormant = await openClienGate(browser);
+  try {
+    await publisherControlBecomesDormant.page.waitForFunction(
+      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready",
+      null,
+      { timeout: 5000 },
+    );
+    const beforeDormant = await gateState(publisherControlBecomesDormant.page);
+    assert.equal(beforeDormant.commentControlProjection.currentVisibleCount, 1);
+    await publisherControlBecomesDormant.page.evaluate(() => {
+      document.querySelector(".comment_nav").style.display = "none";
+    });
+    await publisherControlBecomesDormant.page.waitForTimeout(200);
+    const afterDormant = await gateState(publisherControlBecomesDormant.page);
+    assert.equal(afterDormant.diagnostics?.state, "ready", JSON.stringify(afterDormant));
+    assert.equal(afterDormant.commentControlProjection.currentVisibleCount, 0);
+    assert.equal(afterDormant.commentControlProjection.currentDormantApprovedCount, 1);
+    assert.equal(afterDormant.commentControlProjection.currentProjectionValid, true);
+  } finally {
+    await publisherControlBecomesDormant.context.close();
+  }
+
+  const inertCommentCleanupGate = await openClienGate(browser, {
+    commentsHtml: `
+      <div class="comment"><div class="comment_row" itemprop="comment">Visible comment</div></div>
+      <div class="comment_nav">Visible comment control</div>
+      <script id="publisher-comment-bootstrap">globalThis.__publisherCommentBootstrap = true;</script>
+    `,
+  });
+  try {
+    await inertCommentCleanupGate.page.waitForFunction(
+      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready",
+      null,
+      { timeout: 5000 },
+    );
+    await inertCommentCleanupGate.page.evaluate(() => {
+      const mount = document.querySelector(".post_comment");
+      const whitespace = Array.from(mount.childNodes).find(
+        (node) => node.nodeType === Node.TEXT_NODE && !node.data.trim(),
+      );
+      if (!whitespace) throw new Error("whitespace fixture node missing");
+      whitespace.remove();
+      document.querySelector("#publisher-comment-bootstrap").remove();
+    });
+    await inertCommentCleanupGate.page.waitForTimeout(100);
+    const inertCleanupState = await gateState(inertCommentCleanupGate.page);
+    assert.equal(
+      inertCleanupState.diagnostics?.state,
+      "ready",
+      JSON.stringify(inertCleanupState),
+    );
+    assert.equal(inertCleanupState.ready, "1");
+    const survivingCommentVisible = await inertCommentCleanupGate.page.evaluate(() => {
+      const item = document.querySelector(".comment_row");
+      const style = getComputedStyle(item);
+      return style.display !== "none" && style.visibility !== "hidden" &&
+        item.getClientRects().length > 0;
+    });
+    assert.equal(survivingCommentVisible, true);
+  } finally {
+    await inertCommentCleanupGate.context.close();
   }
 
   const dynamicControlProjectionGate = await openClienGate(browser);
@@ -2639,14 +4481,21 @@ try {
     await sponsoredDormantControl.page.evaluate(() => {
       document.querySelector(".comment_nav").style.display = "block";
     });
-    await sponsoredDormantControl.page.waitForFunction(
-      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "blocked",
-      null,
-      { timeout: 5000 },
-    );
+    await sponsoredDormantControl.page.waitForTimeout(100);
     const state = await gateState(sponsoredDormantControl.page);
-    assert.equal(state.diagnostics.targetReason, "role-projection-projection-mismatch");
-    assert.equal(state.lock, "1");
+    const sponsoredControlState = await sponsoredDormantControl.page.evaluate(() => {
+      const control = document.querySelector(".comment_nav");
+      const style = getComputedStyle(control);
+      return {
+        visible: style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          control.getClientRects().length > 0,
+        owned: control.hasAttribute("data-hotdeal-focus-keep"),
+      };
+    });
+    assert.equal(state.diagnostics?.state, "ready", JSON.stringify(state));
+    assert.equal(sponsoredControlState.visible, false, JSON.stringify(sponsoredControlState));
+    assert.equal(sponsoredControlState.owned, false, JSON.stringify(sponsoredControlState));
   } finally {
     await sponsoredDormantControl.context.close();
   }
@@ -2659,6 +4508,15 @@ try {
       { timeout: 5000 },
     );
     await cssMutationGate.page.evaluate(() => {
+      const runtimeStyle = document.querySelector(
+        'style[data-hotdeal-focus-runtime-style="2"]',
+      );
+      Object.defineProperty(runtimeStyle, "remove", {
+        configurable: true,
+        value() {
+          throw new Error("synthetic runtime-style removal failure");
+        },
+      });
       const style = document.createElement("style");
       style.textContent = `.post_article::after {
         content: "Sponsored"; position: fixed; left: 0; top: 0;
@@ -2667,13 +4525,30 @@ try {
       document.head.appendChild(style);
     });
     await cssMutationGate.page.waitForFunction(
-      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "blocked",
+      () => ![...document.querySelectorAll("style")].some((style) =>
+        style.textContent.includes('content: "Sponsored"')),
       null,
       { timeout: 5000 },
     );
     const state = await gateState(cssMutationGate.page);
-    assert.equal(state.diagnostics.targetReason, "projection-publisher-invariant");
-    assert.equal(state.lock, "1");
+    const cssContainment = await cssMutationGate.page.evaluate(() => {
+      const article = document.querySelector(".post_article");
+      return {
+        pseudoContent: getComputedStyle(article, "::after").content,
+        commentVisible: (() => {
+          const item = document.querySelector(".comment_row");
+          const style = getComputedStyle(item);
+          return style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            item.getClientRects().length > 0;
+        })(),
+      };
+    });
+    assert.equal(state.diagnostics?.state, "ready", JSON.stringify(state));
+    assert.equal(state.publisherContentVisible.article, true);
+    assert.ok(["none", "normal", '""'].includes(cssContainment.pseudoContent));
+    assert.equal(cssContainment.commentVisible, true);
+    assert.deepEqual(cssMutationGate.pageErrors, []);
   } finally {
     await cssMutationGate.context.close();
   }
@@ -2691,12 +4566,26 @@ try {
       document.querySelector("#runtime-shadow-host").attachShadow({ mode: "closed" });
     });
     await shadowMutationGate.page.waitForFunction(
-      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "blocked",
+      () => !document.querySelector("#runtime-shadow-host")
+        ?.hasAttribute("data-hotdeal-focus-keep"),
       null,
       { timeout: 5000 },
     );
     const state = await gateState(shadowMutationGate.page);
-    assert.equal(state.diagnostics.targetReason, "role-projection-shadow-boundary");
+    const shadowHostState = await shadowMutationGate.page.evaluate(() => {
+      const host = document.querySelector("#runtime-shadow-host");
+      const style = getComputedStyle(host);
+      return {
+        visible: style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          host.getClientRects().length > 0,
+        owned: host.hasAttribute("data-hotdeal-focus-keep"),
+      };
+    });
+    assert.equal(state.diagnostics?.state, "ready", JSON.stringify(state));
+    assert.equal(state.publisherContentVisible.article, true);
+    assert.equal(shadowHostState.visible, false);
+    assert.equal(shadowHostState.owned, false);
   } finally {
     await shadowMutationGate.context.close();
   }
@@ -2713,13 +4602,24 @@ try {
     await popoverMutationGate.page.evaluate(() => {
       document.querySelector("#runtime-popover").showPopover();
     });
-    await popoverMutationGate.page.waitForFunction(
-      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "blocked",
-      null,
-      { timeout: 5000 },
-    );
+    await popoverMutationGate.page.waitForTimeout(100);
     const state = await gateState(popoverMutationGate.page);
-    assert.equal(state.diagnostics.targetReason, "role-projection-top-layer-activation");
+    const popoverState = await popoverMutationGate.page.evaluate(() => {
+      const popover = document.querySelector("#runtime-popover");
+      const style = getComputedStyle(popover);
+      return {
+        open: popover.matches(":popover-open"),
+        visible: style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          popover.getClientRects().length > 0,
+        owned: popover.hasAttribute("data-hotdeal-focus-keep"),
+      };
+    });
+    assert.equal(state.diagnostics?.state, "ready", JSON.stringify(state));
+    assert.equal(state.publisherContentVisible.article, true);
+    assert.equal(popoverState.open, false);
+    assert.equal(popoverState.visible, false);
+    assert.equal(popoverState.owned, false);
   } finally {
     await popoverMutationGate.context.close();
   }

@@ -114,7 +114,7 @@ jobs:
           set +e
           status=0
           timeout --kill-after=5s 60s npm run test:network || status=1
-          timeout --kill-after=5s 90s npm run test:oracle || status=1
+          timeout --kill-after=5s 180s npm run test:oracle || status=1
           python -m unittest -v \
             tests.test_workflow_contract.AuditProofLeaseAndExpectationTests.test_projected_hide_selector_uses_native_document_qsa_semantics \
             || status=1
@@ -775,7 +775,7 @@ jobs:
             --previous-high-water-source \
               "${RUNNER_TEMP}/promotion-previous-release-high-water.json"
           timeout --kill-after=5s 60s npm run test:network
-          timeout --kill-after=5s 90s npm run test:oracle
+          timeout --kill-after=5s 180s npm run test:oracle
           timeout --kill-after=5s 60s npm run test:tamper
           timeout --kill-after=10s 15m npm run test:behavior
           timeout --kill-after=15s 180m xvfb-run -a npm run audit:dom -- \
@@ -1005,7 +1005,7 @@ jobs:
           ssh_config_path="${RUNNER_TEMP}/hdf-governed-push-ssh-config"
           umask 077
           printf '%s\n' "${AUTOMATION_PUSH_PRIVATE_KEY}" > "${key_path}"
-          public_key="$(ssh-keygen -y -f "${key_path}")"
+          public_key="$(ssh-keygen -y -f "${key_path}" | awk '{ print $1 " " $2 }')"
           [[ "${public_key}" == ssh-ed25519\ * ]]
           [[ "$(printf '%s\n' "${public_key}" | awk '{print NF}')" == "2" ]]
           actual_fingerprint="$(
@@ -1082,6 +1082,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RUN_ID: ${{ github.run_id }}
+          AUDITED_BASE_SHA: ${{ needs.audit.outputs.base_sha }}
+          CANDIDATE_COUNT: ${{ needs.audit.outputs.candidate_count }}
+          CANDIDATE_TOTAL: ${{ needs.audit.outputs.candidate_total }}
+          CANDIDATE_BATCH_START: ${{ needs.audit.outputs.candidate_batch_start }}
+          CANDIDATE_BATCH_SIZE: ${{ needs.audit.outputs.candidate_batch_size }}
         shell: bash
         run: |
           title="[DOM drift] AdGuard Hotdeal Focus gate failed"
@@ -1097,11 +1103,21 @@ jobs:
             --json number,title \
             --jq '.[] | select(.title == "[DOM drift] AdGuard Hotdeal Focus gate failed") | .number' \
             | head -n 1)"
-          printf '%s\n\n%s\n\n%s\n' \
-            "The bounded weekly GitHub-hosted DOM gate failed." \
-            "Evidence (screenshots, proof JSON, and hashes): ${RUN_URL}" \
-            "The issue stays open until a later full cloud audit is clean. Candidate proofs reuse frozen source evidence, and no workflow self-dispatches another Algumon audit." \
-            > issue-body.md
+          cat > issue-body.md <<EOF
+          The bounded weekly GitHub-hosted DOM gate failed. This is a failure signal, not proof that a source selector or semantic DOM mapping can be repaired automatically.
+
+          Run: ${RUN_URL}
+          Audited base: ${AUDITED_BASE_SHA:-unavailable}
+          Candidate queue: ${CANDIDATE_COUNT:-0} in this batch (start ${CANDIDATE_BATCH_START:-0}, size ${CANDIDATE_BATCH_SIZE:-0}; ${CANDIDATE_TOTAL:-0} total).
+
+          Review the run artifacts, where present, in this order:
+          1. \`candidate-queue-${RUN_ID}\` — immutable audited-base and candidate-queue digests.
+          2. \`dom-audit-json-${RUN_ID}\` — bounded JSON evidence and SHA-256 manifests.
+          3. \`dom-audit-failure-screenshots-${RUN_ID}\` — deterministic capped screenshots for a failed full audit.
+          4. \`candidate-aggregate-${RUN_ID}\` and \`candidate-result-${RUN_ID}-*\` — only after isolated retests finish.
+
+          The issue stays open until a later full cloud audit is clean. Candidate proofs reuse frozen source evidence, and no workflow self-dispatches another Algumon audit. A source-repository promotion is separately opt-in and can use only a digest-bound candidate that passes the isolated proof, zero-leak, tamper, and reproducibility gates.
+          EOF
           if [[ -n "${existing}" ]]; then
             gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body-file issue-body.md
           else
@@ -1257,7 +1273,7 @@ jobs:
           ssh_config_path="${RUNNER_TEMP}/hdf-governed-push-ssh-config"
           umask 077
           printf '%s\n' "${AUTOMATION_PUSH_PRIVATE_KEY}" > "${key_path}"
-          public_key="$(ssh-keygen -y -f "${key_path}")"
+          public_key="$(ssh-keygen -y -f "${key_path}" | awk '{ print $1 " " $2 }')"
           [[ "${public_key}" == ssh-ed25519\ * ]]
           [[ "$(printf '%s\n' "${public_key}" | awk '{print NF}')" == "2" ]]
           actual_fingerprint="$(

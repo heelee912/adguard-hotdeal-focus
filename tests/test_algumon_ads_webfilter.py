@@ -7,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 FILTER_PATH = ROOT / "algumon-ads-webfilter.txt"
 POLICY_PATH = ROOT / "ALGUMON_ADS_NETWORK_POLICY.md"
+CLI_PATH = ROOT / "scripts" / "adguard_windows_cli.ps1"
 SUBSCRIPTION_URL = (
     "https://raw.githubusercontent.com/heelee912/adguard-hotdeal-focus/main/"
     "algumon-ads-webfilter.txt"
@@ -54,6 +55,24 @@ class AlgumonAdsWebFilterTests(unittest.TestCase):
         self.assertIn("fail-closed", policy)
         self.assertIn("NextDNS alone cannot", policy)
         self.assertNotIn("@@||algumon.com^$document", FILTER_PATH.read_text(encoding="utf-8"))
+
+    def test_policy_refresh_shadow_installs_before_disabling_prior_lineage(self) -> None:
+        cli = CLI_PATH.read_text(encoding="utf-8")
+        install = cli[
+            cli.index("function Install-AlgumonAdDeliveryPolicy"):
+            cli.index("function Get-EnabledAlgumonDocumentWideExceptions")
+        ]
+        self.assertIn("$targetBefore", install)
+        self.assertIn("$priorState", install)
+        self.assertIn("InstallCustomFilter", install)
+        self.assertNotIn("CheckForFilterSubscriptionsUpdate", install)
+        self.assertIn("Assert-AlgumonAdDeliveryPolicyTargetInstalled", install)
+        self.assertIn("Assert-AlgumonAdDeliveryPolicyInstalled", install)
+        self.assertLess(
+            install.index("InstallCustomFilter"),
+            install.index("foreach ($previous in $priorState)"),
+        )
+        self.assertNotIn("RemoveFilterSubscription(\n                    $before", install)
 
 
 if __name__ == "__main__":

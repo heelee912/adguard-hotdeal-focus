@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import vm from "node:vm";
 
 import {
+  FIRST_PAINT_PROBE_SOURCE,
   createNetworkPolicyEvidenceRecorder,
   isPrivateOrSpecialIp,
   networkFidelityFailures,
@@ -507,7 +509,43 @@ function testConnectAuthorityParser() {
   }
 }
 
+function testRecoveryPaintClassification() {
+  for (const [label, attributes, active] of [
+    ["recovery-only", { "data-hotdeal-focus-status": "recovery-preflight-not-ready" }, false],
+    ["recovery-with-lock", { "data-hotdeal-focus-status": "recovery-preflight-not-ready", "data-hotdeal-focus-lock": "1" }, true],
+    ["recovery-with-protocol", { "data-hotdeal-focus-status": "recovery-preflight-not-ready", "data-hotdeal-focus-protocol": "2" }, true],
+    ["locked-status", { "data-hotdeal-focus-status": "locked-preflight" }, true],
+  ]) {
+    const frames = [];
+    const root = {
+      getAttribute: (name) => attributes[name] ?? null,
+      hasAttribute: (name) => Object.hasOwn(attributes, name),
+      classList: { contains: () => false },
+    };
+    const visibleElement = {
+      hasAttribute: () => false,
+      getClientRects: () => [{ width: 100, height: 20 }],
+    };
+    const context = {
+      window: {
+        requestAnimationFrame: (callback) => frames.push(callback),
+        getComputedStyle: () => ({ display: "block", visibility: "visible", opacity: "1" }),
+      },
+      document: { documentElement: root, body: { querySelectorAll: () => [visibleElement] } },
+    };
+    vm.runInNewContext(FIRST_PAINT_PROBE_SOURCE, context);
+    frames.shift()();
+    const probe = context.window.__HOTDEAL_FOCUS_PAINT_PROBE__;
+    assert.equal(probe.samples[0].readerGateActive, active, label);
+    assert.equal(probe.samples[0].status, attributes["data-hotdeal-focus-status"], label);
+    assert.equal(probe.flashFrameCount, 1, `${label}: actual publisher visibility is still recorded`);
+    assert.equal(probe.unsafeGateFrameCount, active ? 1 : 0, label);
+    assert.equal(probe.publisherVisibleFrameCount, active ? 0 : 1, label);
+  }
+}
+
 async function main() {
+  testRecoveryPaintClassification();
   testNetworkPolicyTable();
   testRemoteHostBudgetBoundary();
   testRemoteRequestBudgetBoundary();
