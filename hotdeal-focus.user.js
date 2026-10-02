@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.72
+// @version      0.6.73
 // @description  Fail-closed semantic reader gate for Algumon hot-deal destinations.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
@@ -41,7 +41,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.6.72";
+  const GENERATOR_VERSION = "0.6.73";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -2907,6 +2907,29 @@
     }).length;
   }
 
+  function productPurchaseLinkCount(element) {
+    const document = element.ownerDocument;
+    const outbound = outboundLinkCount(element);
+    const anchors = (element.matches("a[href]") ? [element] : []).concat(
+      Array.from(element.querySelectorAll("a[href]")),
+    );
+    const nativeRedirects = anchors.filter(function labeledNativePurchaseRedirect(anchor) {
+      try {
+        const target = new URL(anchor.href, document.location.href);
+        if (!/^https?:$/.test(target.protocol) ||
+            target.hostname !== document.location.hostname ||
+            !/^\/(?:go|out|redirect|buy|purchase)(?:\/|$)/iu.test(target.pathname)) return false;
+        const row = anchor.closest("tr, dd, [itemprop='offers']");
+        const label = normalizeText(row?.querySelector("th, dt, label")?.textContent || "");
+        return /^(?:상품\s*링크|구매\s*링크|구매처|판매처|링크|product\s*link|purchase\s*link|buy)(?:\s|$)/iu.test(label) ||
+          /^https?:\/\/[^\s]+/iu.test(normalizeText(anchor.textContent));
+      } catch (_error) {
+        return false;
+      }
+    });
+    return outbound + nativeRedirects.length;
+  }
+
   function bodyFeatures(element, titleNode, noiseCache) {
     const textLength = normalizeText(element.textContent).length;
     const paragraphCount = element.querySelectorAll("p, blockquote, pre, li").length;
@@ -3338,7 +3361,9 @@
     const semantic = element.matches(
       "[itemprop='offers'], [itemprop='price'], [itemtype*='Offer']"
     );
-    const outboundLinks = outboundLinkCount(element);
+    // A native purchase relay can stay on the publisher origin; its original
+    // href must remain intact instead of being mistaken for site navigation.
+    const outboundLinks = productPurchaseLinkCount(element);
     const hasPrice = CURRENCY_PATTERN.test(text);
     const hasProductLabel = PRODUCT_TOKEN_PATTERN.test(`${tokenText} ${text}`);
     let previousContext = "";
