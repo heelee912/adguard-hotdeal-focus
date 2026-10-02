@@ -9,6 +9,7 @@ const source = fs.readFileSync(new URL("../hotdeal-focus.user.js", import.meta.u
 const title = "[스팀] 이스케이프 프롬 덕코프 30% 할인";
 const body = "많이들 알고 계시는 덕코프 25에서 5% 더해서 30% 할인으로 돌아왔습니다. 저도 많이는 하지 않았는데 재밌게 엔딩 봤었네요 ㅎ 한국어평가 압긍이니 대부분 재밌으실 것 같습니다.";
 const destination = "https://store.steampowered.com/app/3167020/Escape_from_Duckov/";
+const image = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="blue"/></svg>');
 const html = `<!doctype html><html><head>
 <meta property="og:title" content="${title}">
 <meta property="og:type" content="article">
@@ -20,10 +21,10 @@ const html = `<!doctype html><html><head>
 })}</script></head><body><main class="left-con-wrap" id="con-body">
 <h1 class="v2-view-head__title"><span class="label">진행중</span> ${title}</h1>
 <table class="market-info-view-table"><tbody>
-<tr><th>링크</th><td><a href="javascript:goToLink('${Buffer.from(destination).toString("base64")}');">${destination}</a></td></tr>
+<tr><th>링크 <img alt="info" src="${image}"><div class="tooltip active">구매링크는 제휴 링크로 전환될 수 있습니다.</div><div class="common-tooltip active">제휴 링크 안내</div></th><td><a href="javascript:goToLink('${Buffer.from(destination).toString("base64")}');">${destination}</a></td></tr>
 <tr><th>판매처</th><td>스팀</td></tr><tr><th>가격</th><td>￦ 11,550 (KRW)</td></tr>
 <tr><th>배송/직배</th><td>무료</td></tr></tbody></table>
-<div class="view-content"><div class="note-editor"><div id="new_contents"><p>${body}</p></div></div></div>
+<div class="view-content"><div class="note-editor"><div id="new_contents"><p>${body}</p><p></p><p><img src="${image}" alt="상품 사진"></p></div></div></div>
 <div class="reply-wrap v2-cmt-wrap"><p class="reply-tit">댓글: <span id="comm_cnt">2</span>개</p>
 <div class="reply-list" id="ajax-reply-list"><ul class="common-reply-list">
 <li id="comment1990135"><div class="listNode v2-cmt"><div class="contentArea v2-cmt__main"><div class="nickWrap">삣삐삣삐</div><div class="note-editor content-view-ok" id="saveComment_1990135">덕코프 재밌죠 ㅋㅋ</div></div></div></li>
@@ -49,11 +50,17 @@ try {
   }, { source });
   assert.equal(result.exact.ok, true, JSON.stringify(result));
   await page.close();
-  for (const width of [1280, 390]) {
+  for (const { width, drift, handler = "native" } of [{ width: 1280, drift: false }, { width: 1280, drift: true }, { width: 390, drift: true }, { width: 1280, drift: true, handler: "mismatch" }, { width: 390, drift: true, handler: "arbitrary" }]) {
     const context = await browser.newContext({ viewport: { width, height: 844 } });
     try {
       const runtimePage = await context.newPage();
-      await runtimePage.route("**/*", route => route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: html }));
+      let fixture = drift ? html.replace('class="left-con-wrap" id="con-body"', 'class="info-body" id="publisher-root"') : html;
+      const nativeHref = `javascript:goToLink('${Buffer.from(destination).toString("base64")}');`;
+      const purchaseHref = handler === "mismatch"
+        ? `javascript:goToLink('${Buffer.from('https://example.com/unrelated').toString("base64")}');`
+        : handler === "arbitrary" ? "javascript:unrelatedPublisherFunction()" : nativeHref;
+      fixture = fixture.replace(nativeHref, purchaseHref);
+      await runtimePage.route("**/*", route => route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: fixture }));
       await runtimePage.addInitScript(({ source, control }) => {
         (0, eval)(control);
         (0, eval)(source);
@@ -67,6 +74,8 @@ try {
           items: [...document.querySelectorAll("li[id^='comment']")].map(e => ({visible:visible(e),text:e.innerText})),
           noise: visible(document.querySelector("aside")),
           purchaseHref: document.querySelector(".market-info-view-table a").getAttribute("href"),
+          purchaseVisible: visible(document.querySelector(".market-info-view-table a")),
+          tooltipVisible: [...document.querySelectorAll(".market-info-view-table th .tooltip, .market-info-view-table th .common-tooltip, .market-info-view-table th img[alt='info']")].some(visible),
           proofFrames: globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.standaloneGate?.cascadeProofFrames,
         };
       });
@@ -76,7 +85,9 @@ try {
       assert.match(state.items[0].text, /덕코프 재밌죠/);
       assert.match(state.items[1].text, /FPS는 아니고 탑뷰/);
       assert.equal(state.noise, false);
-      assert.equal(state.purchaseHref, `javascript:goToLink('${Buffer.from(destination).toString("base64")}');`);
+      assert.equal(state.purchaseHref, purchaseHref);
+      assert.equal(state.purchaseVisible, handler === "native", `Only a matching native purchase handler must be visible at ${width}px (drift=${drift}, handler=${handler})`);
+      assert.equal(state.tooltipVisible, false);
     } finally { await context.close(); }
   }
   console.log("Actual QuasarZone title/comment-wrapper regression passed at 1280px and 390px");

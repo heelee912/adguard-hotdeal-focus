@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.73
+// @version      0.6.75
 // @description  Fail-closed semantic reader gate for Algumon hot-deal destinations.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
@@ -381,7 +381,7 @@
             "pageRoot": ".left-con-wrap",
             "allowEmptyComments": true,
             "requiredRoles": ["title", "product", "body", "comments"],
-            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".market-info-view-table"],"ignored":[]},"comments":{"mode":"classified-children"}},
+            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".market-info-view-table"],"ignored":[".market-info-view-table th .tooltip",".market-info-view-table th .common-tooltip",".market-info-view-table th img[alt='info']"]},"comments":{"mode":"classified-children"}},
             "hints": {
               "title": ["h1.title", "h1.v2-view-head__title"],
               "product": [".market-info-view-table"],
@@ -399,7 +399,7 @@
             "pageRoot": "#con-body",
             "allowEmptyComments": true,
             "requiredRoles": ["title", "product", "body", "comments"],
-            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".market-info-view-table"],"ignored":[]},"comments":{"mode":"classified-children"}},
+            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".market-info-view-table"],"ignored":[".market-info-view-table th .tooltip",".market-info-view-table th .common-tooltip",".market-info-view-table th img[alt='info']"]},"comments":{"mode":"classified-children"}},
             "hints": {
               "title": [".content.market-info-view-wrap .view-style01 .tit .ment > h1", "h1.v2-view-head__title"],
               "product": [".market-info-view-table"],
@@ -2915,14 +2915,24 @@
     );
     const nativeRedirects = anchors.filter(function labeledNativePurchaseRedirect(anchor) {
       try {
+        const row = anchor.closest("tr, dd, [itemprop='offers']");
+        const label = normalizeText(row?.querySelector("th, dt, label")?.textContent || "");
+        const purchaseLabel = /^(?:상품\s*링크|구매\s*링크|구매처|판매처|링크|product\s*link|purchase\s*link|buy)(?:\s|$)/iu.test(label);
+        // QuasarZone keeps its purchase destination in a native encoded handler.
+        // Recognize that exact form without invoking it or replacing the href.
+        const nativeHandler = /^(?:javascript:)\s*goToLink\(\s*(['"])([A-Za-z0-9+/]+={0,2})\1\s*\)\s*;?\s*$/iu.exec(anchor.getAttribute("href") || "");
+        if (document.location.hostname === "quasarzone.com" && nativeHandler && purchaseLabel) {
+          const decoded = new URL(atob(nativeHandler[2]));
+          const displayed = new URL(String(anchor.textContent || "").trim());
+          return /^https?:$/.test(decoded.protocol) && decoded.hostname !== document.location.hostname &&
+            decoded.href === displayed.href;
+        }
         const target = new URL(anchor.href, document.location.href);
         if (!/^https?:$/.test(target.protocol) ||
             target.hostname !== document.location.hostname ||
             !/^\/(?:go|out|redirect|buy|purchase)(?:\/|$)/iu.test(target.pathname)) return false;
-        const row = anchor.closest("tr, dd, [itemprop='offers']");
-        const label = normalizeText(row?.querySelector("th, dt, label")?.textContent || "");
-        return /^(?:상품\s*링크|구매\s*링크|구매처|판매처|링크|product\s*link|purchase\s*link|buy)(?:\s|$)/iu.test(label) ||
-          /^https?:\/\/[^\s]+/iu.test(normalizeText(anchor.textContent));
+        return purchaseLabel ||
+          /^https?:\/\/[^\s]+/iu.test(String(anchor.textContent || "").trim());
       } catch (_error) {
         return false;
       }
