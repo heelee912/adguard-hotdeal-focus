@@ -1059,6 +1059,12 @@ function createNetworkPolicyEvidenceRecorder({
   const failedAllowedResponseByHost = new Map();
   const failedAllowedRequests = [];
   const failedAllowedResponses = [];
+  const activeRemoteRequests = new Map();
+  const lateRequests = [];
+  let undrainedRequests = [];
+  let undrainedRequestCount = 0;
+  let requestSequence = 0;
+  let lifecycleEvidenceOverflowCount = 0;
   let failedResourceEvidenceOverflowCount = 0;
   const navigationViolationByAuthority = new Map();
   const navigationViolationKeys = new Set();
@@ -1124,10 +1130,22 @@ function createNetworkPolicyEvidenceRecorder({
     });
   };
   return {
-    reserveRemoteRequest(hostname) {
+    reserveRemoteRequest(hostname, resource = {}) {
       lastRemoteEventAt = Date.now();
+      const entry = {
+        hostname: normalizedHostname(hostname).slice(0, 253),
+        requestType: String(resource.requestType ?? "unknown").slice(0, 32),
+        isMainNavigation: resource.isMainNavigation === true,
+        urlSha256: networkResourceUrlSha256(resource.urlText),
+        ...(resource.redirectEvidence ? {
+          redirectAncestorUrlSha256s: [...resource.redirectEvidence.ancestorUrlSha256s],
+          redirectAncestryStatus: resource.redirectEvidence.status,
+        } : {}),
+      };
       if (sealed) {
         lateRequestCount += 1;
+        if (lateRequests.length < maximumRemoteRequests) lateRequests.push(entry);
+        else lifecycleEvidenceOverflowCount += 1;
         return {
           allowed: false,
           reason: "network-evidence-sealed",
@@ -1135,11 +1153,15 @@ function createNetworkPolicyEvidenceRecorder({
         };
       }
       activeRemoteRequestCount += 1;
+      const sequence = ++requestSequence;
+      if (activeRemoteRequests.size < maximumRemoteRequests) activeRemoteRequests.set(sequence, entry);
+      else lifecycleEvidenceOverflowCount += 1;
       let finished = false;
       const finish = () => {
         if (finished) return;
         finished = true;
         activeRemoteRequestCount -= 1;
+        activeRemoteRequests.delete(sequence);
         lastRemoteEventAt = Date.now();
       };
       attemptedRemoteRequestCount += 1;
@@ -1213,6 +1235,8 @@ function createNetworkPolicyEvidenceRecorder({
       ) {
         if (Date.now() >= deadline) {
           drainTimeoutCount += 1;
+          undrainedRequestCount = activeRemoteRequestCount;
+          undrainedRequests = structuredClone([...activeRemoteRequests.values()]);
           break;
         }
         await new Promise((resolve) => setTimeout(resolve, Math.min(50, quietWindowMs)));
@@ -1240,6 +1264,11 @@ function createNetworkPolicyEvidenceRecorder({
         activeRemoteRequestCount,
         lateRequestCount,
         drainTimeoutCount,
+        activeRemoteRequests: structuredClone([...activeRemoteRequests.values()]),
+        lateRequests: structuredClone(lateRequests),
+        undrainedRequests: structuredClone(undrainedRequests),
+        undrainedRequestCount,
+        lifecycleEvidenceOverflowCount,
         sealed,
         allowedPublicHosts: serialize(allowedPublicByHost),
         undeclaredPublicHosts: serialize(undeclaredPublicByHost),
@@ -1417,17 +1446,25 @@ function networkFidelityFailures(
   const isRequiredHost = (hostname) =>
     declaredResourceDomains.some((domain) => hostnameMatches(hostname, domain)) ||
     referencedHosts.has(normalizedHostname(hostname));
+  const isRequiredRequest = (entry) => entry.isMainNavigation === true ||
+    (entry.urlSha256 && requiredResourceDigests.has(entry.urlSha256)) ||
+    (entry.redirectAncestorUrlSha256s ?? []).some((digest) => requiredResourceDigests.has(digest));
   const hasRequiredFailure = (requestKey, hostKey) => {
     const requests = networkPolicyEvidence?.[requestKey];
     if (Array.isArray(requests)) {
-      return requests.some((entry) => entry.isMainNavigation === true ||
-        (entry.urlSha256 && requiredResourceDigests.has(entry.urlSha256)) ||
-        (entry.redirectAncestorUrlSha256s ?? []).some((digest) => requiredResourceDigests.has(digest)) ||
+      return requests.some((entry) => isRequiredRequest(entry) ||
         // Older callers without exact URL evidence keep the conservative host check.
         (!entry.urlSha256 && isRequiredHost(entry.hostname)));
     }
     return (networkPolicyEvidence?.[hostKey] ?? []).some((entry) =>
       entry.mainNavigationCount > 0 || isRequiredHost(entry.hostname));
+  };
+  const lifecycleContainsRequiredRequest = (key, expectedCount) => {
+    const entries = networkPolicyEvidence?.[key];
+    // Legacy/missing identities cannot prove an unfinished request optional.
+    return !Number.isSafeInteger(expectedCount) || expectedCount < 0 ||
+      !Array.isArray(entries) || entries.length !== expectedCount || entries.some((entry) => !entry.urlSha256 ||
+      (entry.redirectAncestryStatus && entry.redirectAncestryStatus !== "complete") || isRequiredRequest(entry));
   };
   if (
     networkPolicyEvidence?.mode === "bounded-public-https-fidelity" &&
@@ -1441,13 +1478,16 @@ function networkFidelityFailures(
   ) {
     failures.push("bounded public fidelity evidence was not sealed after a quiet drain");
   }
-  if ((networkPolicyEvidence?.activeRemoteRequestCount ?? 0) > 0) {
+  if ((networkPolicyEvidence?.activeRemoteRequestCount ?? 0) > 0 &&
+    lifecycleContainsRequiredRequest("activeRemoteRequests", networkPolicyEvidence.activeRemoteRequestCount)) {
     failures.push("network evidence sealed with active remote requests");
   }
-  if ((networkPolicyEvidence?.lateRequestCount ?? 0) > 0) {
+  if ((networkPolicyEvidence?.lateRequestCount ?? 0) > 0 &&
+    lifecycleContainsRequiredRequest("lateRequests", networkPolicyEvidence.lateRequestCount)) {
     failures.push("remote requests appeared after the network evidence seal");
   }
-  if ((networkPolicyEvidence?.drainTimeoutCount ?? 0) > 0) {
+  if ((networkPolicyEvidence?.drainTimeoutCount ?? 0) > 0 &&
+    lifecycleContainsRequiredRequest("undrainedRequests", networkPolicyEvidence.undrainedRequestCount)) {
     failures.push("remote requests did not drain inside the fail-closed deadline");
   }
   if ((networkPolicyEvidence?.navigationViolations ?? []).length > 0) {
@@ -1461,6 +1501,9 @@ function networkFidelityFailures(
   }
   if ((networkPolicyEvidence?.failedResourceEvidenceOverflowCount ?? 0) > 0) {
     failures.push("failed resource evidence exceeded its bounded request count");
+  }
+  if ((networkPolicyEvidence?.lifecycleEvidenceOverflowCount ?? 0) > 0) {
+    failures.push("request lifecycle evidence exceeded its bounded request count");
   }
   if ((stylesheetDependencies?.dependencyOverflowCount ?? 0) > 0 ||
     (stylesheetDependencies?.invalidDependencyCount ?? 0) > 0) {
@@ -1539,7 +1582,9 @@ function networkFidelityFailures(
     failures.push("semantic role resources contain insecure or non-default authorities");
   }
   const requiredBlockedHosts = (networkPolicyEvidence?.blockedHosts ?? []).filter(
-    (entry) => isRequiredHost(entry.hostname),
+    (entry) => isRequiredHost(entry.hostname) &&
+      (!Array.isArray(networkPolicyEvidence?.lateRequests) ||
+        (entry.reasons ?? []).some((reason) => reason !== "network-evidence-sealed")),
   );
   if (requiredBlockedHosts.length > 0) {
     failures.push(
@@ -3933,7 +3978,7 @@ async function semanticOracle(
   const seed = targetAlgumonSeed(siteId, target);
   const verdict = await evaluateInIsolatedWorld(
     page,
-    ({ sourceBytes, expectedSiteId, expectedLayoutId, rolesRequired, oracleSeed }) => {
+    ({ sourceBytes, expectedSiteId, expectedLayoutId, rolesRequired, oracleSeed, registeredSample }) => {
       const originalModule = Object.getOwnPropertyDescriptor(globalThis, "module");
       if (originalModule && originalModule.configurable !== true) {
         throw new Error("page has a non-configurable global module");
@@ -3975,6 +4020,106 @@ async function semanticOracle(
             "/" +
             expectedLayoutId,
         );
+      }
+      // A registered article is checked against its approved DOM contract.
+      // New-layout discovery is deliberately separate: missing aggregator
+      // metadata and generic inference scores cannot invalidate an exact match.
+      if (registeredSample) {
+        const hostname = location.hostname.toLocaleLowerCase();
+        const siteMatches = hostname === siteContract.domain ||
+          hostname.endsWith(`.${siteContract.domain}`);
+        const registeredRoute = api.readerEntryAuthority(location.href, "") ===
+          "registered-hotdeal-route";
+        const pathAndQuery = `${location.pathname}${location.search}`;
+        const matchingLayouts = siteMatches && registeredRoute ? siteContract.layouts.filter((layout) =>
+          (layout.paths ?? [layout.path]).some((pattern) =>
+            api.pathPatternMatches(pathAndQuery, pattern))) : [];
+        const projection = api.resolveProjectionClasses(document, matchingLayouts, null);
+        const projectionClass = projection.projectionClasses.length === 1
+          ? projection.projectionClasses[0] : [];
+        const resolution = projectionClass[0] ?? null;
+        const resolvedLayout = matchingLayouts.find((layout) =>
+          layout.id === resolution?.layoutId);
+        const exactSelector = (element, preferred = []) => {
+          if (!element) return null;
+          const candidates = [...preferred];
+          if (element.id) candidates.push(`#${CSS.escape(element.id)}`);
+          const tag = element.tagName.toLocaleLowerCase();
+          if (element.classList.length) {
+            candidates.push(tag + [...element.classList].map((name) => `.${CSS.escape(name)}`).join(""));
+          }
+          candidates.push(tag);
+          for (const selector of candidates) {
+            try {
+              const matches = document.querySelectorAll(selector);
+              if (matches.length === 1 && matches[0] === element) return selector;
+            } catch {}
+          }
+          // This locator only records an already approved node. It is never a
+          // learned selector or a promotion proposal.
+          const segments = [];
+          for (let current = element; current && current !== document.documentElement;
+            current = current.parentElement) {
+            const index = [...current.parentElement.children].indexOf(current) + 1;
+            segments.unshift(`${current.tagName.toLocaleLowerCase()}:nth-child(${index})`);
+          }
+          const selector = `html > ${segments.join(" > ")}`;
+          return document.querySelector(selector) === element ? selector : null;
+        };
+        const roleNames = ["title", "body", "comments"].concat(
+          resolution?.roles.product ? ["product"] : [],
+        );
+        const roles = Object.fromEntries(roleNames.map((role) => [role,
+          exactSelector(resolution?.roles[role], resolvedLayout?.hints?.[role] ?? []),
+        ]));
+        const cardinality = Object.fromEntries(Object.entries(roles).map(([role, selector]) =>
+          [role, selector ? document.querySelectorAll(selector).length : 0]));
+        const commentItems = resolution?.roles.commentItems ?? [];
+        const dormantItems = resolution?.roles.commentDormantItems ?? [];
+        const commentMount = resolution?.roles.comments;
+        const pageRoot = resolution?.commonRoot;
+        const containment = Boolean(pageRoot) && roleNames.every((role) => {
+          const node = resolution.roles[role];
+          return node && (node === pageRoot || pageRoot.contains(node));
+        });
+        const itemRoots = [...new Set([...commentItems, ...dormantItems])];
+        const itemContainment = Boolean(commentMount) && itemRoots.every((node) =>
+          node !== commentMount && commentMount.contains(node));
+        const exact = siteMatches && registeredRoute && projection.projectionClasses.length === 1 &&
+          resolution?.ok === true && containment && itemContainment &&
+          rolesRequired.every((role) => Boolean(roles[role])) &&
+          Object.values(cardinality).every((count) => count === 1);
+        return {
+          ok: exact,
+          verificationMode: "registered-sample",
+          candidateEligible: false,
+          reason: exact ? "exact-approved-registered-projection" :
+            projection.resolutions.find((item) => !item.ok)?.reason ?? "no-unique-approved-projection",
+          pageRoot: exactSelector(pageRoot, [resolvedLayout?.pageRoot].filter(Boolean)),
+          pageRootCount: pageRoot ? 1 : 0,
+          roles,
+          cardinality,
+          metrics: resolution?.roleDiagnostics ?? {},
+          commentItems: resolution?.commentItemSelectors ?? [],
+          commentControls: resolution?.commentControlSelectors ?? [],
+          commentIgnored: resolution?.commentIgnoredSelectors ?? [],
+          commentItemCount: commentItems.length,
+          dormantCommentItemCount: dormantItems.length,
+          ignoredCommentCount: resolution?.roles.commentIgnored.length ?? 0,
+          titleNormalized: api.normalizeText(resolution?.resolvedTitle ?? ""),
+          containment,
+          approvedProjection: {
+            count: projection.projectionClasses.length,
+            aliases: projectionClass.map((item) => item.layoutId).sort(),
+            loadedCommentItemsExact: exact && itemRoots.length === commentItems.length &&
+              dormantItems.every((item) => commentItems.includes(item)),
+            commentItemContainment: itemContainment,
+            commentControlsClassified: resolution?.ok === true,
+          },
+          policyProposal: null,
+          productOrder: resolution?.projectionPolicy.productOrder ?? null,
+          oracleSource: "verified-userscript-export",
+        };
       }
       const resolution = api.discoverSemanticContract(
         document,
@@ -4333,6 +4478,8 @@ async function semanticOracle(
           containment &&
           Object.values(roleSelectors).every(Boolean) &&
           Object.values(cardinality).every((count) => count === 1),
+        reason: resolution.reason,
+        projectionTupleCount: resolution.projectionTupleCount,
         pageRoot: pageRootSelector,
         pageRootCount,
         roles: roleSelectors,
@@ -4377,6 +4524,7 @@ async function semanticOracle(
       expectedLayoutId: layoutId,
       rolesRequired: requiredRoles,
       oracleSeed: seed,
+      registeredSample: target.source === "sample",
     },
   );
   return { ...verdict, oracleExecutionWorld: ORACLE_EXECUTION_WORLD };
@@ -4942,6 +5090,34 @@ function candidateOverlayFailures(
 }
 
 function semanticOracleEvidence(oracle, target) {
+  if (oracle.verificationMode === "registered-sample") {
+    const exact = target.source === "sample" && oracle.ok === true &&
+      oracle.containment === true && oracle.approvedProjection?.count === 1 &&
+      oracle.approvedProjection.loadedCommentItemsExact === true &&
+      oracle.approvedProjection.commentItemContainment === true &&
+      oracle.approvedProjection.commentControlsClassified === true;
+    return {
+      ...oracle,
+      ok: exact,
+      structuralOk: exact,
+      titleNormalized: undefined,
+      titleSha256: oracle.titleNormalized ? sha256(oracle.titleNormalized) : null,
+      commentStructure: {
+        mountSelector: oracle.roles.comments,
+        mountCount: oracle.cardinality.comments,
+        itemSelector: oracle.commentItems.join(", "),
+        itemCount: oracle.commentItemCount,
+        dormantItemCount: oracle.dormantCommentItemCount,
+        ignoredSelectors: oracle.commentIgnored,
+        ignoredCount: oracle.ignoredCommentCount,
+        evidenceSource: "exact-approved-loaded-dom-items",
+      },
+      // No aggregator claim is invented for direct sample URLs. These records
+      // prove the installed contract, not a candidate eligible for promotion.
+      algumon: null,
+      candidateEligible: false,
+    };
+  }
   const algumonTitle = target.algumon?.title ?? "";
   const algumonCommentCount = target.algumon?.commentCount ?? null;
   const titleSimilarity = Number(oracle.seedTitleSimilarity ?? 0);
@@ -4995,6 +5171,8 @@ function semanticOracleEvidence(oracle, target) {
       commentConsistent &&
       exactCommentStructure,
     structuralOk: oracle.ok === true,
+    reason: oracle.reason,
+    projectionTupleCount: oracle.projectionTupleCount,
     oracleSource: oracle.oracleSource,
     oracleExecutionWorld: oracle.oracleExecutionWorld,
     pageRoot: oracle.pageRoot,
@@ -5044,6 +5222,16 @@ function semanticOracleContractFailures(evidence) {
   }
   if (evidence?.structuralOk !== true) {
     failures.push("semantic oracle could not prove one complete projection tuple");
+  }
+  if (evidence?.verificationMode === "registered-sample") {
+    if (evidence.ok !== true || evidence.candidateEligible !== false ||
+      evidence.policyProposal !== null || evidence.approvedProjection?.count !== 1 ||
+      evidence.approvedProjection?.loadedCommentItemsExact !== true ||
+      evidence.approvedProjection?.commentItemContainment !== true ||
+      evidence.approvedProjection?.commentControlsClassified !== true) {
+      failures.push("registered sample lacks one exact approved article/comment projection");
+    }
+    return failures;
   }
   if (!independentPolicyProposalIsComplete(evidence)) {
     failures.push("semantic oracle policy proposal is incomplete or not independently bounded");
@@ -6041,7 +6229,10 @@ async function createPageContext(
       await route.continue();
       return;
     }
-    const reservation = networkEvidenceRecorder.reserveRemoteRequest(parsed.hostname);
+    const reservation = networkEvidenceRecorder.reserveRemoteRequest(parsed.hostname, {
+      requestType: request.resourceType(), isMainNavigation, urlText: request.url(),
+      redirectEvidence: networkRequestRedirectEvidence(request),
+    });
     let handedToNetworkLifecycle = false;
     try {
       if (!reservation.allowed) {
@@ -6128,7 +6319,9 @@ async function createPageContext(
       [...exactResourceHosts],
       allowPublicHttpsSubresources,
     );
-    const reservation = networkEvidenceRecorder.reserveRemoteRequest(parsed.hostname);
+    const reservation = networkEvidenceRecorder.reserveRemoteRequest(parsed.hostname, {
+      requestType: "websocket", isMainNavigation: false, urlText: webSocketRoute.url(),
+    });
     try {
       if (!reservation.allowed || !decision.allowed) {
         const reason = reservation.allowed ? decision.reason : reservation.reason;
@@ -6246,6 +6439,21 @@ async function createPageContext(
       };
     },
   };
+}
+
+async function retainUnobservedSessionNetworkPolicy(session, result, stage) {
+  if (result[stage]?.networkPolicy) return result[stage].networkPolicy;
+  result[stage] ??= {};
+  try {
+    const evidence = await session.sealNetworkPolicyEvidence();
+    result[stage].networkPolicy = evidence;
+    return evidence;
+  } catch (error) {
+    const evidence = algumonNavigationErrorEvidence(error);
+    result[stage].networkPolicyCaptureFailure = evidence;
+    result.failures.push(`${stage} network evidence capture failed: ${evidence.category} (${evidence.errorSha256})`);
+    return null;
+  }
 }
 
 async function auditOneTarget({
@@ -6495,14 +6703,22 @@ async function auditOneTarget({
           staticSession.page,
           Object.values(result.semanticOracle.roles ?? {}).filter(Boolean),
         );
-        const candidateProjection = await candidateOracleProjectionEvidence(
-          staticSession.page,
-          auditedLayout,
-          result.semanticOracle,
-          userscriptContent,
-          targetAlgumonSeed(site.id, auditedTarget),
-          navigation.finalUrl,
-        );
+        const candidateProjection = result.semanticOracle.verificationMode === "registered-sample"
+          ? {
+            semanticProjectionCount: 0,
+            exactCandidateCount: 0,
+            coMatchCount: 0,
+            aliases: [],
+            skipped: "registered sample is not independent candidate evidence",
+          }
+          : await candidateOracleProjectionEvidence(
+            staticSession.page,
+            auditedLayout,
+            result.semanticOracle,
+            userscriptContent,
+            targetAlgumonSeed(site.id, auditedTarget),
+            navigation.finalUrl,
+          );
         const cardinality = projectionCardinalityEvidence(
           result.semanticOracle.structuralOk,
           approvedProjection.semanticProjectionCount,
@@ -6535,9 +6751,8 @@ async function auditOneTarget({
           path.join(runDirectory, `${stem}-static-projected.png`),
         );
         result.static.projection = projection;
-        result.failures.push(
-          ...staticProjectionFailures(projection).map((item) => `static: ${item}`),
-        );
+        result.static.projectionPurpose = "legacy-filter-diagnostic-only";
+        result.static.projectionFailures = staticProjectionFailures(projection);
         if (result.failures.length > 0) candidates = preProjectionCandidates;
         staticConsistency = {
           siteId: site.id,
@@ -6602,12 +6817,15 @@ async function auditOneTarget({
       return { result, candidates: [] };
     }
     } catch (error) {
-      result.failures.push(`article access acquisition error: ${error?.stack ?? String(error)}`);
+      const evidence = algumonNavigationErrorEvidence(error);
+      result.articleAccessFailure = evidence;
+      result.failures.push(`article navigation/access error: ${evidence.category} (${evidence.errorSha256})`);
       await captureBoundedScreenshot(
         staticSession.page,
         path.join(runDirectory, `${stem}-access-error.png`),
       ).catch(() => {});
     } finally {
+      await retainUnobservedSessionNetworkPolicy(staticSession, result, "static");
       await staticSession.context.close();
     }
 
@@ -6849,7 +7067,10 @@ async function auditOneTarget({
     }
   } catch (error) {
     if (error?.sourceClassified !== true) {
-      result.failures.push(`userscript audit error: ${error?.stack ?? String(error)}`);
+      const evidence = algumonNavigationErrorEvidence(error);
+      result.userscript ??= { expectation: runtimeExpectation };
+      result.userscript.auditFailure = evidence;
+      result.failures.push(`userscript audit error: ${evidence.category} (${evidence.errorSha256})`);
     }
     if (
       runtimeExpectation === "relay-positive" &&
@@ -6870,10 +7091,8 @@ async function auditOneTarget({
     )
       .catch(() => {});
   } finally {
-    if (result.userscript && !result.userscript.networkPolicy) {
-      const runtimeNetworkPolicy = await userscriptSession
-        .sealNetworkPolicyEvidence()
-        .catch(() => null);
+    if (!result.userscript?.networkPolicy) {
+      const runtimeNetworkPolicy = await retainUnobservedSessionNetworkPolicy(userscriptSession, result, "userscript");
       if (runtimeNetworkPolicy) {
         result.userscript.networkPolicy = runtimeNetworkPolicy;
         const runtimeNetworkFailures = networkFidelityFailures(
@@ -9341,11 +9560,23 @@ async function snapshotAlgumonInventoryPage(page, response) {
   return { response, ...dom };
 }
 
+async function captureAlgumonSourceFailure(page, runDirectory) {
+  if (!runDirectory) return null;
+  const filename = "algumon-global-source-failure.png";
+  try {
+    const screenshot = await captureBoundedScreenshot(page, path.join(runDirectory, filename));
+    return { filename, ...screenshot };
+  } catch (error) {
+    return { filename: null, error: algumonNavigationErrorEvidence(error) };
+  }
+}
+
 async function collectAlgumonGlobalInventory(
   browser,
   timeoutMs,
   requestBudget,
   transitionBudget,
+  runDirectory = null,
 ) {
   const { context, page } = await createPageContext(
     browser,
@@ -9376,12 +9607,15 @@ async function collectAlgumonGlobalInventory(
     return {
       discoveryUrl: ALGUMON_GLOBAL_DISCOVERY_URL,
       ...result,
+      ...(result.status !== "ok" ? { sourceScreenshot: await captureAlgumonSourceFailure(page, runDirectory) } : {}),
     };
   } catch (error) {
     return {
       discoveryUrl: ALGUMON_GLOBAL_DISCOVERY_URL,
       status: "source-or-infrastructure-failure",
-      failures: [error?.message ?? String(error)],
+      failures: ["global source navigation or inventory inspection failed"],
+      navigationError: algumonNavigationErrorEvidence(error),
+      sourceScreenshot: await captureAlgumonSourceFailure(page, runDirectory),
       links: [],
       observedSiteTypes: [],
     };
@@ -9740,6 +9974,7 @@ async function discoverLatestTargets(
   timeoutMs,
   promotionCandidate = null,
   requestBudget,
+  runDirectory = null,
 ) {
   if (!requestBudget || typeof requestBudget.snapshot !== "function") {
     throw new Error("live Algumon discovery requires one request-start budget");
@@ -9783,6 +10018,7 @@ async function discoverLatestTargets(
     timeoutMs,
     requestBudget,
     transitionBudget,
+    runDirectory,
   );
   if (inventory.status !== "ok") {
     for (const site of sites) {
@@ -11613,6 +11849,7 @@ async function main() {
         options.timeoutMs,
         promotionDraft?.candidate ?? null,
         algumonRequestBudget,
+        runDirectory,
       );
       report.discovery.inventory = discovery.inventory;
       report.discovery.records = discovery.records;
@@ -11856,6 +12093,7 @@ export {
   capturedAlgumonTargetsFromReport,
   classifyAlgumonInventorySnapshot,
   classifyAlgumonSourceResponse,
+  captureAlgumonSourceFailure,
   classifyDestinationResponse,
   classifyProfileLandingRoute,
   collectRetainedRoleResourceEvidence,
@@ -11888,10 +12126,13 @@ export {
   incrementStablePatchVersion,
   parseConnectAuthority,
   primeDeclaredArticleNavigation,
+  retainUnobservedSessionNetworkPolicy,
   projectionCardinalityEvidence,
   promotionVariantId,
   recordedSignedRelayAcquisitionEvidence,
   runtimeExpectationForTarget,
+  semanticOracle,
+  semanticOracleEvidence,
   semanticOracleContractFailures,
   selectFinalMainDocumentResponse,
   selectStableDiscoveryGroup,

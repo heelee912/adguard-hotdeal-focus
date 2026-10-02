@@ -7,6 +7,7 @@ import {
   DEFAULT_ALGUMON_REQUEST_START_BUDGET,
   capturedAlgumonTargetsFromReport,
   classifyAlgumonSourceResponse,
+  captureAlgumonSourceFailure,
   countExistingApprovedLayoutMatches,
   createAlgumonRequestStartBudget,
   createLowTrafficAlgumonProbePlan,
@@ -341,6 +342,29 @@ async function testNavigationErrorsPersistOnlyCategoryAndDigest() {
   assert.equal(classifyAlgumonSourceResponse({ status: null }).navigationError, null);
 }
 
+async function testSourceFailureScreenshotAddsNoNavigation() {
+  const calls = [];
+  const page = {
+    goto: () => { throw new Error("a failure screenshot must not navigate again"); },
+    screenshot: async (options) => { calls.push(options); return Buffer.from("fixture-png"); },
+  };
+  assert.equal(await captureAlgumonSourceFailure(page, null), null);
+  assert.equal(calls.length, 0);
+  const captured = await captureAlgumonSourceFailure(page, "fixture-output");
+  assert.equal(captured.filename, "algumon-global-source-failure.png");
+  assert.equal(captured.viewportBounded, true);
+  assert.equal(captured.byteLength, 11);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].fullPage, false);
+  assert.equal(calls[0].timeout, 10_000);
+  const failed = await captureAlgumonSourceFailure({
+    screenshot: async () => { throw new Error("Timeout at https://example.com/private-token"); },
+  }, "fixture-output");
+  assert.equal(failed.filename, null);
+  assert.equal(failed.error.category, "timeout");
+  assert.equal(JSON.stringify(failed).includes("private-token"), false);
+}
+
 testLowTrafficProbePlan();
 testHardRequestStartBudget();
 testCapturedSnapshotProducesNoSourceRequests();
@@ -350,4 +374,5 @@ await testRegisteredArticleProjectionDoesNotRequireLegacySeed();
 testSourceUrlMismatchRetainsDiagnosticIdentityWithoutQueryValues();
 testSourceFailureRedactsRedirectPathsAndUnknownQueryKeys();
 await testNavigationErrorsPersistOnlyCategoryAndDigest();
+await testSourceFailureScreenshotAddsNoNavigation();
 process.stdout.write("Algumon traffic budget tests passed\n");

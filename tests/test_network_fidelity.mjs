@@ -18,6 +18,7 @@ import {
   observeStylesheetDependencies,
   parseConnectAuthority,
   primeDeclaredArticleNavigation,
+  retainUnobservedSessionNetworkPolicy,
   validatePublicDnsAnswers,
 } from "../scripts/audit_pages.mjs";
 
@@ -834,6 +835,122 @@ async function testSealDrainTimeoutFailsClosed() {
   finishReservation(stuck);
 }
 
+async function testOptionalLifecycleActivityStaysObservedWithoutFailingArticle() {
+  const requiredImage = "https://article.example/product.webp";
+  const roleEvidence = { hosts: ["article.example"], urlSha256s: [networkResourceUrlSha256(requiredImage)] };
+  const recorder = createNetworkPolicyEvidenceRecorder();
+  const pending = Array.from({ length: 3 }, (_, index) => recorder.reserveRemoteRequest("article.example", {
+    requestType: "fetch", isMainNavigation: false,
+    urlText: `https://article.example/analytics-${index}?private=pending-token`,
+  }));
+  const sealed = await recorder.sealAndDrain({ quietWindowMs: 1, timeoutMs: 0 });
+  assert.equal(sealed.activeRemoteRequestCount, 3);
+  assert.equal(sealed.activeRemoteRequests.length, 3);
+  assert.equal(sealed.undrainedRequests.length, 3);
+  assert.equal(sealed.undrainedRequestCount, 3);
+  assert.equal(sealed.drainTimeoutCount, 1);
+  assert.deepEqual(networkFidelityFailures(sealed, ["article.example"], roleEvidence), [],
+    "three unrelated active analytics requests do not invalidate a complete article");
+  const late = recorder.reserveRemoteRequest("article.example", { requestType: "fetch", isMainNavigation: false,
+    urlText: "https://article.example/analytics-late?private=late-token" });
+  assert.equal(late.allowed, false, "the sealed network boundary still denies the late request");
+  recorder.recordBlocked("article.example", "fetch", late.reason, false);
+  const observed = recorder.snapshot();
+  assert.equal(observed.lateRequestCount, 1);
+  assert.equal(observed.lateRequests.length, 1);
+  assert.deepEqual(networkFidelityFailures(observed, ["article.example"], roleEvidence), [],
+    "same-host late analytics use exact resource identity, not the old host-only failure path");
+  for (const token of ["analytics-", "pending-token", "late-token"]) {
+    assert.equal(JSON.stringify(observed).includes(token), false);
+  }
+  pending.forEach(finishReservation);
+  assert.equal(recorder.snapshot().activeRemoteRequests.length, 0);
+  assert.equal(recorder.snapshot().undrainedRequests.length, 3, "deadline evidence survives eventual completion");
+
+  const dependencies = createStylesheetDependencyRecorder();
+  dependencies.recordRequest({ frameId: "main", type: "Font", request: { url: "https://cdn.example/article.woff2" },
+    initiator: { type: "parser", url: "https://article.example/article.css" } }, "main");
+  const cssRoleEvidence = { urlSha256s: [networkResourceUrlSha256("https://article.example/article.css")] };
+  for (const [resource, required] of [
+    [{ requestType: "image", urlText: requiredImage }, true],
+    [{ requestType: "font", urlText: "https://cdn.example/article.woff2" }, true],
+    [{ requestType: "document", urlText: "https://article.example/deal/7", isMainNavigation: true }, true],
+    [{ requestType: "image", urlText: "https://cdn.example/final.webp", redirectEvidence: {
+      ancestorUrlSha256s: [networkResourceUrlSha256(requiredImage)], status: "complete",
+    } }, true],
+    [{ requestType: "image", urlText: "https://cdn.example/ad.webp" }, false],
+  ]) {
+    const scoped = createNetworkPolicyEvidenceRecorder();
+    const reservation = scoped.reserveRemoteRequest(new URL(resource.urlText).hostname, resource);
+    const atSeal = await scoped.sealAndDrain({ quietWindowMs: 1, timeoutMs: 0 });
+    const roles = { urlSha256s: [...roleEvidence.urlSha256s, ...cssRoleEvidence.urlSha256s] };
+    const failures = networkFidelityFailures({ ...atSeal, stylesheetDependencies: dependencies.snapshot() }, [], roles);
+    assert.equal(failures.includes("network evidence sealed with active remote requests"), required);
+    assert.equal(failures.includes("remote requests did not drain inside the fail-closed deadline"), required);
+    finishReservation(reservation);
+    scoped.reserveRemoteRequest(new URL(resource.urlText).hostname, resource);
+    assert.equal(networkFidelityFailures({ ...scoped.snapshot(), stylesheetDependencies: dependencies.snapshot() }, [], roles)
+      .includes("remote requests appeared after the network evidence seal"), required);
+  }
+  const bounded = createNetworkPolicyEvidenceRecorder({ maximumRemoteRequests: 1 });
+  await bounded.sealAndDrain({ quietWindowMs: 0, timeoutMs: 0 });
+  bounded.reserveRemoteRequest("ads.example", { urlText: "https://ads.example/one" });
+  bounded.reserveRemoteRequest("ads.example", { urlText: "https://ads.example/two" });
+  assert.equal(bounded.snapshot().lateRequests.length, 1);
+  assert.equal(bounded.snapshot().lifecycleEvidenceOverflowCount, 1);
+  assert.ok(networkFidelityFailures(bounded.snapshot(), [], roleEvidence)
+    .includes("request lifecycle evidence exceeded its bounded request count"));
+}
+
+async function testFailedNavigationRetainsNetworkEvidenceWithoutRetry() {
+  const networkPolicy = { sealed: true, activeRemoteRequestCount: 0, pinnedTransport: {
+    rejectedHosts: [{ hostname: "article.example", reasons: ["connect-failed"], count: 1 }],
+  } };
+  let seals = 0;
+  const session = { sealNetworkPolicyEvidence: async () => { seals += 1; return networkPolicy; } };
+  const result = { static: null, failures: ["article navigation/access error"] };
+  assert.equal(await retainUnobservedSessionNetworkPolicy(session, result, "static"), networkPolicy);
+  assert.equal(result.static.networkPolicy, networkPolicy);
+  await retainUnobservedSessionNetworkPolicy(session, result, "static");
+  assert.equal(seals, 1, "network evidence is captured once without performing any navigation/retry");
+  const failedCapture = { userscript: null, failures: [] };
+  await retainUnobservedSessionNetworkPolicy({ sealNetworkPolicyEvidence: async () => {
+    throw new Error("net::ERR_FAILED at https://article.example/private-path?token=secret-query");
+  } }, failedCapture, "userscript");
+  assert.equal(failedCapture.userscript.networkPolicyCaptureFailure.category, "network");
+  assert.equal(failedCapture.failures.length, 1, "capture failures are explicit, not silently discarded");
+  assert.equal(JSON.stringify(failedCapture).includes("private-path"), false);
+  assert.equal(JSON.stringify(failedCapture).includes("secret-query"), false);
+}
+
+async function testLifecycleIdentityCardinalityFailsClosed() {
+  const optional = { hostname: "ads.example", requestType: "fetch", isMainNavigation: false,
+    urlSha256: networkResourceUrlSha256("https://ads.example/analytics") };
+  for (const [counter, entries, failure] of [
+    ["activeRemoteRequestCount", "activeRemoteRequests", "network evidence sealed with active remote requests"],
+    ["lateRequestCount", "lateRequests", "remote requests appeared after the network evidence seal"],
+  ]) {
+    for (const captured of [[], [optional], [optional, optional, optional], undefined]) {
+      assert.ok(networkFidelityFailures({ [counter]: 2, [entries]: captured }).includes(failure),
+        "missing, short, or contradictory identity lists cannot prove lifecycle activity optional");
+    }
+    assert.deepEqual(networkFidelityFailures({ [counter]: 1, [entries]: [optional] }), [],
+      "complete optional identities continue to pass");
+  }
+  for (const [count, entries] of [[1, []], [2, [optional]], [undefined, []], [undefined, [optional]], [0, [optional]]]) {
+    assert.ok(networkFidelityFailures({ drainTimeoutCount: 1, undrainedRequestCount: count, undrainedRequests: entries })
+      .includes("remote requests did not drain inside the fail-closed deadline"),
+    "the deadline must preserve both unfinished count and matching identities");
+  }
+  const quietOnly = createNetworkPolicyEvidenceRecorder();
+  const evidence = await quietOnly.sealAndDrain({ quietWindowMs: 1_000, timeoutMs: 0 });
+  assert.equal(evidence.drainTimeoutCount, 1);
+  assert.equal(evidence.undrainedRequestCount, 0);
+  assert.deepEqual(evidence.undrainedRequests, []);
+  assert.deepEqual(networkFidelityFailures(evidence), [],
+    "a quiet-window-only timeout has affirmative zero-unfinished evidence, not missing identities");
+}
+
 function testSpecialIpRanges() {
   const rejectedAddresses = [
     "not-an-ip",
@@ -1020,6 +1137,9 @@ async function main() {
   await testArticleNavigationPrimingIsScopedAndPublic();
   await testSealDrainAndLateRequest();
   await testSealDrainTimeoutFailsClosed();
+  await testOptionalLifecycleActivityStaysObservedWithoutFailingArticle();
+  await testFailedNavigationRetainsNetworkEvidenceWithoutRetry();
+  await testLifecycleIdentityCardinalityFailsClosed();
   testSpecialIpRanges();
   testConnectAuthorityParser();
   testHeadStylesheetTraversalBounds();
