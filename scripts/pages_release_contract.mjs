@@ -87,6 +87,24 @@ const LEGACY_V1_MIGRATION_PREDECESSORS = Object.freeze([
     }),
   }),
 ]);
+const LEGACY_V2_MIGRATION_PREDECESSORS = Object.freeze([
+  Object.freeze({
+    // Exact schema-v2 bytes served by Pages on 2026-10-03. This release still
+    // matched Algumon; only migration FROM these bytes may bypass today's scopes.
+    manifest: Object.freeze({
+      bytes: 6273,
+      sha256: "e7b5f9985f07ed358f4878ba51d989ad119572f93104f582d3d45814c12e3e8d",
+    }),
+    releaseVersion: "0.6.4",
+    schemaVersion: 2,
+    userscript: Object.freeze({
+      bytes: 324903,
+      sha256: "ef380842e91161a0dc051b9f15d7e64763a74a293ba518f7d5ba2b0db2c55fd9",
+      canonicalTextSha256:
+        "862003b0c18e72b8abb83ecee5ca322ed7c90c59306a8ba67972807e972d9852",
+    }),
+  }),
+]);
 
 function fail(message) {
   throw new Error(message);
@@ -561,7 +579,7 @@ function matchExactLegacyMigrationPredecessor(candidate, manifestBytes, userscri
   const manifest = decodeJson(manifestBytes, "published legacy manifest");
   const entry = manifest?.artifacts?.[USERSCRIPT_NAME];
   if (
-    manifest?.schemaVersion === 1 &&
+    manifest?.schemaVersion === (candidate.schemaVersion ?? 1) &&
     manifest?.status === "release-ready" &&
     manifest?.releaseVersion === candidate.releaseVersion &&
     entry &&
@@ -575,15 +593,15 @@ function matchExactLegacyMigrationPredecessor(candidate, manifestBytes, userscri
   return null;
 }
 
-function verifyLegacyV1Migration(manifestBytes, userscriptBytes) {
-  const match = LEGACY_V1_MIGRATION_PREDECESSORS
+function verifyLegacyMigrationPredecessor(manifestBytes, userscriptBytes) {
+  const match = [...LEGACY_V1_MIGRATION_PREDECESSORS, ...LEGACY_V2_MIGRATION_PREDECESSORS]
     .map((candidate) => ({
       candidate,
       legacy: matchExactLegacyMigrationPredecessor(candidate, manifestBytes, userscriptBytes),
     }))
     .find(({ legacy }) => legacy !== null);
   if (!match) {
-    fail("published schema-v1 release is not an exact migration predecessor");
+    fail("published release is not an exact migration predecessor");
   }
   return {
     manifest: match.legacy.manifest,
@@ -736,8 +754,14 @@ async function preflight(root, baseUrl, highWaterSource, previousHighWaterSource
   let current;
   try {
     current = verifyV2Bundle(live.manifestBytes, live.userscriptBytes);
-  } catch {
-    current = verifyLegacyV1Migration(live.manifestBytes, live.userscriptBytes);
+  } catch (validationError) {
+    try {
+      current = verifyLegacyMigrationPredecessor(live.manifestBytes, live.userscriptBytes);
+    } catch (migrationError) {
+      fail(
+        `published release failed current validation: ${validationError.message}; ${migrationError.message}`,
+      );
+    }
   }
   const comparison = compareVersions(
     proposed.proof.manifest.releaseVersion,
@@ -860,6 +884,7 @@ export {
   fetchBytes,
   highWaterDocument,
   LEGACY_V1_MIGRATION_PREDECESSORS,
+  LEGACY_V2_MIGRATION_PREDECESSORS,
   matchExactLegacyMigrationPredecessor,
   parseHighWater,
   preflight,
