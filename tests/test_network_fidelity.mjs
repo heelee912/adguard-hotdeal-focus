@@ -650,6 +650,75 @@ function testInlineStylesheetDependenciesUseActualDocumentUrl() {
     .includes("inline stylesheet font evidence was unreadable or exceeded its bounded rule count"));
 }
 
+function testRetainedComputedUrlPropertiesExcludeUnrelatedImages() {
+  const properties = ["maskImage", "webkitMaskImage", "borderImageSource", "maskBorderSource",
+    "webkitMaskBoxImageSource", "cursor", "shapeOutside", "filter", "backdropFilter",
+    "webkitBackdropFilter", "clipPath", "offsetPath", "fill", "stroke", "markerStart",
+    "markerMid", "markerEnd", "webkitBoxReflect"];
+  class FixtureElement {
+    localName = "div";
+    children = [];
+    style = {};
+    getAttribute() { return null; }
+  }
+  const element = new FixtureElement();
+  const computedStyle = Object.fromEntries(properties.map((name) => [name,
+    `url("https://cdn.example/retained-${name}.svg?private=resource-token#shape")`]));
+  computedStyle["--unused-image"] = 'url("https://cdn.example/unused-ad.webp")';
+  const { urls, ...roleEvidence } = vm.runInNewContext(
+    `(${collectRetainedRoleResourceEvidence.toString()})(["#article"])`, {
+      Element: FixtureElement,
+      document: { URL: "https://article.example/deal/7", baseURI: "https://article.example/deal/7",
+        head: null, querySelector: () => element },
+      window: { getComputedStyle: () => computedStyle },
+      performance: { now: () => 0 }, URL,
+    });
+  roleEvidence.urlSha256s = urls.map(networkResourceUrlSha256);
+  assert.equal(urls.length, properties.length + 1, "resolved aliases and pseudo-elements are URL-deduplicated");
+  for (const property of properties) {
+    const recorder = createNetworkPolicyEvidenceRecorder();
+    recorder.recordAllowedRequestFailure("cdn.example", "image", "net::ERR_FAILED", false,
+      `https://cdn.example/retained-${property}.svg?private=resource-token`);
+    assert.deepEqual(networkFidelityFailures(recorder.snapshot(), [], roleEvidence),
+      ["an allowed remote request failed before a complete response"], property);
+  }
+  for (const url of ["https://cdn.example/unused-ad.webp", "https://cdn.example/sidebar-ad.webp"]) {
+    const recorder = createNetworkPolicyEvidenceRecorder();
+    recorder.recordAllowedRequestFailure("cdn.example", "image", "net::ERR_FAILED", false, url);
+    assert.deepEqual(networkFidelityFailures(recorder.snapshot(), [], roleEvidence), [],
+      "unused custom properties and non-retained same-host ad images remain optional");
+  }
+  assert.equal(JSON.stringify(roleEvidence).includes("resource-token"), false);
+}
+
+function testRetainedUrlBudgetCountsUniqueNormalizedResources() {
+  class FixtureElement {
+    localName = "div";
+    children = [];
+    style = {};
+    getAttribute() { return null; }
+  }
+  const element = new FixtureElement();
+  const collect = (values) => vm.runInNewContext(
+    `(${collectRetainedRoleResourceEvidence.toString()})(["#article"])`, {
+      Element: FixtureElement,
+      document: { baseURI: "https://article.example/deal/7", head: null, querySelector: () => element },
+      window: { getComputedStyle: (_element, pseudo) => pseudo ? {} : {
+        cursor: values.map((value) => `url("${value}")`).join(","),
+      } }, performance: { now: () => 0 }, URL,
+    });
+  const repeated = collect(Array.from({ length: 4096 }, (_, index) => index % 2 === 0
+    ? "/shared-cursor.svg#pointer" : "https://article.example/shared-cursor.svg#alternate"));
+  assert.equal(repeated.urlCount, 1, "relative/absolute and fragment variants share one resource budget entry");
+  assert.equal(repeated.urlOverflowCount, 0, "4096 references to one inherited cursor must not fail");
+  assert.deepEqual([...repeated.urls], ["https://article.example/shared-cursor.svg"]);
+  const unique = collect(Array.from({ length: 4097 }, (_, index) => `https://cdn.example/cursor-${index}.svg`));
+  assert.equal(unique.urlCount, 4096);
+  assert.equal(unique.urlOverflowCount, 1, "4097 genuinely different resources still exceed the limit");
+  assert.ok(networkFidelityFailures({}, [], unique)
+    .includes("semantic role resource traversal exceeded its URL budget"));
+}
+
 function testPublicDnsAnswerCardinalityAndPrivacy() {
   const publicRecords = Array.from({ length: 128 }, (_, index) => ({ address: `8.8.8.${index + 1}` }));
   const full = validatePublicDnsAnswers(publicRecords);
@@ -944,6 +1013,8 @@ async function main() {
   testRedirectAncestryBoundsAndIncompleteEvidence();
   await testStylesheetDependenciesPreserveImportedCssAndFonts();
   testInlineStylesheetDependenciesUseActualDocumentUrl();
+  testRetainedComputedUrlPropertiesExcludeUnrelatedImages();
+  testRetainedUrlBudgetCountsUniqueNormalizedResources();
   testPublicDnsAnswerCardinalityAndPrivacy();
   testArticleLeaseBudgetsOnlyScopedCookies();
   await testArticleNavigationPrimingIsScopedAndPublic();

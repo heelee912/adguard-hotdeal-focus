@@ -3184,14 +3184,23 @@ function collectRetainedRoleResourceEvidence(roleSelectors) {
       }
     }
     const rawUrls = [];
+    const appendedUrls = new Set();
     let urlOverflowCount = 0;
     const append = (value) => {
       if (typeof value !== "string" || !value.trim()) return;
+      let canonicalUrl;
+      try {
+        const url = new URL(value.trim(), document.baseURI);
+        url.hash = "";
+        canonicalUrl = url.href;
+      } catch { return; }
+      if (appendedUrls.has(canonicalUrl)) return;
       if (rawUrls.length >= maximumUrls) {
         urlOverflowCount += 1;
         return;
       }
-      rawUrls.push(value.trim());
+      appendedUrls.add(canonicalUrl);
+      rawUrls.push(canonicalUrl);
     };
     // Inline <style> imports and font faces use the document as their CDP
     // initiator. The actual document URL, not a <base>-controlled baseURI,
@@ -3287,6 +3296,16 @@ function collectRetainedRoleResourceEvidence(roleSelectors) {
         stylesheetRuleErrorCount += 1;
       }
     };
+    // Only resolved URL-bearing properties of retained nodes/pseudo-elements
+    // count. Enumerating declarations would also promote unused custom-property
+    // URLs, while treating every document-initiated image as required would
+    // incorrectly include unrelated ads.
+    const retainedComputedUrlProperties = [
+      "backgroundImage", "listStyleImage", "content", "maskImage", "webkitMaskImage",
+      "borderImageSource", "maskBorderSource", "webkitMaskBoxImageSource", "cursor",
+      "shapeOutside", "filter", "backdropFilter", "webkitBackdropFilter", "clipPath",
+      "offsetPath", "fill", "stroke", "markerStart", "markerMid", "markerEnd", "webkitBoxReflect",
+    ];
     for (const element of nodes) {
       const tagName = element.localName;
       if (tagName === "style") appendInlineFontSources(element);
@@ -3317,9 +3336,7 @@ function collectRetainedRoleResourceEvidence(roleSelectors) {
       for (const pseudo of [null, "::before", "::after"]) {
         try {
           const style = window.getComputedStyle(element, pseudo);
-          appendCssUrls(style.backgroundImage);
-          appendCssUrls(style.listStyleImage);
-          appendCssUrls(style.content);
+          for (const property of retainedComputedUrlProperties) appendCssUrls(style[property]);
         } catch {}
       }
       if (performance.now() - startedAt > maximumElapsedMs) {
