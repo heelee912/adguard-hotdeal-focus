@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.80
+// @version      0.6.81
 // @description  Fail-closed semantic reader gate for Algumon hot-deal destinations.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
@@ -9369,12 +9369,55 @@
       ) return false;
       runtime.recoveringProjection = true;
       try {
+        if (reason === "role-projection-core-removal") {
+          if (!state.commonRoot.isConnected || state.requiredRoles.some(
+            role => !state.roles[role]?.isConnected,
+          )) return false;
+          // Replacing an earlier wrapper disconnects only its empty shell.
+          // Never forget a disconnected article, comment, or control here.
+          for (const element of Array.from(state.ownedElementSet)) {
+            if (element.isConnected) continue;
+            const expected = state.expectedMarkerShapes.get(element);
+            if (!state.shellElements.has(element) || !expected ||
+              expected.role !== null || expected.deep !== null) return false;
+            state.ownedElementSet.delete(element);
+            state.ownedElements.delete(element);
+            state.expectedMarkerShapes.delete(element);
+            state.shellElements.delete(element);
+          }
+        }
         if (
           !verifyOwnedMarkerState(document, state) ||
           !runtimeGateStyleIntact(styleElement, runtime) ||
-          !verifyOwnedState(document, state) ||
-          currentVisibleProjectionLeakCount(document, state) !== 0
+          !verifyOwnedState(document, state)
         ) return false;
+        // A publisher can move the same accepted nodes into fresh wrappers.
+        // The nodes retain their identity, but an unowned ancestor still has
+        // display:none under the reader gate. Adopt only the missing ancestor
+        // shells, never their text, siblings, or other descendants.
+        if (reason === "role-projection-core-removal") {
+          const missingShells = new Set();
+          for (const element of state.ownedElementSet) {
+            for (let ancestor = element.parentElement;
+              ancestor && !state.ownedElements.has(ancestor);
+              ancestor = ancestor.parentElement) {
+              if (missingShells.has(ancestor)) break;
+              missingShells.add(ancestor);
+              if (missingShells.size > MAX_SEMANTIC_DESCENDANTS) return false;
+            }
+          }
+          for (const shell of missingShells) {
+            markOwned(shell, state.ownedElements, state.nonce);
+            shell.setAttribute(ATTR.shell, state.nonce);
+            shell.classList.add(CLASS.shell);
+            state.shellElements.add(shell);
+          }
+          for (const shell of missingShells) rememberAuthorizedMarkerTree(shell, state);
+          if (missingShells.size > 0 && (
+            !verifyOwnedMarkerState(document, state) || !verifyOwnedState(document, state)
+          )) return false;
+        }
+        if (currentVisibleProjectionLeakCount(document, state) !== 0) return false;
         // The accepted nodes, content boundary and article identity remain
         // exact. Replace a disconnected/erroring observer, not the publisher
         // DOM, and retain the already-proven two-frame cascade authority.

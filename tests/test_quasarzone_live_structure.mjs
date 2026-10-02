@@ -158,6 +158,50 @@ try {
       assert.equal(afterUiRepair.bodyVisible && afterUiRepair.commentsVisible, true, JSON.stringify(afterUiRepair));
       assert.equal(afterUiRepair.noiseVisible, false);
       assert.equal(afterUiRepair.wide, false, JSON.stringify(afterUiRepair));
+      if (handler === 'native') {
+        for (let wrapperRound = 0; wrapperRound < 3; wrapperRound += 1) {
+          await runtimePage.evaluate(wrapperRound => {
+            for (const role of ['body', 'comments']) {
+              const original = document.querySelector(`[data-hotdeal-focus-role="${role}"]`);
+              const previousWrapper = original.parentElement;
+              const wrapper = document.createElement('section');
+              wrapper.className = `publisher-new-${role}-wrapper-${wrapperRound}`;
+              original.before(wrapper);
+              wrapper.appendChild(original);
+              wrapper.appendChild(document.createElement('aside')).textContent = '인기글 추천글 광고';
+              wrapper.appendChild(document.createTextNode('직접 삽입한 인기글 광고'));
+              if (wrapperRound > 0) previousWrapper.replaceWith(wrapper);
+            }
+            return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+          }, wrapperRound);
+          const rewrapped = await runtimePage.evaluate(() => {
+            const visible = element => getComputedStyle(element).visibility === 'visible' &&
+              getComputedStyle(element).display !== 'none' && !!element.getClientRects().length;
+            return {
+              status: document.documentElement.getAttribute('data-hotdeal-focus-status'),
+              reason: globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.targetReason,
+              locked: document.documentElement.hasAttribute('data-hotdeal-focus-lock'),
+              bodyIdentity: document.querySelector('#new_contents') === globalThis.__originalReaderBody,
+              commentsIdentity: document.querySelector('#ajax-reply-list') === globalThis.__originalReaderComments,
+              bodyVisible: visible(globalThis.__originalReaderBody),
+              commentsVisible: [...document.querySelectorAll('li[id^="comment"]')].every(visible),
+              imageVisible: visible(document.querySelector('#new_contents img.brand-logo')),
+              purchaseVisible: visible(document.querySelector('.market-info-view-table a')),
+              noiseVisible: [...document.querySelectorAll('aside')].some(visible),
+              wrapperTextVisible: [...document.querySelectorAll('[class^="publisher-new-"]')].some(visible),
+            };
+          });
+          assert.equal(rewrapped.status, 'ready', JSON.stringify(rewrapped));
+          assert.equal(rewrapped.locked, false, JSON.stringify(rewrapped));
+          assert.doesNotMatch(rewrapped.reason, /^frozen-/, JSON.stringify(rewrapped));
+          assert.equal(rewrapped.bodyIdentity && rewrapped.commentsIdentity, true, JSON.stringify(rewrapped));
+          assert.equal(rewrapped.bodyVisible && rewrapped.commentsVisible, true, JSON.stringify(rewrapped));
+          assert.equal(rewrapped.imageVisible && rewrapped.purchaseVisible, true, JSON.stringify(rewrapped));
+          assert.equal(rewrapped.noiseVisible || rewrapped.wrapperTextVisible, false, JSON.stringify(rewrapped));
+        }
+        await ui.getByText('댓글', {exact:true}).click();
+        await ui.getByText('본문', {exact:true}).click();
+      }
       await runtimePage.evaluate(() => {
         const reply = document.createElement('li');
         reply.id = 'comment1990147';
