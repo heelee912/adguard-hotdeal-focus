@@ -10,6 +10,7 @@ import {
   fetchBytes,
   highWaterDocument,
   LEGACY_V1_MIGRATION_PREDECESSORS,
+  LEGACY_V2_MIGRATION_PREDECESSORS,
   matchExactLegacyMigrationPredecessor,
   preflight,
   readBundle,
@@ -150,6 +151,69 @@ assert.deepEqual(LEGACY_V1_MIGRATION_PREDECESSORS, [
     },
   },
 ]);
+assert.deepEqual(LEGACY_V2_MIGRATION_PREDECESSORS, [{
+  manifest: {
+    bytes: 6273,
+    sha256: "e7b5f9985f07ed358f4878ba51d989ad119572f93104f582d3d45814c12e3e8d",
+  },
+  releaseVersion: "0.6.4",
+  schemaVersion: 2,
+  userscript: {
+    bytes: 324903,
+    sha256: "ef380842e91161a0dc051b9f15d7e64763a74a293ba518f7d5ba2b0db2c55fd9",
+    canonicalTextSha256:
+      "862003b0c18e72b8abb83ecee5ca322ed7c90c59306a8ba67972807e972d9852",
+  },
+}]);
+
+// An old schema-v2 bundle can have obsolete installation scopes. It may only
+// be recognized as the published predecessor, never validated as a new release.
+const syntheticV2PredecessorSource = Buffer.from(userscript("0.6.4").toString("utf8").replace(
+  "// @match        https://*.clien.net/*",
+  "// @match        https://www.algumon.com/*\n// @match        https://*.clien.net/*",
+), "utf8");
+const syntheticV2PredecessorManifest = encode(manifestFor(syntheticV2PredecessorSource, "0.6.4"));
+const syntheticV2Predecessor = {
+  manifest: {
+    bytes: syntheticV2PredecessorManifest.length,
+    sha256: digest(syntheticV2PredecessorManifest),
+  },
+  releaseVersion: "0.6.4",
+  schemaVersion: 2,
+  userscript: {
+    bytes: syntheticV2PredecessorSource.length,
+    sha256: digest(syntheticV2PredecessorSource),
+    canonicalTextSha256: digest(Buffer.from(syntheticV2PredecessorSource.toString("utf8").trimEnd(), "utf8")),
+  },
+};
+assert.throws(
+  () => verifyV2Bundle(syntheticV2PredecessorManifest, syntheticV2PredecessorSource),
+  /userscript matches are not the exact seven target-domain scopes/,
+);
+assert.equal(matchExactLegacyMigrationPredecessor(
+  syntheticV2Predecessor, syntheticV2PredecessorManifest, syntheticV2PredecessorSource,
+)?.manifest.releaseVersion, "0.6.4");
+for (const mutate of [
+  candidate => { candidate.manifest.bytes += 1; },
+  candidate => { candidate.manifest.sha256 = "0".repeat(64); },
+  candidate => { candidate.userscript.bytes += 1; },
+  candidate => { candidate.userscript.sha256 = "0".repeat(64); },
+  candidate => { candidate.userscript.canonicalTextSha256 = "0".repeat(64); },
+  candidate => { candidate.releaseVersion = "0.6.5"; },
+  candidate => { candidate.schemaVersion = 1; },
+]) {
+  const altered = structuredClone(syntheticV2Predecessor);
+  mutate(altered);
+  assert.equal(matchExactLegacyMigrationPredecessor(
+    altered, syntheticV2PredecessorManifest, syntheticV2PredecessorSource,
+  ), null, "every predecessor binding remains exact");
+}
+assert.equal(matchExactLegacyMigrationPredecessor(
+  syntheticV2Predecessor,
+  syntheticV2PredecessorManifest,
+  Buffer.concat([syntheticV2PredecessorSource, Buffer.from("\n")]),
+), null, "even canonical-equivalent source bytes must match the registered raw digest");
+
 const syntheticLegacyUserscript = Buffer.from("legacy userscript\n", "utf8");
 const syntheticLegacyManifest = encode({
   artifacts: {
@@ -393,6 +457,22 @@ try {
       /differs from the durable high-water current record/,
     );
     fs.writeFileSync(highWaterPath, base.highWaterBytes);
+
+    globalThis.fetch = async (url) => new Response(
+      String(url).includes("release-manifest.json")
+        ? syntheticV2PredecessorManifest : syntheticV2PredecessorSource,
+      { status: 200 },
+    );
+    await assert.rejects(
+      preflight(
+        publicRoot,
+        installUrl.replace("hotdeal-focus.user.js", ""),
+        highWaterPath,
+        previousEmptyPath,
+      ),
+      /published release failed current validation: userscript matches are not the exact seven target-domain scopes; published release is not an exact migration predecessor/,
+      "an unregistered schema-v2 bundle with the same version and old scopes is not a migration predecessor",
+    );
 
     const rewrittenPreviousPath = path.join(temporaryRoot, "rewritten-previous.json");
     fs.writeFileSync(rewrittenPreviousPath, encode(rewrittenPrevious));
