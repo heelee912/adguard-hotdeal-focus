@@ -538,10 +538,12 @@ function verifyHighWaterSource(highWaterBytes, proof, previousHighWaterBytes = n
   }
   if (previousHighWaterBytes !== null) {
     const previous = parseHighWater(previousHighWaterBytes, { allowEmpty: true });
-    if (
-      highWater.records.length < previous.records.length ||
-      highWater.records.length > previous.records.length + 1
-    ) fail("release high-water must retain its prefix and append at most one record");
+    // A feature branch may contain several locally installed revisions before
+    // its next public publication. Preserve the entire prior history exactly;
+    // strict version ordering and the current bundle binding above still apply.
+    if (highWater.records.length < previous.records.length) {
+      fail("release high-water must retain its prefix");
+    }
     for (let index = 0; index < previous.records.length; index += 1) {
       if (!exactJson(previous.records[index], highWater.records[index])) {
         fail("release high-water history was truncated or rewritten");

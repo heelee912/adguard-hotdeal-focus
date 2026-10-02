@@ -273,6 +273,27 @@ try {
     base.proof.bundleSha256,
   );
 
+  const featurePrefix = ["1.2.1", "1.2.2"].map(releaseVersion => ({
+    ...structuredClone(base.highWater.records[0]), releaseVersion,
+  }));
+  const branchManifest = structuredClone(base.manifest);
+  const featurePrefixBytes = canonicalJsonBytes(highWaterDocument(featurePrefix));
+  branchManifest.sourceIntegrity["state/release-high-water.json"] = {
+    bytes: featurePrefixBytes.length,
+    mode: "append-only-prefix-v1",
+    recordCount: featurePrefix.length,
+    sha256: digest(featurePrefixBytes),
+  };
+  const branchProof = verifyV2Bundle(encode(branchManifest), base.source);
+  const branchHistory = highWaterDocument([
+    ...featurePrefix, releaseHighWaterRecord(branchProof),
+  ]);
+  assert.equal(
+    verifyHighWaterSource(encode(branchHistory), branchProof, encode(highWaterDocument(featurePrefix.slice(0, 1))))
+      .currentRecord.bundleSha256,
+    branchProof.bundleSha256,
+  );
+
   const nestedRoot = path.join(temporaryRoot, "nested-public");
   writeBundle(nestedRoot, base.manifestBytes, base.source);
   fs.mkdirSync(path.join(nestedRoot, "nested"));
