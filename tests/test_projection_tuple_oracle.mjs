@@ -2257,10 +2257,10 @@ try {
   assert.equal(staleAlgumonCountIsOnlyALowerBound.ok, true);
   assert.equal(
     staleAlgumonCountIsOnlyALowerBound.projectionPolicy.provenCommentCountSource,
-    "exact-dom+algumon-lower-bound",
+    "exact-dom-observed",
   );
 
-  const lowerBoundStillRejectsMissingComments = await evaluateExact(
+  const staleHigherCountPreservesLoadedComments = await evaluateExact(
     page,
     exactPage({
       commentsHtml: Array.from({ length: 3 }, (_, index) =>
@@ -2270,8 +2270,9 @@ try {
     exactLayout({ commentItems: [".exact-comments > .comment-item"] }),
     4,
   );
-  assert.equal(lowerBoundStillRejectsMissingComments.ok, false);
-  assert.equal(lowerBoundStillRejectsMissingComments.reason, "partial-comment-set");
+  assert.equal(staleHigherCountPreservesLoadedComments.ok, true);
+  assert.equal(staleHigherCountPreservesLoadedComments.projectionPolicy.provenCommentCount, 3);
+  assert.equal(staleHigherCountPreservesLoadedComments.projectionPolicy.provenCommentCountSource, "exact-dom-observed");
 
   const approvedContinuationPreservesLoadedComments = await evaluateExact(
     page,
@@ -2386,8 +2387,8 @@ try {
     exactLayout(),
     1,
   );
-  assert.equal(hiddenInitialItem.ok, false);
-  assert.equal(hiddenInitialItem.reason, "classified-rendering");
+  assert.equal(hiddenInitialItem.ok, true);
+  assert.equal(hiddenInitialItem.projectionPolicy.provenCommentCount, 1);
 
   const dormantInitialControls = await evaluateExact(
     page,
@@ -2461,7 +2462,7 @@ try {
   assert.equal(exactStaleZeroSeedAllowsNewComment.ok, true);
   assert.equal(
     exactStaleZeroSeedAllowsNewComment.projectionPolicy.provenCommentCountSource,
-    "exact-dom+algumon-lower-bound",
+    "exact-dom-observed",
   );
 
   const exactBareAside = await evaluateExact(
@@ -2552,10 +2553,10 @@ try {
   );
   assert.equal(
     schemaSubsetWithVisibleCommentTotal.projectionPolicy.provenCommentCountSource,
-    "visible-comment-total",
+    "exact-dom-observed",
   );
 
-  const visibleCommentTotalRejectsPartialRows = await evaluateExact(
+  const aggregateCommentTotalPreservesLoadedRows = await evaluateExact(
     page,
     `<main id="page">
       <h1 class="exact-title">${title}</h1>
@@ -2576,8 +2577,8 @@ try {
     }),
     null,
   );
-  assert.equal(visibleCommentTotalRejectsPartialRows.ok, false);
-  assert.equal(visibleCommentTotalRejectsPartialRows.reason, "partial-comment-set");
+  assert.equal(aggregateCommentTotalPreservesLoadedRows.ok, true);
+  assert.equal(aggregateCommentTotalPreservesLoadedRows.projectionPolicy.provenCommentCount, 3);
 
   const exactRuliWrongProductOrder = await evaluateExact(
     page,
@@ -2607,7 +2608,6 @@ try {
     ["data test advertisement", '<div data-testid="advertisement">Placement</div>'],
     ["data component related posts", '<div data-component="related-posts"><a href="/other">Other post</a></div>'],
     ["data role sponsored", '<a data-role="sponsored" href="/partner">Partner</a>'],
-    ["sponsored relation", '<a rel="sponsored" href="/partner">Partner</a>'],
     ["ad network resource", '<a href="https://googleads.g.doubleclick.net/pagead/landing">Placement</a>'],
   ]) {
     const strongExactNoise = await evaluateExact(
@@ -2758,6 +2758,48 @@ try {
     3,
   );
   assert.equal(arcaNestedReplyItems.ok, true, JSON.stringify(arcaNestedReplyItems));
+
+  const arcaInitialPublisherChrome = await evaluateExact(
+    page,
+    exactPage({
+      commentsHtml: `<div class="title">댓글 [2]</div>
+        <div class="list-area">
+          <div class="comment-wrapper"><div class="comment-item" id="c_1">Original first comment</div></div>
+          <div class="comment-wrapper"><div class="comment-item" id="c_2">Original second comment</div></div>
+          <div class="publisher-module">A new publisher notice outside the comments</div>
+          A publisher text node outside every comment item
+          <div class="newcomment-alert fetch-comment" style="display:none">새 댓글 불러오기</div>
+        </div>`,
+    }),
+    exactLayout({
+      commentItems: [".exact-comments .comment-wrapper > .comment-item[id^='c_']"],
+      commentControls: [".exact-comments > .list-area > .newcomment-alert.fetch-comment"],
+      commentIgnored: [".exact-comments > .title"],
+    }),
+    2,
+  );
+  assert.equal(
+    arcaInitialPublisherChrome.ok,
+    true,
+    `Unowned comment chrome must stay hidden without blanking the article: ${JSON.stringify(arcaInitialPublisherChrome)}`,
+  );
+
+  const arcaUnclassifiedActualComment = await evaluateExact(
+    page,
+    exactPage({
+      commentsHtml: `<div class="comment-wrapper"><div class="comment-item" id="c_1">Original comment</div></div>
+        <div class="changed-item" itemscope itemtype="https://schema.org/Comment">An actual comment with a changed selector</div>`,
+    }),
+    exactLayout({
+      commentItems: [".exact-comments .comment-wrapper > .comment-item[id^='c_']"],
+      commentControls: [],
+      commentIgnored: [],
+    }),
+    2,
+  );
+  assert.equal(arcaUnclassifiedActualComment.ok, false);
+  assert.equal(arcaUnclassifiedActualComment.role, "comments");
+  assert.equal(arcaUnclassifiedActualComment.reason, "evidence-outside-items");
 
   const arcaExactDomZeroComments = await evaluateExact(
     page,
@@ -3001,7 +3043,7 @@ try {
     JSON.stringify(stableZeroHeightEmptyMount),
   );
 
-  const contradictedZeroHeightMount = await evaluateExact(
+  const staleCountWithEmptyMount = await evaluateExact(
     page,
     exactPage({
       commentsHtml: "",
@@ -3010,8 +3052,9 @@ try {
     exactLayout({ commentControls: [], commentIgnored: [] }),
     1,
   );
-  assert.equal(contradictedZeroHeightMount.ok, false);
-  assert.equal(contradictedZeroHeightMount.reason, "partial-comment-set");
+  assert.equal(staleCountWithEmptyMount.ok, true);
+  assert.equal(staleCountWithEmptyMount.projectionPolicy.provenCommentCount, 0);
+  assert.equal(staleCountWithEmptyMount.projectionPolicy.provenCommentCountSource, "exact-dom-zero");
 
   const hiddenEmptyMountWithoutHistoricalCount = await evaluateExact(
     page,
@@ -3319,7 +3362,9 @@ try {
         await protocolRecoveryGate.page.waitForFunction(
           () => document.querySelectorAll('[data-hotdeal-focus-role="comment-item"]').length === 2,
           null, { timeout: 5000 },
-        );
+        ).catch(async error => {
+          throw new Error(`${width}/${mutationKind}: ${error.message}; ${JSON.stringify(await gateState(protocolRecoveryGate.page))}`);
+        });
         const preserved = await protocolRecoveryGate.page.evaluate(() => {
           const visible = (element) => {
             const style = getComputedStyle(element);
@@ -3671,17 +3716,17 @@ try {
   });
   try {
     await unavailableSecureNonce.page.waitForFunction(
-      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "locked" &&
+      () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "recovery" &&
         globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.targetReason ===
-          "contained-secure-nonce",
+          "static-secure-nonce",
       null,
       { timeout: 5000 },
     );
     const state = await gateState(unavailableSecureNonce.page);
-    assert.equal(state.lock, "1");
+    assert.equal(state.lock, null);
     assert.equal(state.ready, null);
-    assert.equal(state.publisherContentVisible.article, false);
-    assert.equal(state.publisherContentVisible.comments, false);
+    assert.equal(state.publisherContentVisible.article, true);
+    assert.equal(state.publisherContentVisible.comments, true);
     assert.deepEqual(unavailableSecureNonce.pageErrors, []);
   } finally {
     await unavailableSecureNonce.context.close();
@@ -3964,7 +4009,9 @@ try {
   for (const width of [1280, 390]) {
     const continuedObserverGate = await openClienGate(browser, {
       commentsHtml: `<div class="comment"><div class="comment_row">Original comment</div></div>
-        <button class="comment_nav">Load more comments</button>`,
+        <button class="comment_nav">Load more comments</button>
+        <div id="initial-unclassified-panel">Unrelated initial publisher content</div>
+        Unrelated publisher text directly inside the comment shell`,
     });
     try {
       await continuedObserverGate.page.setViewportSize({ width, height: 900 });
@@ -3972,6 +4019,29 @@ try {
         () => globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state === "ready",
         null, { timeout: 5000 },
       );
+      const initialChromeState = await continuedObserverGate.page.evaluate(() => {
+        const panel = document.querySelector("#initial-unclassified-panel");
+        const panelStyle = getComputedStyle(panel);
+        const shell = document.querySelector(".post_comment");
+        const visible = (node) => {
+          const style = getComputedStyle(node);
+          return style.display !== "none" && style.visibility !== "hidden" &&
+            Number(style.opacity) !== 0 && node.getClientRects().length > 0;
+        };
+        return {
+          bodyVisible: visible(document.querySelector(".post_article")),
+          commentVisible: visible(document.querySelector(".comment_row")),
+          controlVisible: visible(document.querySelector(".comment_nav")),
+          panelHidden: panelStyle.display === "none",
+          directTextHidden: getComputedStyle(shell).visibility === "hidden",
+          panelUnowned: !panel.hasAttribute("data-hotdeal-focus-keep"),
+          leakCount: globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.visibleLeakCount,
+        };
+      });
+      assert.deepEqual(initialChromeState, {
+        bodyVisible: true, commentVisible: true, controlVisible: true,
+        panelHidden: true, directTextHidden: true, panelUnowned: true, leakCount: 0,
+      }, JSON.stringify({ width, initialChromeState }));
       await continuedObserverGate.page.evaluate(() => {
         const body = document.querySelector(".post_article");
         const comment = document.querySelector(".comment_row");

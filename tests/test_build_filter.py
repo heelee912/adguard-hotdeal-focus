@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import sys
 import tempfile
@@ -17,6 +18,7 @@ from build_filter import (  # noqa: E402
     ConfigError,
     _derive_single_segment_path_pattern,
     _path_pattern_matches,
+    _validate_route_evidence,
     build_hide_selector,
     build_rule,
     check_filter,
@@ -323,6 +325,62 @@ class RuleGenerationTests(unittest.TestCase):
 
         self.assertEqual(render_filter(config), render_filter(reordered))
         self.assertNotIn("Generated at", render_filter(config))
+
+
+class AlgumonRouteEvidenceTests(unittest.TestCase):
+    @staticmethod
+    def digest(value: object) -> str:
+        return hashlib.sha256(
+            json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+
+    def route_fixture(self, relay_prefix: str) -> tuple[list[dict], dict, dict]:
+        final_urls = [f"https://example.com/newdeal/{article_id}" for article_id in (1001, 1002, 1003)]
+        samples = []
+        for deal_id, final_url in enumerate(final_urls, start=9001):
+            entry_url = (
+                f"https://www.algumon.com/{relay_prefix}/d/{deal_id}"
+                "?v=0123456789abcdef0123456789abcdef&t=1784520000000"
+                + ("&enc=v1.fixture_ciphertext" if relay_prefix == "n" else "")
+            )
+            provenance = {
+                "algumonDealId": str(deal_id),
+                "algumonEntryUrl": entry_url,
+                "finalResolvedUrl": final_url,
+            }
+            chain = [entry_url, final_url]
+            samples.append({
+                **provenance,
+                "redirectChain": chain,
+                "redirectChainSha256": self.digest(chain),
+                "provenanceSha256": self.digest(provenance),
+            })
+        pattern = "|/newdeal/*^"
+        return (
+            [{"canonicalPathPattern": pattern, "samples": samples}],
+            {"paths": [pattern], "sampleUrls": final_urls},
+            minimal_layout(),
+        )
+
+    def test_legacy_and_current_relay_paths_preserve_route_provenance(self) -> None:
+        for relay_prefix in ("l", "n"):
+            with self.subTest(relay_prefix=relay_prefix):
+                evidence, payload, layout = self.route_fixture(relay_prefix)
+                self.assertEqual(evidence, _validate_route_evidence(evidence, payload, layout))
+
+    def test_current_relay_path_still_requires_matching_id_host_and_hashes(self) -> None:
+        for changed_field, changed_value in (
+            ("algumonEntryUrl", "https://www.algumon.com/n/d/9999"),
+            ("algumonEntryUrl", "https://evil.example/n/d/9001"),
+            ("algumonEntryUrl", "https://www.algumon.com/n/deal/9001"),
+            ("redirectChainSha256", "0" * 64),
+            ("provenanceSha256", "0" * 64),
+        ):
+            with self.subTest(changed_field=changed_field, changed_value=changed_value):
+                evidence, payload, layout = self.route_fixture("n")
+                evidence[0]["samples"][0][changed_field] = changed_value
+                with self.assertRaises(ConfigError):
+                    _validate_route_evidence(evidence, payload, layout)
 
 
 class ConfigurationValidationTests(unittest.TestCase):

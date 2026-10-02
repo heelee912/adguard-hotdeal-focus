@@ -4,115 +4,152 @@
 
 ## 한국어
 
-등록된 **핫딜 글**을 읽기 화면으로 만듭니다. 알구몬에서 평소처럼 열거나 글 주소로 직접 접근해도 적용됩니다. 제목·상품 정보·본문·댓글·대댓글은 원래 DOM 그대로 보존하고, 광고·헤더·푸터·사이드바·인기글·추천글·계정 UI·다른 글은 숨깁니다. 클리앙, 뽐뿌, 루리웹, 퀘이사존, 어미새, ZOD, 아카라이브의 등록된 PC·모바일 글 경로를 지원합니다.
+**핫딜만 보러 갔다가 인기글로 새지 않도록.** 핫딜 글에서 광고·사이드바·인기글·추천글·다른 글 목록을 숨기고, 상품 정보와 본문·댓글을 읽는 데 필요한 화면만 남기는 유저스크립트입니다.
+
+- 가격·구매 링크·사진·영상·댓글·대댓글은 원래 페이지 그대로 보존합니다.
+- **알구몬으로 돌아가기 · 본문 · 댓글** 버튼으로 필요한 곳에 바로 이동합니다.
+- 클리앙·뽐뿌·루리웹·퀘이사존·어미새·ZOD·아카라이브의 지원 핫딜 글에 적용됩니다. 일반 게시판과 목록은 바꾸지 않습니다.
+- 알구몬에서 열거나 같은 글 주소로 직접 들어가도 동작합니다.
 
 ### 설치
 
-AdGuard의 **확장 프로그램 → Userscripts → URL로 추가**에서 아래 URL 하나만 추가하고 켜십시오.
+**Windows 또는 Android용 AdGuard 앱**에서 아래 주소를 유저스크립트로 추가하면 됩니다. 브라우저에 설치하는 AdGuard 확장 프로그램이나 사용자 필터 목록에 넣는 주소가 아닙니다.
 
 ```text
 https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ```
 
-일반 설치는 이 독립형 Userscript 하나로 끝납니다. 별도의 규칙이나 필터 목록은 필요하지 않습니다.
+1. AdGuard 앱에서 추가 메뉴를 엽니다.
+   - **Windows:** 확장 프로그램 → 확장 프로그램 추가 → 파일 또는 URL에서 가져오기
+   - **Android:** 설정 → 필터링 → 확장 프로그램 → 확장 프로그램 추가 → 파일 또는 URL에서 가져오기
+2. 위 주소를 붙여넣어 설치하고 스크립트를 켭니다.
+3. 이미 열어 둔 핫딜 글은 새로고침합니다.
 
-이전 핫딜 전용 필터 목록을 사용 중이면 해당 목록을 제거하고 이 스크립트만 사용하십시오.
+스크립트 하나만 설치하면 됩니다. 이전 핫딜 전용 필터 목록을 사용 중이면 해당 목록을 제거하고 이 스크립트만 사용해 주세요.
+
+메뉴가 다르면 [AdGuard 공식 유저스크립트 안내](https://adguard.com/kb/general/extensions/#userscripts)와 [Android 확장 프로그램 안내](https://adguard.com/kb/adguard-for-android/features/settings/#extensions)를 확인해 주세요.
 
 ### 사용
 
-알구몬의 핫딜 링크를 평소처럼 여십시오. 읽기 화면 위쪽의 **알구몬으로 돌아가기 · 본문 · 댓글** 버튼으로 이동할 수 있습니다. 등록된 핫딜 글은 PC·모바일 전환 뒤에도 읽기 화면이 적용됩니다. 같은 핫딜 주소를 직접 열어도 적용되며, 일반 게시판·목록에는 적용하지 않습니다.
+평소처럼 핫딜 링크를 열면 자동으로 적용됩니다. 글 위쪽에 **알구몬으로 돌아가기 · 본문 · 댓글** 버튼이 보이면 적용된 상태입니다. 잠시 끄려면 AdGuard의 확장 프로그램 목록에서 이 스크립트를 끄고 글을 새로고침하면 됩니다.
 
 ### 동작 범위와 업데이트
 
-스크립트는 등록된 구조를 먼저 확인하고, 선택자나 글 경로가 바뀌었으면 제한된 독립 의미 판정으로 제목·본문·댓글이 하나의 완전한 글인지 다시 확인합니다. 본문·상품 정보·댓글 안팎 어디에 있든 광고·인기글·추천글·관련글·사이드바는 소유하지 않고 숨깁니다. 로딩 뒤 DOM이 바뀌어도 같은 판정을 반복하며, 기존 본문·댓글 DOM의 객체와 텍스트는 그대로 유지합니다.
+페이지가 로딩된 뒤 추가되거나 위치가 바뀐 요소도 다시 검사합니다. 일부 구조 변경은 자동으로 대응하고, 수정된 새 버전은 AdGuard의 업데이트 설정에 따라 같은 설치 주소에서 받습니다. 사이트가 크게 바뀌면 추가 수정이 필요할 수 있으며, 모든 미래의 변경을 자동으로 해결한다고 보장하지는 않습니다. 구조를 확정하지 못한 경우에는 본문·댓글이 사라지지 않도록 원래 내용을 복구합니다.
 
-AdGuard는 위 URL에서 새 버전을 받습니다. GitHub Actions는 PC가 꺼져 있어도 주기적으로 7개 사이트의 데스크톱·모바일 구조를 제한된 트래픽으로 검사합니다. 변경 후보는 반복 가능한 구조 증거, 무노출, 본문·댓글 보존, 변조 및 네트워크 검사를 모두 통과한 경우에만 자동 승격됩니다. Userscript 자체는 네트워크 요청을 만들거나 알구몬의 기본 클릭 동작을 바꾸지 않습니다.
+Windows의 실제 Chrome과 모바일 화면 폭으로 확인합니다. **Android 실기기 동작은 아직 검증하지 않았습니다.**
 
-개발·복구용 명령은 [CLI.md](CLI.md), 설계와 검증 경계는 [ARCHITECTURE.md](ARCHITECTURE.md)를 보십시오.
+적용되지 않으면 스크립트가 켜져 있는지, 사용하는 브라우저에 AdGuard 보호와 HTTPS 필터링이 적용되는지 확인해 주세요. 내용이 잘리거나 불필요한 요소가 남으면 [문제 제보](https://github.com/heelee912/adguard-hotdeal-focus/issues)에 **글 주소·사용 기기·브라우저**를 알려 주세요.
+
+개발·복구 명령은 [CLI.md](CLI.md), 자동 점검과 설계는 [ARCHITECTURE.md](ARCHITECTURE.md)에 정리되어 있습니다.
 
 ## English
 
-This creates a reader view for registered hot-deal articles, opened through Algumon or visited directly. It preserves the original title, product information, body, comments, and replies, while hiding ads, headers, footers, sidebars, popular/recommended posts, account UI, and unrelated articles. Registered desktop and mobile article routes are supported for Clien, Ppomppu, Ruliweb, Quasarzone, Eomisae, ZOD, and Arca Live.
+**Read the deal without getting sidetracked by popular posts.** This userscript hides ads, sidebars, recommendations, and unrelated post lists on supported hot-deal articles. It preserves the original prices, purchase links, photos, videos, comments, and replies. It supports hot-deal article routes on Clien, Ppomppu, Ruliweb, Quasarzone, Eomisae, ZOD, and Arca Live, both through Algumon links and direct visits. Ordinary boards and list pages are unchanged.
 
 ### Install
 
-In **AdGuard → Extensions → Userscripts → Add by URL**, add and enable only:
+Use the **AdGuard app for Windows or Android**. This is a userscript, not a filter-list subscription, and the AdGuard browser extension alone does not install it.
 
 ```text
 https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ```
 
-This standalone Userscript is the complete normal installation. No separate rule or filter list is required.
+1. Open the app's import menu:
+   - **Windows:** Extensions → Add extension → Import from file or URL
+   - **Android:** Settings → Filtering → Extensions → Add extension → Import from file or URL
+2. Paste the URL, install the script, and enable it.
+3. Reload any already-open deal articles.
 
-If an older hot-deal filter list is installed, remove that list and use this Userscript instead.
+Only this script is needed. If an older hot-deal filter list is installed, remove that list and use this script instead.
+
+See the [AdGuard userscript guide](https://adguard.com/kb/general/extensions/#userscripts) and [Android extension settings](https://adguard.com/kb/adguard-for-android/features/settings/#extensions) if the menu differs.
 
 ### Use
 
-Open a deal through Algumon normally. The reader toolbar provides **Return to Algumon · Body · Comments** navigation (displayed in Korean). Registered hot-deal articles retain reader mode across desktop/mobile redirects and direct address-bar visits. Ordinary boards and list pages are not filtered.
+Open deal links normally. The **Return to Algumon · Body · Comments** controls above the article indicate that reader mode is active (displayed in Korean). To turn it off, disable this script in AdGuard and reload the page.
 
 ### Scope and updates
 
-The script checks the registered structure first. If selectors or an article route changed, a bounded independent semantic proof must still identify one complete title/body/comment projection. Ads, popular/recommended/related posts, and sidebars are excluded wherever they are nested. The same classification runs after DOM updates while preserving the original article and comment nodes and text.
+The script rechecks elements that appear or move after loading and can accommodate some structural changes. New versions arrive from the same URL according to AdGuard's update settings. Major site changes can still need a fix; automatic handling of every future change is not guaranteed. If the article structure cannot be confirmed, original content is restored so the article and comments remain accessible.
 
-AdGuard receives new versions from the URL above. GitHub Actions continues bounded desktop/mobile checks for all seven sites while the PC is off, and promotes a candidate only after reproducible structure, zero-leak, content-preservation, tamper, and network gates pass. The Userscript itself makes no network requests and does not alter Algumon's native click behavior.
+Checks use real Chrome on Windows and mobile-width layouts. **Android device behavior has not yet been verified.**
 
-See [CLI.md](CLI.md) for reproducible operations and [ARCHITECTURE.md](ARCHITECTURE.md) for design and verification boundaries.
+If it does not apply, check that the script is enabled and that AdGuard protection and HTTPS filtering cover the browser. For missing content or remaining clutter, [report the article URL, device, and browser](https://github.com/heelee912/adguard-hotdeal-focus/issues).
+
+Developer commands: [CLI.md](CLI.md). Automated checks and design: [ARCHITECTURE.md](ARCHITECTURE.md).
 
 ## 日本語
 
-登録済みのホットディール記事を読書表示にします。Algumon の通常クリックでも直接アクセスでも適用されます。タイトル・商品情報・本文・コメント・返信は元の DOM のまま保持し、広告、ヘッダー、フッター、サイドバー、人気・おすすめ記事、アカウント UI、その他の記事は非表示にします。Clien、Ppomppu、Ruliweb、Quasarzone、Eomisae、ZOD、Arca Live の登録済み PC/モバイル記事経路に対応します。
+**セール情報を見に来たのに、人気記事を読み続けてしまう。その寄り道を減らします。** 対応するホットディール記事の広告・サイドバー・おすすめ記事・ほかの記事一覧を隠し、価格・購入リンク・写真・動画・本文・コメント・返信は元のページのまま保持します。Clien、Ppomppu、Ruliweb、Quasarzone、Eomisae、ZOD、Arca Live の対応する記事で、Algumon のリンクからでも直接アクセスでも動作します。通常の掲示板や一覧は変更しません。
 
 ### インストール
 
-AdGuard の **拡張機能 → Userscripts → URL から追加**で、次の URL だけを追加して有効にしてください。
+**Windows または Android 用の AdGuard アプリ**で追加してください。フィルタリストではなく、ブラウザー用 AdGuard 拡張機能だけではインストールできません。
 
 ```text
 https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ```
 
-通常のインストールは、この単体 Userscript だけで完了します。別のルールやフィルタリストは不要です。
+1. アプリでインポート画面を開きます。
+   - **Windows:** 拡張機能 → 拡張機能を追加 → ファイルまたは URL からインポート
+   - **Android:** 設定 → フィルタリング → 拡張機能 → 拡張機能を追加 → ファイルまたは URL からインポート
+2. URL を貼り付け、インストールして有効にします。
+3. 開いている記事を再読み込みします。
 
-以前のホットディール専用フィルタリストを使用している場合は、そのリストを削除し、この Userscript に置き換えてください。
+このスクリプト一つで利用できます。旧ホットディール専用フィルタリストを使用している場合は、そのリストを削除して置き換えてください。
+
+メニューが異なる場合は [AdGuard のユーザースクリプト案内](https://adguard.com/kb/general/extensions/#userscripts)と [Android の拡張機能設定](https://adguard.com/kb/adguard-for-android/features/settings/#extensions)をご確認ください。
 
 ### 使い方
 
-Algumon のホットディールリンクを通常どおり開いてください。記事の上部に Algumon に戻る・本文・コメントへの移動ボタンが表示されます（韓国語表示）。登録済みのホットディール記事は PC/モバイル転送後や直接アクセスでも読書表示になります。通常の掲示板や一覧には適用しません。
+いつもどおり記事を開くだけで適用されます。記事上部の **Algumon に戻る・本文・コメント**への移動ボタンが動作中の目印です（韓国語表示）。停止するには、AdGuard でこのスクリプトを無効にして記事を再読み込みしてください。
 
 ### 動作範囲と更新
 
-登録済み構造を先に確認し、セレクタや記事経路が変わった場合は、制限付きの独立した意味判定でタイトル・本文・コメントが一つの完全な記事を構成することを再確認します。広告、人気・おすすめ・関連記事、サイドバーは入れ子の位置に関係なく除外されます。DOM の更新後も同じ判定を続け、元の本文・コメントのノードとテキストを保持します。
+読み込み後に追加・移動された要素も再確認し、一部の構造変更には自動対応します。修正版は AdGuard の更新設定に従って同じ URL から取得します。大幅な変更には修正が必要になることがあり、今後のすべての変更への自動対応は保証しません。構造を確認できない場合は、本文とコメントを読めるよう元の内容を復元します。
 
-AdGuard は上記 URL から新しい版を取得します。GitHub Actions は PC が停止中でも 7 サイトのデスクトップ・モバイル構造を制限された通信量で検査し、再現可能な構造、無露出、本文・コメント保持、改変、ネットワークの各検査を通過した候補だけを昇格します。Userscript 自体はネットワーク要求を発生させず、Algumon の通常クリックも変更しません。
+検証は Windows の実際の Chrome とモバイル幅で行っています。**Android 実機での動作は未検証です。**
 
-開発・復旧用のコマンドは [CLI.md](CLI.md)、設計と検証の境界は [ARCHITECTURE.md](ARCHITECTURE.md) を参照してください。
+適用されない場合は、スクリプトが有効で、ブラウザーに AdGuard の保護と HTTPS フィルタリングが適用されているかご確認ください。内容の欠落や不要な表示は、[記事 URL・端末・ブラウザーを添えてご報告ください](https://github.com/heelee912/adguard-hotdeal-focus/issues)。
+
+開発用コマンドは [CLI.md](CLI.md)、自動検査と設計は [ARCHITECTURE.md](ARCHITECTURE.md)をご覧ください。
 
 ## 简体中文
 
-已登记的优惠文章会变成阅读视图；从 Algumon 正常点击或直接访问都适用。标题、商品信息、正文、评论和回复保持原始 DOM；广告、页眉、页脚、侧栏、热门/推荐文章、账户界面和其他文章都会隐藏。支持 Clien、Ppomppu、Ruliweb、Quasarzone、Eomisae、ZOD、Arca Live 已登记的桌面与移动端文章路径。
+**看优惠，不再被热门帖子带跑。** 这个用户脚本隐藏支持的优惠文章中的广告、侧栏、推荐内容和其他帖子列表，保留原网页的价格、购买链接、图片、视频、正文、评论和回复。支持 Clien、Ppomppu、Ruliweb、Quasarzone、Eomisae、ZOD、Arca Live 的指定文章路径，从 Algumon 打开或直接访问都适用；不改动普通论坛和列表页。
 
 ### 安装
 
-在 AdGuard 的 **扩展 → Userscripts → 通过 URL 添加**中，只添加并启用以下地址：
+请使用 **Windows 或 Android 版 AdGuard 应用**。这是用户脚本，不是过滤列表订阅；仅安装 AdGuard 浏览器扩展无法完成此安装。
 
 ```text
 https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ```
 
-独立 Userscript 就是完整的常规安装；无需另加规则或过滤列表。
+1. 在应用中打开导入菜单：
+   - **Windows：**扩展 → 添加扩展 → 从文件或 URL 导入
+   - **Android：**设置 → 过滤 → 扩展 → 添加扩展 → 从文件或 URL 导入
+2. 粘贴地址，安装并启用脚本。
+3. 刷新已经打开的优惠文章。
 
-如果已安装旧版优惠专用过滤列表，请移除该列表，改用这个 Userscript。
+只需安装这个脚本。使用旧版优惠专用过滤列表的用户，请移除该列表并改用本脚本。
+
+菜单不同时，可查看 [AdGuard 用户脚本说明](https://adguard.com/kb/general/extensions/#userscripts)和 [Android 扩展设置](https://adguard.com/kb/adguard-for-android/features/settings/#extensions)。
 
 ### 使用
 
-按平时方式从 Algumon 打开优惠链接。文章上方提供返回 Algumon、正文和评论的导航按钮（韩文显示）。已登记的优惠文章在桌面/移动端跳转或直接访问时都会启用阅读视图；普通论坛和列表页不适用。
+照常打开优惠链接即可。文章上方出现**返回 Algumon、正文、评论**三个导航按钮，表示阅读模式已生效（韩文显示）。临时停用时，在 AdGuard 中关闭本脚本并刷新页面。
 
 ### 范围与更新
 
-脚本先验证已登记结构；如果选择器或文章路径发生变化，则通过有界的独立语义证明重新确认唯一完整的标题、正文和评论投影。无论广告、热门/推荐/相关文章或侧栏嵌套在什么位置，都会被排除。DOM 更新后会继续执行同一分类，同时保留原始正文和评论节点及文本。
+脚本会重新检查加载后新增或移动的元素，并自动适应部分结构变化。新版本根据 AdGuard 的更新设置从同一地址获取。网站大幅改版仍可能需要修复，不保证自动处理所有未来变化。无法确认文章结构时，会恢复原始内容，让正文和评论保持可读。
 
-AdGuard 会从上述 URL 获取新版本。即使 PC 关机，GitHub Actions 仍会以受限流量检查全部七个网站的桌面和移动结构；只有通过可复现结构、零泄漏、正文/评论保留、篡改和网络检查的候选才会晋升。Userscript 本身不会发起网络请求，也不会改变 Algumon 的原生点击行为。
+目前使用 Windows 上的真实 Chrome 和移动屏幕宽度检查。**尚未验证 Android 实机行为。**
 
-开发与恢复命令见 [CLI.md](CLI.md)，设计与验证边界见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+未生效时，请检查脚本是否开启，以及 AdGuard 保护和 HTTPS 过滤是否作用于所用浏览器。发现内容缺失或多余元素时，请[提供文章地址、设备和浏览器](https://github.com/heelee912/adguard-hotdeal-focus/issues)。
+
+开发命令见 [CLI.md](CLI.md)，自动检查和设计见 [ARCHITECTURE.md](ARCHITECTURE.md)。
 
 ## License
 

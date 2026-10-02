@@ -145,7 +145,7 @@ const DEVICE_PROFILES = Object.freeze({
   },
 });
 let RUNTIME_DEVICE_PROFILES = null;
-const FIRST_PAINT_PROBE_SOURCE = String.raw`
+export const FIRST_PAINT_PROBE_SOURCE = String.raw`
 (() => {
   "use strict";
   const probe = {
@@ -175,6 +175,7 @@ const FIRST_PAINT_PROBE_SOURCE = String.raw`
     const root = document.documentElement;
     const body = document.body;
     const state = root?.getAttribute("data-hotdeal-focus-state") ?? "unset";
+    const status = root?.getAttribute("data-hotdeal-focus-status") ?? "";
     const ready = root?.classList.contains("hdf-v2-ready") === true &&
       root?.getAttribute("data-hotdeal-focus-ready") === "1" &&
       root?.getAttribute("data-hotdeal-focus-protocol") === "2" &&
@@ -189,7 +190,9 @@ const FIRST_PAINT_PROBE_SOURCE = String.raw`
       root?.hasAttribute("data-hotdeal-focus-ready") === true ||
       root?.hasAttribute("data-hotdeal-focus-protocol") === true ||
       root?.hasAttribute("data-hotdeal-focus-state") === true ||
-      root?.hasAttribute("data-hotdeal-focus-status") === true;
+      // Recovery reports readable publisher content, not an active allow-set.
+      // Any remaining lock/protocol/state evidence above still counts as active.
+      (status.length > 0 && !status.startsWith("recovery-"));
     const paintLockIntact = !ready &&
       root?.classList.contains("hdf-v2-lock") === true &&
       root?.getAttribute("data-hotdeal-focus-lock") === "1" &&
@@ -231,6 +234,7 @@ const FIRST_PAINT_PROBE_SOURCE = String.raw`
       probe.samples.push({
         frame,
         state,
+        status,
         ready,
         readerGateActive,
         paintLockIntact,
@@ -5906,6 +5910,7 @@ async function createPageContext(
   return {
     context,
     page,
+    approvePublicHost: pinnedTransport.approvePublicHost,
     sealNetworkPolicyEvidence: async () => {
       validateAllMainDocumentUrls();
       await networkEvidenceRecorder.sealAndDrain({
@@ -8594,8 +8599,11 @@ function exactSignedAlgumonDealUrl(urlLike, expectedDealId = null) {
   } catch {
     return null;
   }
-  const dealMatch = url.pathname.match(/^\/l\/d\/(\d{1,24})$/u);
+  const dealMatch = url.pathname.match(/^\/(l|n)\/d\/(\d{1,24})$/u);
   const queryKeys = [...url.searchParams.keys()];
+  const currentRelay = dealMatch?.[1] === "n";
+  const expectedQueryKeys = currentRelay ? ["v", "t", "enc"] : ["v", "t"];
+  const encryptedDestination = url.searchParams.get("enc") || "";
   if (
     url.protocol !== "https:" ||
     url.hostname !== "www.algumon.com" ||
@@ -8604,14 +8612,18 @@ function exactSignedAlgumonDealUrl(urlLike, expectedDealId = null) {
     url.port ||
     url.hash ||
     !dealMatch ||
-    (expectedDealId && dealMatch[1] !== String(expectedDealId)) ||
-    queryKeys.length !== 2 ||
-    queryKeys[0] !== "v" ||
-    queryKeys[1] !== "t" ||
+    (expectedDealId && dealMatch[2] !== String(expectedDealId)) ||
+    queryKeys.length !== expectedQueryKeys.length ||
+    queryKeys.some((key, index) => key !== expectedQueryKeys[index]) ||
     url.searchParams.getAll("v").length !== 1 ||
     url.searchParams.getAll("t").length !== 1 ||
     !/^[0-9a-f]{32}$/u.test(url.searchParams.get("v") || "") ||
-    !/^\d{13}$/u.test(url.searchParams.get("t") || "")
+    !/^\d{13}$/u.test(url.searchParams.get("t") || "") ||
+    (currentRelay && (
+      url.searchParams.getAll("enc").length !== 1 ||
+      encryptedDestination.length > 4_096 ||
+      !/^v1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/u.test(encryptedDestination)
+    ))
   ) {
     return null;
   }
@@ -8813,17 +8825,19 @@ function classifyAlgumonInventorySnapshot(snapshot, expectedSiteId = null) {
   }
   const failures = [];
   let observedLabels = [];
+  let sourcePickerPresent = false;
   if (!expectedSiteId) {
     const expectedLabels = new Set(ALGUMON_SOURCE_CONTRACTS.map((source) => source.label));
     const dropdowns = (snapshot?.dropdowns ?? []).map((labels) =>
       labels.map(normalizeAlgumonSourceLabel).filter(Boolean),
     );
+    sourcePickerPresent = dropdowns.length > 0;
     const candidates = dropdowns.filter((labels) =>
       labels.some((label) => expectedLabels.has(label)),
     );
-    if (candidates.length !== 1) {
+    if (sourcePickerPresent && candidates.length !== 1) {
       failures.push("source-dropdown-cardinality");
-    } else {
+    } else if (candidates.length === 1) {
       observedLabels = candidates[0];
       const expectedSorted = [...expectedLabels].sort();
       const observedSorted = [...observedLabels].sort();
@@ -8855,6 +8869,9 @@ function classifyAlgumonInventorySnapshot(snapshot, expectedSiteId = null) {
     status: failures.length === 0 ? "ok" : "inventory-contract-failure",
     failures,
     observedLabels,
+    sourceInventoryMode: expectedSiteId
+      ? "filtered-feed-source-identity"
+      : sourcePickerPresent ? "source-picker" : "source-picker-unavailable",
     observedSiteTypes,
     cardCount: classifiedCards.length,
     links: failures.length === 0
@@ -8911,8 +8928,16 @@ async function snapshotAlgumonInventoryPage(page, response) {
         return labels.length === 1 ? labels : [];
       }),
     );
+    for (const fieldset of document.querySelectorAll(
+      'dialog[aria-label="필터"] fieldset, [role="dialog"][aria-label="필터"] fieldset',
+    )) {
+      if (cleanText(fieldset.querySelector("legend")?.textContent) !== "사이트") continue;
+      dropdowns.push([...fieldset.querySelectorAll('input[type="checkbox"][value]')]
+        .filter((input) => input.getAttribute("value"))
+        .map((input) => cleanText(input.closest("label")?.textContent)));
+    }
     const cards = [...document.querySelectorAll(".deal-feed-card[id^='deal-']")].map((card) => {
-      const relayAnchors = [...card.querySelectorAll('a[href*="/l/d/"]')];
+      const relayAnchors = [...card.querySelectorAll('a[href*="/l/d/"], a[href*="/n/d/"]')];
       const iconImages = [...card.querySelectorAll('img[src*="/site-icon/"]')];
       const explicitCount = card.getAttribute("data-source-comment-count") ||
         card.getAttribute("data-origin-comment-count") ||
@@ -8924,12 +8949,14 @@ async function snapshotAlgumonInventoryPage(page, response) {
         cardDomId: card.id,
         hrefs: relayAnchors.map((anchor) => anchor.href),
         title: cleanText(
-          card.querySelector('h3 a[href*="/l/d/"]')?.textContent ||
+          card.querySelector('h3 a[href*="/l/d/"], h3 a[href*="/n/d/"]')?.textContent ||
             card.querySelector("h3")?.textContent ||
             "",
         ),
         iconUrls: iconImages.map((image) => image.src),
-        sourceLabels: iconImages.map((image) => cleanText(image.closest("span")?.textContent)),
+        sourceLabels: iconImages.map((image) => cleanText(
+          image.closest(".badge")?.textContent || image.closest("span")?.textContent,
+        )),
         dataSiteTypes: [
           card.getAttribute("data-site-type"),
           card.getAttribute("data-site"),
@@ -9003,6 +9030,7 @@ async function collectAlgumonRedirectLinks(
   requestBudget,
   transitionBudget,
   requestKind = "site-discovery",
+  relayContext = null,
 ) {
   const source = site.algumon_source ?? site.id.toUpperCase();
   const discoveryUrl = `${ALGUMON_ORIGIN}/n/deal?sites=${encodeURIComponent(source)}`;
@@ -9034,6 +9062,9 @@ async function collectAlgumonRedirectLinks(
       await snapshotAlgumonInventoryPage(page, response),
       site.id,
     );
+    if (result.status === "ok" && relayContext) {
+      await transferAlgumonRelaySession(context, relayContext);
+    }
     return {
       discoveryUrl,
       ...result,
@@ -9044,6 +9075,22 @@ async function collectAlgumonRedirectLinks(
   } finally {
     await context.close();
   }
+}
+
+async function transferAlgumonRelaySession(sourceContext, relayContext) {
+  const cookies = await sourceContext.cookies([
+    `${ALGUMON_ORIGIN}/n/d/1`,
+    `${ALGUMON_ORIGIN}/l/d/1`,
+  ]);
+  if (cookies.some((cookie) =>
+    !ALGUMON_HOSTNAMES.has(String(cookie.domain).replace(/^\./u, "")),
+  )) {
+    throw new Error("relay-contract-failure: discovery cookies escaped the exact Algumon origin");
+  }
+  // The private resolver context is not a user browser session. Keep only this
+  // source acquisition's cookies, in memory, without adding them to evidence.
+  await relayContext.clearCookies();
+  await relayContext.addCookies(cookies);
 }
 
 async function parseSignedRelayDestination(page, source, expectedDomain) {
@@ -9129,7 +9176,13 @@ function createAlgumonRelayResolver(
         maxRedirects: 0,
         maxRetries: 0,
         timeout: timeoutMs,
-        headers: { "cache-control": "no-store", pragma: "no-cache" },
+        headers: {
+          "cache-control": "no-store",
+          pragma: "no-cache",
+          referer: `${ALGUMON_ORIGIN}/n/deal?sites=${encodeURIComponent(
+            site.algumon_source ?? site.id.toUpperCase(),
+          )}`,
+        },
       }).then(async (response) => {
         const bytes = await response.body();
         return {
@@ -9398,6 +9451,9 @@ async function discoverLatestTargets(
   );
   let terminalSourceFailure = false;
   try {
+    // APIRequestContext does not pass through page routing. Prime only the exact
+    // relay host through the same public-address pinning used by browser requests.
+    await relaySession.approvePublicHost(new URL(ALGUMON_ORIGIN).hostname);
     for (const site of sites) {
       const record = {
         siteId: site.id,
@@ -9421,6 +9477,8 @@ async function discoverLatestTargets(
           timeoutMs,
           requestBudget,
           transitionBudget,
+          "site-discovery",
+          relaySession.context,
         );
         record.discoveryUrl = discovery.discoveryUrl;
         record.status = discovery.status;
@@ -9851,7 +9909,12 @@ function discoveryFailures(
   } else {
     const expectedLabels = ALGUMON_SOURCE_CONTRACTS.map((source) => source.label).sort();
     const observedLabels = [...(inventory.observedLabels ?? [])].sort();
-    if (canonicalJson(observedLabels) !== canonicalJson(expectedLabels)) {
+    // Current Algumon renders the picker only after loading interactive JS.
+    // Document-only collection intentionally avoids that extra source traffic;
+    // all configured sites still require their own validated filtered feed below.
+    const pickerUnavailable = inventory.sourceInventoryMode === "source-picker-unavailable" &&
+      observedLabels.length === 0;
+    if (!pickerUnavailable && canonicalJson(observedLabels) !== canonicalJson(expectedLabels)) {
       failures.push("Algumon global dropdown differs from the exact seven-source contract");
     }
   }
@@ -11463,6 +11526,7 @@ export {
   signedRelayAcquisitionEvidence,
   siteArticleIdentity,
   staticRuntimeConsistencyFailures,
+  transferAlgumonRelaySession,
   validateDiagnostics,
 };
 

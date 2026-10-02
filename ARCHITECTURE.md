@@ -10,7 +10,7 @@
 
 Runtime, content configuration, candidate discovery, release publication, and Windows deployment are separate bounded contexts. Canonical JSON and exact DTOs cross those boundaries; browser or infrastructure objects do not.
 
-Seven Algumon sources are exact and exhaustive: Clien, Ppomppu, Ruliweb, QuasarZone, Eomisae, ZOD, and Arca Live. Desktop and mobile contracts remain distinct proof profiles even when they share selectors.
+The configured Algumon source catalog contains seven identities: Clien, Ppomppu, Ruliweb, QuasarZone, Eomisae, ZOD, and Arca Live. Cloud collection checks this inventory explicitly. Desktop and mobile contracts remain distinct proof profiles even when they share selectors.
 
 ## Single runtime authority
 
@@ -30,22 +30,35 @@ No custom filter participates in locking, release, installation, update, or proo
 document-start
     |
     v
-  LOCKED -- exact seed + one projection --> VALIDATING -- atomic release --> ACTIVE
-    ^                                         |                            |
-    |                                         +-- missing / ambiguous -----+
-    +--------- URL / DOM / CSS / ownership / top-layer mutation -----------+
+  PREFLIGHT -- one complete projection --> VALIDATING -- atomic release --> ACTIVE
+      |                                       |                            |
+      +-- unresolved -------------------------+-- cannot retain content ---+
+      v
+  ORIGINAL CONTENT + STATIC NOISE FILTERING -- valid preflight --> VALIDATING
 ```
 
-`LOCKED` is the default and terminal error state.
+The bootstrap lock is temporary, never a terminal error presentation. Failed
+preflight restores the original content with static noise filtering inside the
+same Userscript. Preflight remains debounced and can activate a later complete
+projection. Runtime failures retain an intact verified projection when possible;
+otherwise they restore original content and remove the reader UI and lock.
 
 1. An inline `!important` bootstrap lock is claimed at `document-start`, before page paint.
 2. `GM_addElement` installs a nonce-bound runtime stylesheet that remains effective under strict CSP.
 3. A two-frame standalone cascade proof checks stylesheet identity, CSSOM, computed visibility, and an unowned adversarial probe. There is no external ExtendedCSS callback.
-4. Exactly one Content Contract must resolve one complete Projection.
-5. Releasing the bootstrap lock and forcing a full computed-style, top-layer, backdrop, and ownership scan occur in the same task. Any leak synchronously restores the lock before paint.
+4. The known layouts must resolve one distinct complete Projection. If they do not, bounded independent semantic discovery may resolve the current document instead; it does not edit the installed contract or publish an update.
+5. Releasing the bootstrap lock and forcing a full computed-style, top-layer, backdrop, and ownership scan occur in the same task. Containment failures cannot leave the article permanently hidden.
 6. Mutation, stylesheet, URL-change, shadow-root, animation-frame, and top-layer sentinels continuously revalidate the active document.
 
-`window.onurlchange` is the authoritative AdGuard SPA signal; native `hashchange` and wrapped History API events provide additional coverage. A different article identity or unknown route terminally locks the current document. The same document does not rediscover after a terminal failure.
+`window.onurlchange`, native `hashchange`/`popstate`, and a bounded URL poll
+revalidate the article identity. A different identity is not silently granted
+the previous article's projection authority. A valid retained projection may
+resume; an invalid projection returns to readable publisher content.
+
+Static recovery is not a successful zero-noise proof. It hides known structural
+noise without hiding matching title, purchase, body, or comment roots and their
+ancestors/descendants. Unknown noise can remain in recovery; diagnostics report
+`recovery`, not `ready`. No separate user filter is required.
 
 ## Original DOM preservation
 
@@ -53,21 +66,67 @@ The gate marks existing nodes; it does not clone, flatten, replace, or rewrite a
 
 Ancestor shells stay hidden. Only nonce-owned descendants become visible, and every unowned sibling remains suppressed. Direct ancestor text, pseudo-content, advertisements, sidebars, recommendations, headers, footers, and later injected widgets therefore stay unavailable.
 
-A comment mount is complete only when every meaningful descendant belongs to exactly one of:
+A known-layout resolution starts from the publisher's currently rendered page
+root, title, body, and comment mount. Hidden responsive copies and textless title
+decorations are not competing visible articles. A nonempty visible title within
+that unique structure is accepted even when it is one word, or when social
+metadata is missing or stale after an edit. Metadata disagreement alone is not
+a reason to hide a structurally identified article. Independent discovery of an
+unknown structure retains its separate title and structural evidence checks.
+
+Within the comment mount, nodes selected for preservation are classified as:
 
 - a preserved comment/reply item,
 - an approved comment control,
 - explicitly ignored comment chrome that remains hidden.
 
-One known comment plus one newly shaped reply is a failure, not an incomplete visible thread. Optional purchase information has exact zero-or-one or required cardinality; two candidates are ambiguity.
+Every observed loaded comment/reply must be accounted for; a real reply outside
+the selected item set is not silently omitted. Unrelated publisher children can
+remain unowned and hidden without disqualifying an otherwise complete article.
+The known-layout comment count comes from the loaded DOM, not from equality with
+a header, crawler snapshot, or aggregate total. Such totals may include deleted
+comments, hidden replies, or other pages. Native pagination and continuation
+controls are preserved, and permitted stable empty mounts are valid. The
+independent semantic and cloud discovery paths keep their own stricter evidence
+checks; these are not additional count requirements on a known-layout reader.
 
-## Algumon provenance
+Purchase information is resolved according to the layout's declared boundary
+and cardinality; genuinely competing purchase roots remain ambiguity. Original
+article links and product content are not rewritten into a separate reader copy.
 
-The Algumon source picker must contain the configured seven identities exactly once. Missing, duplicate, unknown, eighth, or contradictory identities produce no relay target and no candidate.
+## Runtime entry and cloud Algumon provenance
 
-On explicit activation of one exact signed `/l/d/<id>?v=<32-hex>&t=<13-digits>` relay, the script performs one credentialed same-origin fetch. It accepts only a 200 response whose inertly parsed document contains one whole-string redirect script and one anchor naming the same allowlisted HTTPS destination. Credentials, fragments, non-default ports, parser ambiguity, popup failure, or host mismatch fail closed with no secondary carrier.
+The installed script matches the seven destination sites, not Algumon. It does
+not intercept Algumon clicks, fetch signed relays, create a popup, attach a
+fragment seed, or make its own network requests. Normal navigation follows the
+publisher and Algumon links unchanged.
 
-The destination receives a bounded expiring fragment seed and removes it at `document-start`. Authorization requires agreement among seed site type, URL route, article identity, title core, article metadata, and the complete structural Projection. The seed contains no body, comments, account state, cookies, or tokens and is insufficient by itself.
+A registered hot-deal route with an article identity can start runtime discovery
+without an Algumon referrer, including direct visits and mobile redirects that
+drop the referrer. An unregistered route requires an exact HTTPS Algumon referrer
+before bounded discovery is attempted. Entry eligibility does not itself reveal
+the page: one complete projection and the rendering checks must still pass.
+
+Signed relay provenance is instead a **cloud collection and promotion** boundary
+in `scripts/audit_pages.mjs`. Collection reads server-rendered documents with
+page JavaScript blocked. A missing interactive source picker is recorded as
+`source-picker-unavailable`, not mistaken for a broken seven-source inventory.
+When a picker is present, its inventory is checked; either way, all seven
+configured sources require their own validated filtered feeds. Unknown or
+contradictory source identities are rejected.
+
+The collector accepts the current
+`/n/d/<id>?v=<32-hex>&t=<13-digits>&enc=v1.<base64url>.<base64url>.<base64url>`
+and the earlier `/l/d/<id>?v=<32-hex>&t=<13-digits>` relay forms. It records the
+response hash, destination, acquisition time, and profile landing. Only cookies
+from the ephemeral collection context are passed in memory to the private
+resolver; no user browser session is read, and cookies are not logged or included
+in evidence. A bounded successful relay response must name one accepted HTTPS
+destination consistently. Redirects are not followed: an HTTP 302 to an internal
+detail page, malformed content, ambiguity, or an out-of-site destination is
+rejected. These observations and audit-only seed data are evidence for the
+independent cloud oracle, not a fragment or authorization token required by an
+installed reader.
 
 ## Deterministic adaptation without AI
 
@@ -96,13 +155,18 @@ canonical relay acquisition time, not by refetching a signed relay later.
 Manual dispatch is allowed for an operator, but no workflow self-dispatches
 `watch-dom.yml`; remaining drift waits for the next bounded scheduled pass.
 
-The semantic oracle generates candidates only. Runtime never falls back to it.
+Runtime and cloud discovery have different purposes. When registered selectors
+do not resolve the page, runtime can call `resolveIndependentSemanticDocument`
+to obtain a bounded complete projection for that document. It neither contacts
+GitHub nor saves new selectors. The cloud audit runs the verified script's
+semantic discovery independently in an isolated execution world, adds the
+recorded source/profile evidence, and may propose a persistent contract update.
 
 The oracle explores bounded complete tuples `Projection(title, product?, body, comments)`. It rejects disconnected roles, multiple equally valid tuples, escaped comment items, body noise, unstable empty mounts, candidate-budget overflow, or ambiguous route wildcards.
 
 A candidate can be promoted only when:
 
-1. The current release failed closed with zero visible nodes and zero flash frames.
+1. The registered contract does not resolve an approved projection, the audit records a failed or previously unregistered route, and the independent proposal resolves exactly one candidate projection. A blank page or zero visible publisher content is not a prerequisite for discovery.
 2. `proofProfiles` equals `applicableProfiles` exactly.
 3. Each applicable desktop/mobile profile has at least three fresh-at-acquisition, distinct Algumon relay article proofs with the same semantic shape.
 4. New routes have at least three exact redirect-chain proofs and one delimiter-bounded wildcard contract.
@@ -111,7 +175,7 @@ A candidate can be promoted only when:
 7. The isolated draft and proven release bytes recompute exactly.
 8. The queue, result, evidence, and promotion objects satisfy their canonical digest-bound sealed schemas.
 
-One candidate failing or timing out cannot starve another matrix member. The aggregator rejects duplicate, missing, extra, out-of-batch, malformed, or hash-mismatched evidence and selects at most the first proven candidate in canonical order. Uncertainty can reduce availability, but cannot expose noise.
+One candidate failing or timing out cannot starve another matrix member. The aggregator rejects duplicate, missing, extra, out-of-batch, malformed, or hash-mismatched evidence and selects at most the first proven candidate in canonical order. A rejected candidate does not replace the public release. This promotion boundary is separate from runtime's content-first recovery, where unknown noise can remain visible and is not reported as a successful reader projection.
 
 ## Release and update contract
 
@@ -178,6 +242,6 @@ Normal deployment never calls legacy domain-scope migration, never disables User
 - **Hosting and CDN:** GitHub Pages HTTPS, monotonic preflight, live post-deploy byte attestation.
 - **CI/CD:** pinned Actions, fixed runner images, reproducible builds, serialized writers, exact head leases.
 - **Rate limiting:** bounded relay fetches, candidates, retries, screenshots, artifact bytes, and retention.
-- **Caching:** cache-busting release attestation; stale safe versions remain fail-closed.
+- **Caching:** cache-busting release attestation; the last fully verified release remains active until a replacement passes verification.
 - **Error tracking:** deterministic JSON evidence and drift issues without article/comment/account content.
-- **Availability and recovery:** uncertainty locks the page; rollback is a higher fully reverified release; local installation is transactional.
+- **Availability and recovery:** uncertain structure restores native article/comment readability with guarded static noise filtering, without claiming zero-noise coverage; rollback is a higher fully reverified release; local installation is transactional.

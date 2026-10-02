@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.81
-// @description  Fail-closed semantic reader gate for Algumon hot-deal destinations.
+// @version      0.6.91
+// @description  Content-preserving hot-deal reader with automatic noise filtering.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
 // @match        https://*.ruliweb.com/*
@@ -41,7 +41,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.6.73";
+  const GENERATOR_VERSION = "0.6.91";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -91,6 +91,7 @@
   const BOOTSTRAP_PUBLISHER_INLINE = new WeakMap();
   const MEASUREMENT_HTML_RESTORES = new WeakMap();
   const READER_UI = new WeakMap();
+  const RECOVERY_STYLES = new WeakMap();
   let measurementStyleSheetMutationDepth = 0;
   const CASCADE_PROOF_FRAMES = 2;
   const ALGUMON_HANDOFF_SETTLE_TIMEOUT_MS = 5_000;
@@ -127,6 +128,7 @@
     reflectApply: Reflect.apply,
     locationReplace: RUNTIME_GLOBAL?.Location?.prototype?.replace ?? null,
     anchorClick: RUNTIME_GLOBAL?.HTMLAnchorElement?.prototype?.click ?? null,
+    attachShadow: RUNTIME_GLOBAL?.Element?.prototype?.attachShadow ?? null,
   });
   const SHADOW_TRACKERS = new WeakMap();
 
@@ -716,6 +718,15 @@
   }
 
   function titleCoreEquivalence(referenceValue, candidateValue) {
+    if (exactPublisherTitleMatch(referenceValue, candidateValue)) {
+      const tokenCount = Math.max(1, distinctiveTitleTokens(referenceValue).length);
+      return Object.freeze({
+        ok: true, score: 1, mode: "exact-core",
+        matchedDistinctiveTokenCount: tokenCount,
+        referenceDistinctiveTokenCount: tokenCount,
+        protectedTokenAgreement: true,
+      });
+    }
     const referenceCore = normalizeText(stripBoundedTitleAffixes(referenceValue));
     const candidateCore = normalizeText(stripBoundedTitleAffixes(candidateValue));
     if (!referenceCore || !candidateCore) {
@@ -1733,6 +1744,9 @@
     const metadataValues = Array.from(element.attributes || [])
       .filter(function projectionMetadata(attribute) {
         const name = attribute.name.toLocaleLowerCase();
+        // Reader ownership contains "hotdeal" but is not publisher metadata.
+        // Feeding it back into noise detection hides legitimate linked content.
+        if (name.startsWith(HDF_ATTRIBUTE_PREFIX)) return false;
         return name.startsWith("aria-") || name.startsWith("data-") ||
           name === "title" || name === "name";
       })
@@ -1759,20 +1773,10 @@
     if ((element.attributes?.length || 0) > MAX_PROJECTION_METADATA_ATTRIBUTES) return true;
     const metadata = projectionNoiseMetadataText(element);
     if (STRONG_NOISE_TOKEN_PATTERN.test(metadata)) return true;
-    const relation = (element.getAttribute("rel") || "").split(/\s+/);
-    if (relation.some(function sponsored(token) {
-      return token.toLocaleLowerCase() === "sponsored";
-    })) {
-      return true;
-    }
     const resources = projectionResourceText(element);
-    if (
-      AD_NETWORK_RESOURCE_PATTERN.test(resources) ||
-      (
-        element.matches(LEAF_MEDIA_ELEMENTS) &&
-        STRONG_NOISE_TOKEN_PATTERN.test(normalizeProjectionTokenText(resources))
-      )
-    ) return true;
+    // An author's purchase link may legally use rel=sponsored, and uploaded
+    // product images may have names such as promo.jpg. Neither is page chrome.
+    if (AD_NETWORK_RESOURCE_PATTERN.test(resources)) return true;
     if (RELATED_NOISE_TOKEN_PATTERN.test(metadata)) {
       const interactiveSelector =
         "a[href], button, [role='link'], [role='button'], [role='menuitem']";
@@ -1910,7 +1914,26 @@
     return forward.ok || reverse.ok;
   }
 
-  function titleEvidence(document, algumonTitle, visibleTitle, jsonLdValue) {
+  function exactPublisherTitleMatch(visibleTitle, metadataTitle) {
+    const normalize = function normalizePublisherTitle(value) {
+      let text = String(value || "").normalize("NFKC").trim();
+      for (let count = 0; count < 3; count += 1) {
+        const suffix = text.match(TITLE_SITE_SUFFIX_PATTERN);
+        // Remove only a delimited publisher label, never a product word,
+        // model, price or shipping condition from this exact-match path.
+        if (!suffix || !/^\s*[-–—|｜:：]/u.test(suffix[0])) break;
+        text = text.slice(0, suffix.index).trim();
+      }
+      return text.toLocaleLowerCase().replace(/\s+/gu, " ").trim();
+    };
+    const visible = normalize(visibleTitle);
+    const metadata = normalize(metadataTitle);
+    // One character, one word, a number, or "무료" is a valid article title.
+    // Exact equality needs no fuzzy-match token or minimum-length threshold.
+    return Boolean(visible) && visible === metadata;
+  }
+
+  function titleEvidence(document, algumonTitle, visibleTitle, jsonLdValue, knownLayout) {
     const hasAlgumonTitle = Boolean(truncateRawTitle(algumonTitle, 300));
     const algumonCore = hasAlgumonTitle
       ? titleConsistency(algumonTitle, visibleTitle)
@@ -1929,15 +1952,16 @@
         visibleTitle,
         source.value,
       );
+      const exactPublisherTitle = exactPublisherTitleMatch(visibleTitle, source.value);
       const coreOk = (visibleToMetadata.ok && metadataToVisible.ok) ||
-        punctuationInvariant;
+        punctuationInvariant || exactPublisherTitle;
       const singleOk = visibleSingle.ok && metadataSingle.ok;
       const matchedCoreRatio = visibleToMetadata.referenceDistinctiveTokenCount
         ? visibleToMetadata.matchedDistinctiveTokenCount /
           visibleToMetadata.referenceDistinctiveTokenCount
         : 0;
       const conflictsWithVisibleArticle =
-        !punctuationInvariant && (
+        !punctuationInvariant && !exactPublisherTitle && (
           visibleToMetadata.protectedTokenAgreement !== true ||
           matchedCoreRatio < 0.5
         );
@@ -1946,6 +1970,7 @@
         ok: coreOk || singleOk,
         conflictsWithVisibleArticle,
         punctuationInvariant,
+        exactPublisherTitle,
         boundedCommerceFormatting: boundedMetadataCommerceFormattingMatch(
           visibleTitle,
           source.value,
@@ -1953,7 +1978,9 @@
         score: coreOk || singleOk
           ? 1
           : Number(Math.min(visibleToMetadata.score, metadataToVisible.score).toFixed(3)),
-        mode: punctuationInvariant
+        mode: exactPublisherTitle
+          ? "exact-publisher-title"
+          : punctuationInvariant
           ? "punctuation-invariant-consensus"
           : singleOk
             ? "single-long-token-consensus"
@@ -1982,7 +2009,8 @@
     const metadataOk = metadata.ok &&
       authoritativeMatches.length > 0 &&
       !metadataComparisons.some(effectiveMetadataConflict);
-    const ok = (!hasAlgumonTitle || algumon.ok) && metadataOk;
+    const structuralTitle = knownLayout === true && Boolean(normalizeText(visibleTitle));
+    const ok = structuralTitle || ((!hasAlgumonTitle || algumon.ok) && metadataOk);
     return Object.freeze({
       ok,
       score: ok
@@ -1995,7 +2023,9 @@
                 }))
               : 0,
           ).toFixed(3)),
-      mode: ok
+      mode: structuralTitle
+        ? "known-layout-visible-title"
+        : ok
         ? hasAlgumonTitle
           ? `algumon-${algumon.mode}+metadata-consensus`
           : "algumon-referrer+metadata-consensus"
@@ -2008,8 +2038,10 @@
             }`,
       algumon,
       metadata: Object.freeze({
-        ok: metadataOk,
-        reason: metadataOk
+        ok: structuralTitle || metadataOk,
+        reason: structuralTitle
+          ? "optional-publisher-metadata"
+          : metadataOk
           ? "authoritative-quorum"
           : metadataComparisons.some(effectiveMetadataConflict)
             ? "article-conflict"
@@ -2049,7 +2081,7 @@
     return sources;
   }
 
-  function approvedVisibleTitle(document, seedTitle, titleNode, jsonLd) {
+  function approvedVisibleTitle(document, seedTitle, titleNode, jsonLd, knownLayout) {
     const directText = truncateRawTitle(
       Array.from(titleNode.childNodes)
         .filter(function directTitleText(node) { return node.nodeType === 3; })
@@ -2068,7 +2100,7 @@
         return truncateRawTitle(element.textContent, 320);
       });
     const candidates = [directText, wholeText].concat(leafTexts)
-      .filter(function plausibleTitleText(value) { return value.length >= 4; })
+      .filter(function plausibleTitleText(value) { return Boolean(value); })
       .filter(function uniqueTitleText(value, index, values) {
         return values.indexOf(value) === index;
       });
@@ -2078,6 +2110,15 @@
       return candidate.evidence.ok === true;
     });
     if (!approved.length) {
+      if (knownLayout === true && candidates.length) {
+        // The configured title belongs to the uniquely resolved article, not
+        // to a search result. Social metadata and aggregator copies can be
+        // absent or stale after an author edits the original post.
+        const text = wholeText;
+        return Object.freeze({ ok: true, text, evidence: titleEvidence(
+          document, seedTitle, text, jsonLd, true,
+        ) });
+      }
       return Object.freeze({ ok: false, text: wholeText, evidence: titleEvidence(
         document,
         seedTitle,
@@ -2122,7 +2163,7 @@
         ) {
           const text = truncateRawTitle(current.node.textContent, 320);
           if (
-            text.length >= 4 &&
+            text.length > 0 &&
             text.length <= 300 &&
             titleEvidence(document, seed.title, text, jsonLd).ok === true
           ) {
@@ -2177,15 +2218,12 @@
     }
     if (element.matches(LEAF_MEDIA_ELEMENTS)) {
       const tagName = element.tagName.toLocaleLowerCase();
-      const resourceTokens = ["src", "srcset", "data-src", "data-srcset", "poster", "href"]
-        .map(function mediaResource(attribute) { return element.getAttribute(attribute) || ""; })
-        .join(" ")
-        .replace(/[^a-z0-9가-힣ぁ-んァ-ン一-龥_-]+/gi, " ");
-      const mediaTokens = `${semanticTokenText(element)} ${resourceTokens}`;
+      const mediaTokens = semanticTokenText(element);
       if (MEDIA_NOISE_TOKEN_PATTERN.test(mediaTokens)) return true;
       if (tagName !== "img" && NOISE_TOKEN_PATTERN.test(mediaTokens)) return true;
       return false;
     }
+    if (isNativeContinuationNavigation(element)) return false;
     if (element.matches(STRUCTURAL_NOISE_ELEMENTS)) {
       return !containsSubstantialArticleContent(element);
     }
@@ -2271,15 +2309,10 @@
   function isAutonomousProjectionNoiseRoot(element) {
     const metadata = projectionNoiseMetadataText(element);
     const resources = projectionResourceText(element);
-    const relation = (element.getAttribute("rel") || "")
-      .split(/\s+/)
-      .map(function canonicalRelation(token) { return token.toLocaleLowerCase(); });
-    if (
-      AD_NETWORK_RESOURCE_PATTERN.test(resources) ||
-      relation.includes("sponsored")
-    ) {
+    if (AD_NETWORK_RESOURCE_PATTERN.test(resources)) {
       return true;
     }
+    if (isNativeContinuationNavigation(element)) return false;
     const strongMetadataSignal =
       STRONG_NOISE_TOKEN_PATTERN.test(metadata) ||
       RELATED_NOISE_TOKEN_PATTERN.test(metadata);
@@ -2334,10 +2367,7 @@
       ((directLabel || metadataSignal || ancillarySignal || resourceLinkCount > 0) &&
         interactiveCount >= 1);
     const mediaNoiseSignal = element.matches(LEAF_MEDIA_ELEMENTS) &&
-      (
-        MEDIA_NOISE_TOKEN_PATTERN.test(metadata) ||
-        MEDIA_NOISE_TOKEN_PATTERN.test(normalizeProjectionTokenText(resources))
-      );
+      MEDIA_NOISE_TOKEN_PATTERN.test(metadata);
     const signalCount = Number(metadataSignal) +
       Number(directLabel) +
       Number(resourceLinkCount > 0) +
@@ -2698,9 +2728,8 @@
       !(allowStableZeroAreaMount && isStableZeroAreaCommentMount(commentMount))
     ) return true;
     if (commentItems.some(function unsafeCommentItem(item) {
-      return !isRendered(item) ||
-        containsUnprovenShadowBoundary(item, []) ||
-        containsPublisherPaintRisk(item, []);
+      return containsUnprovenShadowBoundary(item, []) ||
+        (isRendered(item) && containsPublisherPaintRisk(item, []));
     })) {
       return true;
     }
@@ -2740,7 +2769,7 @@
     );
     if (
       !isRendered(element) ||
-      text.length < 4 ||
+      text.length === 0 ||
       text.length > 300
     ) {
       evaluation.disqualified = true;
@@ -3697,7 +3726,7 @@
     if (!COMMENT_TOKEN_PATTERN.test(semanticTokenText(mount))) return [];
     const items = Array.from(mount.children).filter(function explicitSingularItem(item) {
       return hasSingularSemanticCommentIdentity(item) &&
-        isRendered(item) && normalizeText(item.textContent).length > 0 &&
+        isRendered(item) && hasApprovedContent(item) &&
         parseVisibleCommentTotal(item.textContent) === null &&
         !isFormOnlyCommentEvidenceSurface(item) &&
         !isCommentContinuationControl(item) &&
@@ -3945,8 +3974,15 @@
 
   function collectExactDocumentCommentEvidence(document, layout, bodyNode, seed, jsonLd) {
     const layouts = [layout];
-    const explicitEvidence = explicitCommentEvidence(document, layouts);
-    if (!explicitEvidence.ok) return explicitEvidence;
+    const collectedExplicitEvidence = explicitCommentEvidence(document, layouts);
+    if (!collectedExplicitEvidence.ok) return collectedExplicitEvidence;
+    // Off-screen responsive templates are not a second visible comment set.
+    const visibleExplicitItems = collectedExplicitEvidence.elements.filter(isRendered);
+    const explicitEvidence = Object.freeze({
+      ...collectedExplicitEvidence,
+      count: visibleExplicitItems.length,
+      elements: Object.freeze(visibleExplicitItems),
+    });
     const mountHints = roleHints(layouts, "comments");
     const itemHints = roleHints(layouts, "commentItems");
     const controlHints = roleHints(layouts, "commentControls");
@@ -4069,6 +4105,16 @@
 
   function hasVisibleCommentContinuationControl(commentControls) {
     return commentControls.some(isCommentContinuationControl);
+  }
+
+  function isNativeContinuationNavigation(element) {
+    // A comment pager is often a <nav>. Its native tag must not turn an
+    // already classified read/reply control into a sidebar or ad panel.
+    return element.matches("nav, [role='navigation']") &&
+      isCommentContinuationControl(element) &&
+      !STRONG_NOISE_TOKEN_PATTERN.test(projectionNoiseMetadataText(element)) &&
+      !directAutonomousNoiseLabel(element) &&
+      !AD_NETWORK_RESOURCE_PATTERN.test(projectionResourceText(element));
   }
 
   function visibleCommentTotalEvidence(commentMount, boundaryRoot, excludedRoots) {
@@ -4969,6 +5015,7 @@
 
   function projectedTitleLeaves(titleNode, resolvedTitle) {
     const resolvedCore = normalizeText(stripBoundedTitleAffixes(resolvedTitle));
+    const resolvedText = normalizeText(resolvedTitle);
     return Array.from(titleNode.querySelectorAll("span, strong, b, em, a, div"))
       .filter(function titleTextLeaf(element) {
         if (TITLE_METADATA_PATTERN.test(semanticTokenText(element))) {
@@ -4984,7 +5031,7 @@
         ) {
           return false;
         }
-        if (textSimilarity(text, resolvedTitle) >= 0.54) {
+        if (resolvedText.includes(text) || textSimilarity(text, resolvedTitle) >= 0.54) {
           return true;
         }
         if (
@@ -5205,6 +5252,8 @@
     const html = document.documentElement;
     let restored = true;
     try {
+      READER_UI.get(document)?.root.remove();
+      READER_UI.delete(document);
       if (styleElement?.isConnected) {
         try {
           styleElement.remove();
@@ -5379,6 +5428,10 @@
     roles.commentItems.forEach(function markInitialCommentItem(item) {
       markDeepSubtree(item, "comment-item", ownedElements, nonce);
       markAncestorChain(item, ownedElements, nonce, shellElements);
+      item.classList.toggle(
+        roleClass("comment-dormant"),
+        (roles.commentDormantItems || []).includes(item),
+      );
     });
     roles.commentControls.forEach(function markInitialCommentControl(control) {
       markDeepSubtree(control, "comment-control", ownedElements, nonce);
@@ -5465,14 +5518,33 @@
     return state;
   }
 
+  function readerUiThemeStyle(document, content) {
+    // Some dark sites leave body text dark and theme only the article subtree.
+    // Read that original subtree, never the toolbar's own inherited colour.
+    let color = "inherit";
+    try {
+      color = document.defaultView.getComputedStyle(content).color || color;
+    } catch (_) { /* Keep navigation usable when publisher style access fails. */ }
+    return `--hdf-reader-text: ${color} !important;`;
+  }
+
   function createReaderUi(document, roles) {
     const previous = READER_UI.get(document);
     if (previous) previous.root.remove();
     const root = document.createElement("nav");
     root.setAttribute("aria-label", "핫딜 읽기 도구");
+    root.setAttribute("style", readerUiThemeStyle(document, roles.body));
+    // Reserve the host before publisher code can replace its rendered children.
+    if (typeof NATIVE.attachShadow === "function") {
+      const shadow = NATIVE.reflectApply(NATIVE.attachShadow, root, [{ mode: "closed" }]);
+      shadow.appendChild(document.createElement("slot"));
+    }
+    const articleStart = roles.product &&
+      (roles.product.compareDocumentPosition(roles.body) & 4)
+      ? roles.product : roles.body;
     const links = [
       ["알구몬으로 돌아가기", "https://www.algumon.com/", null],
-      ["본문", "#", roles.body],
+      ["본문", "#", articleStart],
       ["댓글", "#", roles.comments],
     ].map(function createReaderLink([label, href, destination]) {
       const link = document.createElement(destination ? "button" : "a");
@@ -5501,6 +5573,7 @@
     document.body.prepend(root);
     const ui = Object.freeze({
       root,
+      colorSource: roles.body,
       links: Object.freeze(links),
       elements: new Set([root, ...links.map(function uiLink(entry) { return entry.link; })]),
       nodes: new Set([root, ...links.flatMap(function uiNodes(entry) {
@@ -5532,7 +5605,10 @@
         exactAttribute(element, name, value);
       });
     };
-    restoreElement(ui.root, [["aria-label", "핫딜 읽기 도구"]]);
+    restoreElement(ui.root, [
+      ["aria-label", "핫딜 읽기 도구"],
+      ["style", readerUiThemeStyle(document, ui.colorSource)],
+    ]);
     ui.links.forEach(function restoreOriginalUiLink(entry) {
       restoreElement(entry.link, [[entry.actionAttribute, entry.actionValue]]);
       if (entry.text.data !== entry.label) entry.text.data = entry.label;
@@ -5546,7 +5622,7 @@
         })) {
       ui.root.replaceChildren(...ui.links.map(function originalUiLink(entry) { return entry.link; }));
     }
-    if (ui.root.parentElement !== document.body || document.body.firstChild !== ui.root) {
+    if (ui.root.parentElement !== document.body) {
       document.body.prepend(ui.root);
     }
   }
@@ -5593,7 +5669,11 @@
     const currentItems = uniqueElements(queryAllSafe(
       state.roles.comments,
       state.commentItemSelectors,
-    ));
+    ).concat(Array.from(state.commentItemRoots).filter(function retainedOriginalItem(item) {
+      // A publisher may rename its row class while retaining the exact reply.
+      // Use the same accepted node identities as the projection verifier.
+      return item.isConnected && state.roles.comments.contains(item);
+    })));
     const expectedCount = state.acceptedCommentCount + addedItemCount;
     if (
       currentItems.length !== expectedCount ||
@@ -5846,7 +5926,7 @@
     const currentProducts = uniqueElements(queryAllSafe(
       state.commonRoot,
       state.projectionPolicy.productSelectors,
-    ));
+    )).filter(isRendered);
     if (
       (state.projectionPolicy.productCardinality === "zero" && currentProducts.length !== 0) ||
       (state.projectionPolicy.productCardinality === "required" &&
@@ -5945,13 +6025,8 @@
     });
     if (
       ignoredOverlap ||
-      hasUnclassifiedCommentContent(
-        state.roles.comments,
-        currentCommentItems.concat(currentCommentControls, currentCommentIgnored)
-      ) ||
       currentCommentItems.some(function unownedItem(item) {
-        return !isRendered(item) ||
-          !state.ownedElements.has(item) ||
+        return !state.ownedElements.has(item) ||
           item.getAttribute(ATTR.role) !== "comment-item";
       }) ||
       currentCommentControls.some(function unownedControl(control) {
@@ -6015,9 +6090,13 @@
       `[${ATTR.status}="ready"]`;
     const owned = `.${CLASS.keep}[${ATTR.keep}="${nonce}"]`;
     const shell = `.${CLASS.shell}[${ATTR.shell}="${nonce}"]`;
-    const dormantControl = `${owned}.${roleClass("comment-control")}` +
-      `[${ATTR.role}="comment-control"].${roleClass("comment-dormant")}`;
+    // Match the visible role rule's specificity so native hidden items and
+    // controls remain hidden even when their publisher uses visibility:hidden.
+    const dormantControl = `${owned}[${ATTR.role}].${roleClass("comment-dormant")}`;
     const releaseProbe = `[data-hdf-v2-release-probe="${nonce}"]`;
+    const ruliwebCommentTable = `${readyRoot} .comment_view.normal > table.comment_table${owned}`;
+    const ruliwebCommentRow = `${ruliwebCommentTable} > tbody > tr.comment_element${owned}` +
+      `[${ATTR.role}="comment-item"]:not([hidden]):not(.${roleClass("comment-dormant")})`;
     return [
       lockRule,
       `${readyRoot} { visibility: visible !important; }`,
@@ -6026,6 +6105,7 @@
         `${readyRoot} body::before, ${readyRoot} body::after { ` +
         `content: none !important; display: none !important; background: none !important; }`,
       `${readyRoot} body *:not(${owned}) { display: none !important; }`,
+      `${readyRoot} > :not(head):not(body) { display: none !important; }`,
       `${readyRoot} ${releaseProbe} { ` +
         `--hdf-v2-cascade-proof: ${nonce} !important; ` +
         `display: none !important; visibility: hidden !important; ` +
@@ -6049,27 +6129,43 @@
       `${readyRoot} body ${owned}${shell} { min-width: 0 !important; max-width: 100% !important; }`,
       `${readyRoot} ${owned}.${roleClass("body")}, ` +
         `${readyRoot} ${owned}.${roleClass("product")} { overflow-wrap: anywhere !important; }`,
+      // The toolbar follows the original article's text colour and only uses
+      // neutral translucent greys, so it suits both light and dark sites.
       `${readyRoot} ${owned}.${roleClass("reader-ui")}[${ATTR.role}="reader-ui"] { ` +
-        `display: flex !important; flex-wrap: wrap !important; gap: 8px !important; ` +
-        `position: static !important; float: none !important; width: auto !important; ` +
-        `margin: 0 0 20px !important; padding: 10px 0 !important; ` +
-        `border: 0 !important; border-bottom: 1px solid #d7dce2 !important; ` +
-        `background: transparent !important; box-shadow: none !important; }`,
+        `display: flex !important; flex-wrap: wrap !important; align-items: center !important; ` +
+        `gap: 6px !important; position: static !important; float: none !important; ` +
+        `width: auto !important; margin: 0 0 12px !important; padding: 0 !important; ` +
+        `height: auto !important; min-height: 0 !important; max-height: none !important; ` +
+        `overflow: visible !important; opacity: 1 !important; transform: none !important; ` +
+        `filter: none !important; clip-path: none !important; contain: none !important; ` +
+        `border: 0 !important; ` +
+        `color: var(--hdf-reader-text, inherit) !important; background: transparent !important; box-shadow: none !important; }`,
       `${readyRoot} ${owned}.${roleClass("reader-ui")} > ${owned} { ` +
-        `display: inline-flex !important; align-items: center !important; position: static !important; ` +
-        `float: none !important; min-height: 40px !important; margin: 0 !important; ` +
-        `padding: 0 12px !important; border: 1px solid #c9d2de !important; ` +
-        `border-radius: 6px !important; color: #164b80 !important; background: #f3f7fb !important; ` +
-        `font: 600 14px/1.4 system-ui, sans-serif !important; text-decoration: none !important; ` +
-        `white-space: nowrap !important; cursor: pointer !important; }`,
+        `display: inline-flex !important; align-items: center !important; justify-content: center !important; ` +
+        `box-sizing: border-box !important; position: static !important; float: none !important; ` +
+        `min-width: 0 !important; min-height: 32px !important; margin: 0 !important; ` +
+        `padding: 0 10px !important; border: 1px solid rgba(128, 128, 128, 0.35) !important; ` +
+        `border-radius: 6px !important; color: inherit !important; background: transparent !important; ` +
+        `box-shadow: none !important; -webkit-appearance: none !important; appearance: none !important; ` +
+        `font-family: inherit !important; font-size: 13px !important; font-weight: 500 !important; ` +
+        `font-style: normal !important; line-height: 1.2 !important; letter-spacing: 0 !important; ` +
+        `text-transform: none !important; text-decoration: none !important; ` +
+        `white-space: nowrap !important; opacity: 1 !important; cursor: pointer !important; }`,
+      `@media (hover: hover) { ${readyRoot} ${owned}.${roleClass("reader-ui")} > ${owned}:hover { ` +
+        `background: rgba(128, 128, 128, 0.14) !important; } }`,
       `${readyRoot} ${owned}.${roleClass("reader-ui")} > ${owned}:focus-visible { ` +
-        `outline: 2px solid #164b80 !important; outline-offset: 2px !important; }`,
+        `opacity: 1 !important; outline: 2px solid currentColor !important; outline-offset: 2px !important; }`,
+      `@media (pointer: coarse) { ` +
+        `${readyRoot} ${owned}.${roleClass("reader-ui")} > ${owned} { ` +
+        `min-height: 44px !important; padding: 0 14px !important; } }`,
       `${readyRoot} ${owned}.${roleClass("reader-ui")}::before, ` +
         `${readyRoot} ${owned}.${roleClass("reader-ui")}::after, ` +
         `${readyRoot} ${owned}.${roleClass("reader-ui")} > ${owned}::before, ` +
         `${readyRoot} ${owned}.${roleClass("reader-ui")} > ${owned}::after { ` +
         `display: none !important; content: none !important; }`,
       `@media (max-width: 720px) {`,
+      `${readyRoot} body { padding: 8px 12px !important; }`,
+      `${readyRoot} body ${owned}${shell}:not(.${CLASS.deep}) { padding-inline: 0 !important; }`,
       `${readyRoot}, ${readyRoot} body { ` +
         `box-sizing: border-box !important; width: 100% !important; ` +
         `min-width: 0 !important; max-width: 100% !important; ` +
@@ -6098,6 +6194,28 @@
         `${readyRoot} body ${owned}.${CLASS.deep}[${ATTR.deep}] video,` +
         `${readyRoot} body ${owned}.${CLASS.deep}[${ATTR.deep}] iframe { ` +
         `max-width: 100% !important; height: auto !important; }`,
+      // Ruliweb's desktop table reserves 165px + 125px beside every comment.
+      // Reflow only its accepted rows on narrow screens, retaining all native
+      // nodes and the publisher's closed reply forms and dormant rows.
+      `${ruliwebCommentTable}:not([hidden]), ${ruliwebCommentTable} > tbody:not([hidden]) { ` +
+        `display: block !important; width: 100% !important; box-sizing: border-box !important; }`,
+      `${ruliwebCommentRow} { display: grid !important; grid-template-columns: minmax(0, 1fr) !important; ` +
+        `gap: 6px !important; width: 100% !important; box-sizing: border-box !important; padding: 12px 0 !important; }`,
+      `${ruliwebCommentRow}.child { padding-left: 12px !important; }`,
+      `${ruliwebCommentRow} > td.user, ${ruliwebCommentRow} > td.comment, ` +
+        `${ruliwebCommentRow} > td.parent_control_box_wrapper { display: block !important; ` +
+        `width: 100% !important; min-width: 0 !important; max-width: 100% !important; ` +
+        `box-sizing: border-box !important; padding: 0 !important; }`,
+      `${ruliwebCommentRow} .user_inner_wrapper, ${ruliwebCommentRow} .user_info_wrapper, ` +
+        `${ruliwebCommentRow} > td.comment > .text_wrapper { width: 100% !important; min-width: 0 !important; ` +
+        `max-width: 100% !important; float: none !important; box-sizing: border-box !important; }`,
+      `${ruliwebCommentRow} > td.comment > .text_wrapper > .text { ` +
+        `display: block !important; white-space: pre-wrap !important; overflow-wrap: anywhere !important; word-break: normal !important; }`,
+      `${ruliwebCommentRow} > td.parent_control_box_wrapper > .control_box { ` +
+        `display: flex !important; flex-wrap: wrap !important; align-items: center !important; gap: 6px !important; ` +
+        `float: none !important; position: static !important; width: auto !important; padding-top: 0 !important; }`,
+      `${ruliwebCommentRow} > td.parent_control_box_wrapper > .control_box > .time { ` +
+        `position: static !important; float: none !important; margin-right: auto !important; }`,
       `}`,
     ].join("\n");
   }
@@ -6152,6 +6270,56 @@
     }
   }
 
+  function removeStaticRecoveryStyle(document) {
+    RECOVERY_STYLES.get(document)?.remove();
+    RECOVERY_STYLES.delete(document);
+  }
+
+  function staticRecoveryStyleText(contract) {
+    const protectedSelectors = Array.from(new Set(contract.layouts.flatMap(layout =>
+      ["title", "product", "body", "comments", "commentControls"]
+        .flatMap(role => layout.hints[role] || []),
+    )));
+    const protectedRoots = `:is(${protectedSelectors.join(",")})`;
+    const noise = "aside,nav,footer,[role='navigation'],[role='complementary']," +
+      "[role='banner'],.sidebar,.included-article-list,.article-list,.popular-posts," +
+      ".recommended-posts,.related-posts,.ranking,.best-comment-wrap,#hot-comment-preview," +
+      "ins.adsbygoogle,[id^='google_ads_iframe']";
+    // Never hide an article/comment root, its ancestors or its descendants.
+    // This CSS-only recovery keeps native content and event handlers intact.
+    const guardedNoise = `html body :is(${noise}):not(${protectedRoots})` +
+      `:not(${protectedRoots} *):not(:has(${protectedRoots}))`;
+    return publisherVisualRecoveryStyleText() + "\n" +
+      `${guardedNoise}, html > :not(head):not(body) { display: none !important; }`;
+  }
+
+  function restoreReaderContent(browserRoot, contract, reason, styleElement, bootstrapLock) {
+    const document = browserRoot.document;
+    restorePublisherPage(document, styleElement, bootstrapLock);
+    const textContent = staticRecoveryStyleText(contract);
+    let style = RECOVERY_STYLES.get(document);
+    if (!style?.isConnected || style.textContent !== textContent) {
+      style?.remove();
+      const parent = document.head || document.documentElement;
+      try {
+        style = typeof GM_addElement === "function"
+          ? GM_addElement(parent, "style", { textContent }) : null;
+      } catch (_error) {
+        style = null;
+      }
+      if (!style?.isConnected) {
+        style = document.createElement("style");
+        style.textContent = textContent;
+        parent.appendChild(style);
+      }
+      RECOVERY_STYLES.set(document, style);
+    }
+    publishDiagnostics(browserRoot, {
+      state: "recovery",
+      targetReason: `static-${reason || "unresolved"}`,
+    });
+  }
+
   function writeRuntimeGateStyle(styleElement, nonce, runtime) {
     const expectedText = gateStyleText(nonce);
     styleElement.textContent = expectedText;
@@ -6204,7 +6372,9 @@
   }
 
   function currentVisibleProjectionLeakCount(document, state) {
-    const elements = Array.from(document.body?.querySelectorAll("*") || []);
+    const outsideBody = Array.from(document.documentElement?.children || [])
+      .filter(element => element !== document.head && element !== document.body);
+    const elements = outsideBody.concat(Array.from(document.body?.querySelectorAll("*") || []));
     if (elements.length > MAX_SEMANTIC_DESCENDANTS) {
       return elements.length;
     }
@@ -6246,7 +6416,7 @@
 
   function hasApprovedContent(element) {
     return normalizeText(element.textContent).length > 0 ||
-      Boolean(element.querySelector("img, picture, video, iframe, table, a[href]"));
+      Boolean(element.querySelector("img, picture, video, audio, iframe, object, embed, svg, canvas, table, a[href]"));
   }
 
   function hasApprovedContentOutside(element, excludedRoots) {
@@ -6259,7 +6429,7 @@
       if (inspected > MAX_SEMANTIC_DESCENDANTS) return false;
       if (node.nodeType === 3 && normalizeText(node.data)) return true;
       if (node.nodeType !== 1 || insideAnyRoot(node, exclusions)) continue;
-      if (node.matches("img, picture, video, iframe, table, a[href]")) return true;
+      if (node.matches("img, picture, video, audio, iframe, object, embed, svg, canvas, table, a[href]")) return true;
       for (let index = node.childNodes.length - 1; index >= 0; index -= 1) {
         stack.push(node.childNodes[index]);
       }
@@ -6404,21 +6574,23 @@
   }
 
   function resolveApprovedLayoutWithPublisherStyles(document, layout, seed) {
-    const pageRoots = uniqueElements(queryAllSafe(document, [layout.pageRoot]));
+    const pageRoots = uniqueElements(queryAllSafe(document, [layout.pageRoot])).filter(isRendered);
     if (pageRoots.length !== 1) {
       return { ok: false, role: "page-root", reason: "cardinality" };
     }
     const pageRoot = pageRoots[0];
-    const titleCandidates = uniqueElements(queryAllSafe(pageRoot, layout.hints.title || []));
+    const titleCandidates = uniqueElements(queryAllSafe(pageRoot, layout.hints.title || []))
+      .filter(function hasTitleText(candidate) {
+        // Publishers also reuse title classes for textless decorative icons.
+        // These are not competing headings and remain outside the projection.
+        return isRendered(candidate) && Boolean(normalizeText(candidate.textContent));
+      });
     if (titleCandidates.length !== 1 || !isRendered(titleCandidates[0]) || !normalizeText(titleCandidates[0].textContent)) {
       return { ok: false, role: "title", reason: "approved-structure" };
     }
     const titleNode = titleCandidates[0];
-    const visibleTitle = approvedVisibleTitle(document, seed?.title || null, titleNode);
+    const visibleTitle = approvedVisibleTitle(document, seed?.title || null, titleNode, null, true);
     const seedTitleEvidence = visibleTitle.evidence;
-    if (seed && !seedTitleEvidence.algumon.ok) {
-      return { ok: false, role: "seed", reason: "title-mismatch" };
-    }
     if (!visibleTitle.ok || !seedTitleEvidence.metadata.ok) {
       return { ok: false, role: "title", reason: "metadata-mismatch" };
     }
@@ -6437,7 +6609,7 @@
       return { ok: false, role: "title", reason: "publisher-paint" };
     }
 
-    const bodyCandidates = uniqueElements(queryAllSafe(pageRoot, layout.hints.body || []));
+    const bodyCandidates = uniqueElements(queryAllSafe(pageRoot, layout.hints.body || [])).filter(isRendered);
     if (bodyCandidates.length !== 1 || !isRendered(bodyCandidates[0])) {
       return { ok: false, role: "body", reason: "approved-structure" };
     }
@@ -6492,7 +6664,7 @@
     const productCandidates = uniqueElements(queryAllSafe(
       pageRoot,
       roleProjection.product.selectors || [],
-    ));
+    )).filter(isRendered);
     if (
       (productCardinality === "zero" && productCandidates.length !== 0) ||
       (productCardinality === "required" && productCandidates.length !== 1) ||
@@ -6548,7 +6720,12 @@
     const itemHints = layout.hints.commentItems || [];
     const controlHints = layout.hints.commentControls || [];
     const ignoredHints = layout.hints.commentIgnored || [];
-    const commentCandidates = uniqueElements(queryAllSafe(pageRoot, commentHints));
+    const commentCandidates = uniqueElements(queryAllSafe(pageRoot, commentHints))
+      .filter(function availableCommentMount(candidate) {
+        return isRendered(candidate) || (
+          layout.allowEmptyComments === true && isStableZeroAreaCommentMount(candidate)
+        );
+      });
     const nestedCommentCandidates = commentCandidates.filter(
       function uniqueInnermostCommentMount(candidate) {
         return commentCandidates.every(function candidateContainsSelected(other) {
@@ -6595,9 +6772,9 @@
     const commentDormantControls = commentControls.filter(
       function dormantInitialControl(control) { return !isRendered(control); }
     );
-    if (commentItems.some(function hiddenInitialItem(item) { return !isRendered(item); })) {
-      return { ok: false, role: "comments", reason: "classified-rendering" };
-    }
+    const commentDormantItems = commentItems.filter(
+      function hiddenInitialItem(item) { return !isRendered(item); }
+    );
     const classificationOverlap = commentIgnored.some(function overlapsIgnored(ignored) {
       return commentItems.concat(commentControls).some(function overlapsVisible(visible) {
         return ignored === visible || ignored.contains(visible) || visible.contains(ignored);
@@ -6618,12 +6795,8 @@
     }
     const classifiedCommentRoots = commentItems.concat(commentControls, commentIgnored);
     const commentJsonLd = collectJsonLd(document);
-    const seedCommentCount = Number.isInteger(seed?.commentCount) ? seed.commentCount : null;
-    const metadataCommentCount = Number.isInteger(commentJsonLd.commentCount)
-      ? commentJsonLd.commentCount
-      : null;
-    let provenCommentCount = null;
-    let provenCommentCountSource = null;
+    let provenCommentCount = commentItems.length;
+    let provenCommentCountSource = "exact-dom-observed";
     const documentCommentEvidence = collectExactDocumentCommentEvidence(
       document,
       layout,
@@ -6663,9 +6836,10 @@
     if (invalidCommentEvidence) {
       return { ok: false, role: "comments", reason: "evidence-outside-items" };
     }
-    if (hasUnclassifiedCommentContent(commentMount, classifiedCommentRoots)) {
-      return { ok: false, role: "comments", reason: "unclassified-comment-content" };
-    }
+    // Only the proven items and controls receive paint authority. Other
+    // publisher children remain unowned; their presence must not blank an
+    // otherwise complete article. The evidence check above still rejects
+    // actual loaded comments missing from the selected item set.
     const visibleCommentTotal = visibleCommentTotalEvidence(
       commentMount,
       pageRoot,
@@ -6673,68 +6847,13 @@
       // Exclude item text and noise, not the real "comments 0" header.
       commentItems.concat(commentIgnored),
     );
-    if (!visibleCommentTotal.ok) {
-      return { ok: false, role: "comments", reason: "count-evidence-conflict" };
-    }
-    const knownCommentTotal = visibleCommentTotal.count !== null ||
-      seedCommentCount !== null || metadataCommentCount !== null;
-    if (
-      knownCommentTotal &&
-      hasVisibleCommentContinuationControl(commentControls)
-    ) {
-      // Pagination and collapsed reply controls are part of the publisher's
-      // comment UI, not a reason to hide an otherwise verified article.
-      // Every currently loaded item and control was classified above; future
-      // replies are classified by the integrity observer when they arrive.
-      provenCommentCount = commentItems.length;
+    // Counts can include deleted comments, hidden replies, other pages, or
+    // stale crawler snapshots. Classify every loaded DOM item and preserve
+    // native continuation controls; never require a counter to equal the DOM.
+    if (hasVisibleCommentContinuationControl(commentControls)) {
       provenCommentCountSource = "exact-dom-paginated";
     }
-    if (provenCommentCount !== null) {
-      // The total describes the whole thread, including unloaded pages.
-    } else if (visibleCommentTotal.count !== null) {
-      if (commentItems.length !== visibleCommentTotal.count) {
-        return {
-          ok: false,
-          role: "comments",
-          reason: commentItems.length < visibleCommentTotal.count
-            ? "partial-comment-set"
-            : "count-item-mismatch",
-        };
-      }
-      if (
-        (seedCommentCount !== null && seedCommentCount > visibleCommentTotal.count) ||
-        (metadataCommentCount !== null && metadataCommentCount > visibleCommentTotal.count)
-      ) {
-        return { ok: false, role: "comments", reason: "count-evidence-conflict" };
-      }
-      provenCommentCount = visibleCommentTotal.count;
-      provenCommentCountSource = visibleCommentTotal.source;
-    } else if (commentItems.length > 0) {
-      const lowerBounds = [seedCommentCount, metadataCommentCount].filter(
-        function integerCommentLowerBound(value) { return value !== null; },
-      );
-      if (
-        lowerBounds.length > 0 &&
-        commentItems.length < Math.max(...lowerBounds)
-      ) {
-        return { ok: false, role: "comments", reason: "partial-comment-set" };
-      }
-      provenCommentCount = commentItems.length;
-      provenCommentCountSource = seedCommentCount !== null && metadataCommentCount !== null
-        ? "exact-dom+algumon+schema-lower-bound"
-        : seedCommentCount !== null
-          ? "exact-dom+algumon-lower-bound"
-          : metadataCommentCount !== null
-            ? "exact-dom+schema-lower-bound"
-            : "exact-dom-observed";
-    } else if (
-      (seedCommentCount !== null && seedCommentCount > 0) ||
-      (metadataCommentCount !== null && metadataCommentCount > 0)
-    ) {
-      return { ok: false, role: "comments", reason: "partial-comment-set" };
-    }
     if (
-      provenCommentCount === null &&
       commentItems.length === 0 &&
       documentCommentEvidence.elements.length === 0 &&
       layout.allowEmptyComments === true &&
@@ -6746,31 +6865,13 @@
     if (commentItems.length === 0 && layout.allowEmptyComments !== true) {
       return { ok: false, role: "comments", reason: "empty-not-approved" };
     }
-    if (commentItems.length === 0 && provenCommentCount !== 0) {
-      return {
-        ok: false,
-        role: "comments",
-        reason: provenCommentCount > 0 ? "seed-item-mismatch" : "empty-not-proven",
-      };
-    }
-    if (commentItems.length > 0 && provenCommentCount === 0) {
-      return { ok: false, role: "comments", reason: "seed-item-mismatch" };
-    }
-    if (provenCommentCount !== null && commentItems.length > provenCommentCount) {
-      return { ok: false, role: "comments", reason: "count-item-mismatch" };
-    }
-    if (
-      provenCommentCount !== null &&
-      commentItems.length < provenCommentCount
-    ) {
-      return { ok: false, role: "comments", reason: "partial-comment-set" };
-    }
     const requiredRoles = layout.requiredRoles.slice();
     const roles = {
       title: titleNode,
       body: bodyNode,
       comments: commentMount,
       commentItems,
+      commentDormantItems,
       commentControls,
       commentDormantControls,
       commentIgnored,
@@ -8451,17 +8552,18 @@
       }
       const autonomous = Array.from(autonomousDiscovery.roots);
       const ignored = uniqueElements(configured.concat(safety, autonomous));
-      const safeProjection = withPublisherVisibilityMeasurement(
+      const projectionFailure = withPublisherVisibilityMeasurement(
         document,
         function inspectReconciledAtomicRole() {
-          return hasApprovedContentOutside(roleRoot, ignored) &&
-            !containsSemanticNoise(roleRoot, new WeakMap(), ignored) &&
-            !containsUnprovenShadowBoundary(roleRoot, ignored) &&
-            !containsPublisherPaintRisk(roleRoot, ignored);
+          if (!hasApprovedContentOutside(roleRoot, ignored)) return "empty-projection";
+          if (containsSemanticNoise(roleRoot, new WeakMap(), ignored)) return "semantic-noise";
+          if (containsUnprovenShadowBoundary(roleRoot, ignored)) return "shadow-boundary";
+          if (containsPublisherPaintRisk(roleRoot, ignored)) return "publisher-paint";
+          return null;
         },
-        function rejectUnsafeAtomicMeasurement() { return false; },
+        function rejectUnsafeAtomicMeasurement() { return "measurement-conflict"; },
       );
-      if (!safeProjection) return rejectReconciliation("unsafe-projection");
+      if (projectionFailure) return rejectReconciliation(projectionFailure);
       const authorizedTargets = new Set(descendants);
       for (
         let ancestor = roleRoot.parentElement;
@@ -8561,6 +8663,36 @@
       forgetRemovedTree(node, state);
       return "non-item";
     };
+    const synchronizeCommentItemVisibility = function synchronizeCommentItemVisibility() {
+      const nativeItems = withPublisherVisibilityMeasurement(
+        document,
+        function measureNativeCommentItems() {
+          return Array.from(state.commentItemRoots).map(function measureNativeItem(item) {
+            const rendered = isRendered(item);
+            return {
+              item,
+              rendered,
+              safe: item.isConnected && state.roles.comments.contains(item) &&
+                !containsUnprovenShadowBoundary(item, []) &&
+                (!rendered || !containsPublisherPaintRisk(item, [])),
+            };
+          });
+        },
+        function rejectUnsafeCommentItemMeasurement() { return null; },
+      );
+      if (!nativeItems || nativeItems.some(function unsafeItem(entry) { return !entry.safe; })) {
+        return false;
+      }
+      const changed = new Set();
+      nativeItems.forEach(function preserveNativeVisibility(entry) {
+        const dormant = !entry.rendered;
+        if (entry.item.classList.contains(roleClass("comment-dormant")) === dormant) return;
+        entry.item.classList.toggle(roleClass("comment-dormant"), dormant);
+        rememberAuthorizedMarkerTree(entry.item, state);
+        changed.add(entry.item);
+      });
+      return changed.size === 0 || consumeAuthorizedMarkerMutations(changed);
+    };
     const synchronizeCommentControlVisibility = function synchronizeCommentControlVisibility(
       control,
       verifyNewContent = false,
@@ -8646,10 +8778,15 @@
       };
     const observer = createNativeMutationObserver(browserRoot, function sealProjection(mutations) {
       try {
-        if (runtime.releasePhase !== "released" || !runtime.authorizedReady) {
+        const preservingFrozenContent = runtime.releasePhase === "frozen" &&
+          runtime.projectionArticleIdentity === referrerScopedArticleIdentity(
+            browserRoot.location, findSiteContract(browserRoot.location.hostname)?.id,
+          );
+        if ((!preservingFrozenContent && runtime.releasePhase !== "released") ||
+            !runtime.authorizedReady) {
           return;
         }
-        if (runtime.terminallyBlocked) {
+        if (runtime.terminallyBlocked && !preservingFrozenContent) {
           return;
         }
         let failureReason = null;
@@ -8657,6 +8794,7 @@
         let commentProjectionChanged = false;
         let addedCommentItemCount = 0;
         let commentCountEvidenceChanged = false;
+        let commentItemVisibilityChanged = false;
         const atomicRolesChanged = new Set();
         const dynamicCommentControlsChanged = new Set();
         const commentControlStatesChanged = new Set();
@@ -8710,6 +8848,12 @@
             continue;
           }
           projectionTouched = true;
+          if (inComments && (COMMENT_CONTROL_STATE_ATTRIBUTES.has(name) || name === "open")) {
+            // Reply containers and individual comments may be natively folded.
+            // Preserve their original visibility, including ancestor toggles.
+            commentItemVisibilityChanged = true;
+            commentProjectionChanged = true;
+          }
           if (
             insideAnyRoot(target, trackedRoots(state.bodyIgnoredRoots)) ||
             insideAnyRoot(target, trackedRoots(state.productIgnoredRoots)) ||
@@ -9008,6 +9152,7 @@
           if (classification === "item") {
             state.commentItemRoots.add(added);
             addedCommentItemCount += 1;
+            commentItemVisibilityChanged = true;
           } else {
             state.commentControlRoots.add(added);
             if (!synchronizeCommentControlVisibility(added)) {
@@ -9022,7 +9167,8 @@
           const renderedAddition = isRendered(added);
           const dormantControl = classification === "control" &&
             !renderedAddition && approvedDormantCommentControl(added, state);
-          const additionFailure = !dormantControl &&
+          const dormantItem = classification === "item" && publisherHiddenBeforeProjection;
+          const additionFailure = !dormantControl && !dormantItem &&
             (publisherHiddenBeforeProjection || !renderedAddition)
             ? "hidden-comment-addition"
             : containsUnprovenShadowBoundary(added, [])
@@ -9036,6 +9182,10 @@
           }
         }
       }
+        if (!failureReason && commentItemVisibilityChanged &&
+            !synchronizeCommentItemVisibility()) {
+          failureReason = "comment-item-visibility";
+        }
         if (!failureReason) {
           for (const control of dynamicCommentControlsChanged) {
             if (!reconcileDynamicCommentControl(control)) {
@@ -9242,6 +9392,34 @@
       };
     }
     runtime.integrityObserver = observer;
+    // Publisher scripts can wrap accepted media during the two-frame release
+    // proof, before this observer exists. Reconcile that bounded gap through
+    // the same content/noise checks used for later mutations.
+    const changedAtomicRoles = ["body", "product"].filter(function hasPendingContent(role) {
+      const roleRoot = state.roles[role];
+      if (!roleRoot) return false;
+      const ignored = trackedRoots(atomicRoleFields(role).ignoredRoots);
+      return Array.from(roleRoot.querySelectorAll("*")).some(function unownedContent(element) {
+        return !state.ownedElements.has(element) && !insideAnyRoot(element, ignored);
+      });
+    });
+    if (changedAtomicRoles.length) {
+      if (!verifyOwnedMarkerState(document, state)) {
+        terminalBlock("initial-marker-mismatch");
+        return;
+      }
+      for (const role of changedAtomicRoles) {
+        if (!reconcileAtomicRole(role)) {
+          terminalBlock(`${role}-reconciliation`);
+          return;
+        }
+      }
+      if (!verifyOwnedMarkerState(document, state) || !verifyOwnedState(document, state)) {
+        terminalBlock("initial-projection-mismatch");
+        return;
+      }
+      state.projectionEpoch += 1;
+    }
   }
 
   function createReaderRuntime(
@@ -9346,6 +9524,9 @@
         }
         publishDiagnostics(browserRoot, {
           ...runtime.readyDiagnostics,
+          ...(runtime.releasePhase === "frozen"
+            ? { targetReason: `frozen-${runtime.frozenReason || "terminal"}` }
+            : {}),
           standaloneCascadeProof: runtime.standaloneCascadeProof,
           commentControlProjection,
           visibleLeakCount,
@@ -9476,6 +9657,7 @@
         if (
           !nonce ||
           !verifyOwnedMarkerState(document, state) ||
+          !verifyOwnedState(document, state) ||
           !runtimeGateStyleIntact(styleElement, runtime)
         ) {
           return false;
@@ -9491,6 +9673,7 @@
         html.classList.remove(CLASS.lock);
         runtime.authorizedReady = true;
         runtime.releasePhase = "frozen";
+        runtime.frozenReason = reason || "terminal";
         runtime.readyDiagnostics = runtime.readyDiagnostics || Object.freeze({
           state: "ready",
           targetReason,
@@ -9513,7 +9696,14 @@
     }
 
     runtime.enterTerminal = function enterTerminal(reason) {
-      if (runtime.terminallyBlocked && runtime.rollbackComplete) return;
+      if (runtime.terminallyBlocked && runtime.rollbackComplete) {
+        if (runtime.releasePhase !== "frozen" ||
+            !String(reason || "").startsWith("role-projection-")) return;
+        // Frozen content is still live publisher DOM. If its original content
+        // can no longer be preserved, restore it instead of freezing a hole.
+        runtime.terminallyBlocked = false;
+        runtime.rollbackComplete = false;
+      }
       if (resumeVerifiedProjection(reason)) return;
       const projectionFrozen = freezeVerifiedProjection(reason);
       runtime.terminallyBlocked = true;
@@ -9574,33 +9764,17 @@
         // to the exact original article can then resume its normal observer.
         installBootstrapGuard(browserRoot, runtime, styleElement);
         installCascadeGuard(browserRoot, runtime, styleElement);
+        installIntegrityObserver(browserRoot, runtime, runtime.projectionState, styleElement);
         return;
       }
       try { runtime.shadowTracker?.uninstall?.(); } catch (_error) {}
       try {
-        const html = document.documentElement;
-        html.setAttribute(ATTR.lock, "1");
-        html.setAttribute(ATTR.state, "locked");
-        html.setAttribute(ATTR.status, `locked-${reason || "terminal"}`);
-        html.removeAttribute(ATTR.ready);
-        html.classList.remove(CLASS.ready);
-        html.classList.add(CLASS.lock);
-        runtime.expectedStyleText = gateStyleText(null);
-        if (styleElement?.isConnected) {
-          styleElement.textContent = runtime.expectedStyleText;
-        }
+        runtime.releasePhase = "recovery";
+        restoreReaderContent(browserRoot, contract, reason, styleElement, runtime.bootstrapLock);
       } catch (_error) {
-        // The bootstrap inline lock remains the last fail-closed authority.
+        restorePublisherPage(document, styleElement, runtime.bootstrapLock);
       } finally {
         runtime.rollbackComplete = true;
-        try {
-          publishDiagnostics(browserRoot, {
-            state: "locked",
-            targetReason: `contained-${reason || "terminal"}`,
-          });
-        } catch (_error) {
-          // Diagnostics are optional; publisher content remains contained.
-        }
       }
     };
 
@@ -9928,12 +10102,18 @@
     return Object.freeze({ stop });
   }
 
-  function waitForVerifiedTargetSemanticProof(browserRoot, contract, activate) {
+  function waitForVerifiedTargetSemanticProof(browserRoot, contract, activate, recover) {
     const document = browserRoot.document;
     let observer = null;
     let timeoutId = 0;
     let attemptScheduled = false;
     let stopped = false;
+    let recovering = false;
+    const recoverOnce = function recoverUnresolvedContent(reason) {
+      if (recovering) return;
+      recovering = true;
+      recover(reason);
+    };
     const stop = function stopSemanticPreflight() {
       if (stopped) return;
       stopped = true;
@@ -9973,6 +10153,7 @@
         );
         if (!currentArticleIdentity) {
           stop();
+          recoverOnce("article-identity-required");
           return false;
         }
         const approvedResolution = resolveDocument(document, layouts, null);
@@ -9981,7 +10162,8 @@
           : resolveIndependentSemanticDocument(document, layouts);
         if (!resolution.ok) {
           const failure = approvedResolution.ok ? resolution : approvedResolution;
-          const reason = `locked-preflight-${failure.role || "semantic"}-${failure.reason || "unresolved"}`;
+          const reason = `recovery-preflight-${failure.role || "semantic"}-${failure.reason || "unresolved"}`;
+          recoverOnce(reason);
           if (document.documentElement.getAttribute(ATTR.status) !== reason) {
             document.documentElement.setAttribute(ATTR.status, reason);
           }
@@ -10000,8 +10182,7 @@
         activate(candidateResolution);
         return true;
       } catch (_error) {
-        // The presentation remains sealed; later DOM mutations may still
-        // supply a complete exact or independently proven projection.
+        recoverOnce("semantic-preflight-exception");
         return false;
       } finally {
         if (observationPaused && !stopped && observer) {
@@ -10017,16 +10198,13 @@
     const scheduleAttempt = function scheduleSemanticPreflight() {
       if (stopped || attemptScheduled) return;
       attemptScheduled = true;
-      nativeTimeout(browserRoot, attempt, 0);
+      nativeTimeout(browserRoot, attempt, recovering ? 100 : 0);
     };
     const retryUnresolvedSemanticPreflight =
       function retryUnresolvedSemanticPreflight() {
         timeoutId = 0;
         if (stopped) return;
-        publishDiagnostics(browserRoot, {
-          state: "locked",
-          targetReason: "awaiting-complete-semantic-projection",
-        });
+        recoverOnce("semantic-preflight-timeout");
         scheduleAttempt();
         timeoutId = nativeTimeout(
           browserRoot,
@@ -10051,6 +10229,7 @@
       scheduleAttempt();
     } catch (_error) {
       stop();
+      recoverOnce("semantic-preflight-unavailable");
     }
     return Object.freeze({ stop });
   }
@@ -10074,13 +10253,21 @@
       }
       lockWhenHtmlExists(document, function configureTarget(html, initialBootstrapLock) {
       if (!initialBootstrapLock) {
-        restorePublisherPage(document, null, initialBootstrapLock);
+        restoreReaderContent(browserRoot, contract, "bootstrap-lock-unavailable", null, initialBootstrapLock);
         return;
       }
       waitForVerifiedTargetSemanticProof(
         browserRoot,
         contract,
         function beginVerifiedTargetActivation(verifiedTargetProof) {
+      removeStaticRecoveryStyle(document);
+      if (initialBootstrapLock.isRestored()) {
+        initialBootstrapLock = claimBootstrapLock(document);
+      }
+      if (!initialBootstrapLock) {
+        restoreReaderContent(browserRoot, contract, "bootstrap-lock-unavailable", null, null);
+        return;
+      }
       function configureTargetWithReferrerProof(initialVerifiedProof) {
         let authorizedArticleIdentity = null;
         let pendingArticleIdentity = referrerScopedArticleIdentity(
@@ -10117,7 +10304,7 @@
         }
         try { activeShadowTracker?.uninstall?.(); } catch (_error) {}
         activeShadowTracker = null;
-        restorePublisherPage(document, activeStyle, activeBootstrapLock);
+        restoreReaderContent(browserRoot, contract, navigationTerminalReason, activeStyle, activeBootstrapLock);
         publishDiagnostics(browserRoot, {
           state: "inactive",
           targetReason: navigationTerminalReason,
@@ -10245,7 +10432,7 @@
         } else {
           try { activeShadowTracker?.uninstall?.(); } catch (_cleanupError) {}
           activeShadowTracker = null;
-          restorePublisherPage(document, activeStyle, activeBootstrapLock);
+          restoreReaderContent(browserRoot, contract, "activation-exception", activeStyle, activeBootstrapLock);
           publishDiagnostics(browserRoot, {
             state: "inactive",
             targetReason: "activation-exception",
@@ -10254,6 +10441,9 @@
       }
       }
       configureTargetWithReferrerProof(verifiedTargetProof);
+        },
+        function recoverPreflightContent(reason) {
+          restoreReaderContent(browserRoot, contract, reason, null, initialBootstrapLock);
         },
       );
     });

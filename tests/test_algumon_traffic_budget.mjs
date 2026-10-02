@@ -6,13 +6,14 @@ import {
   capturedAlgumonTargetsFromReport,
   createAlgumonRequestStartBudget,
   createLowTrafficAlgumonProbePlan,
+  transferAlgumonRelaySession,
 } from "../scripts/audit_pages.mjs";
 
 function signedRelayUrl(dealId, timestampMs, fill) {
   return `https://www.algumon.com/l/d/${dealId}?v=${fill.repeat(32)}&t=${timestampMs}`;
 }
 
-function capturedSnapshotFixture() {
+function capturedSnapshotFixture(currentRelay = false) {
   const timestampMs = Date.now();
   const urls = [
     "https://example.test/article/1001",
@@ -38,7 +39,10 @@ function capturedSnapshotFixture() {
   };
   const results = urls.map((requestedUrl, index) => {
     const dealId = String(1001 + index);
-    const signedUrl = signedRelayUrl(dealId, timestampMs, String(index + 1));
+    const legacySignedUrl = signedRelayUrl(dealId, timestampMs, String(index + 1));
+    const signedUrl = currentRelay
+      ? `${legacySignedUrl.replace("/l/d/", "/n/d/")}&enc=v1.fixture_iv.fixture_tag.fixture_ciphertext`
+      : legacySignedUrl;
     return {
       siteId: "example",
       layoutId: "article",
@@ -180,7 +184,49 @@ function testCapturedSnapshotProducesNoSourceRequests() {
   );
 }
 
+function testCurrentEncryptedRelaySnapshotRetainsExactProvenance() {
+  const { candidate, capturedReport, site } = capturedSnapshotFixture(true);
+  const captured = capturedAlgumonTargetsFromReport(capturedReport, candidate, [site]);
+  assert.equal(captured.targetCount, 3);
+  assert.deepEqual(
+    captured.targets.map(({ target }) => target.algumon.redirectUrl),
+    capturedReport.results.map((result) => result.algumonSeed.redirectUrl),
+    "the complete encrypted relay URL survives sealed snapshot reuse unchanged",
+  );
+  const forged = structuredClone(capturedReport);
+  forged.results[0].algumonSeed.redirectUrl += "x";
+  assert.throws(
+    () => capturedAlgumonTargetsFromReport(forged, candidate, [site]),
+    /internally inconsistent|contradicts|disagrees|mismatch/u,
+    "changing encrypted destination bytes invalidates the recorded provenance",
+  );
+}
+
+async function testSourceSessionCookiesStayInMemoryAndInScope() {
+  const scopedCookies = [{ name: "source-session", value: "fixture", domain: ".algumon.com", path: "/" }];
+  const actions = [];
+  const source = { cookies: async (urls) => {
+    assert.deepEqual(urls, ["https://www.algumon.com/n/d/1", "https://www.algumon.com/l/d/1"]);
+    return scopedCookies;
+  } };
+  const relay = {
+    clearCookies: async () => { actions.push("clear"); },
+    addCookies: async (cookies) => { actions.push(cookies); },
+  };
+  assert.equal(await transferAlgumonRelaySession(source, relay), undefined);
+  assert.deepEqual(actions, ["clear", scopedCookies]);
+  await assert.rejects(
+    () => transferAlgumonRelaySession({ cookies: async () => [
+      { ...scopedCookies[0], domain: ".algumon.com.evil.example" },
+    ] }, relay),
+    /escaped the exact Algumon origin/u,
+  );
+  assert.equal(actions.length, 2, "invalid source cookies never mutate the private relay context");
+}
+
 testLowTrafficProbePlan();
 testHardRequestStartBudget();
 testCapturedSnapshotProducesNoSourceRequests();
+testCurrentEncryptedRelaySnapshotRetainsExactProvenance();
+await testSourceSessionCookiesStayInMemoryAndInScope();
 process.stdout.write("Algumon traffic budget tests passed\n");

@@ -65,7 +65,9 @@ try {
   },{source,control:PREAUTHORIZED_ADGUARD_CONTROL_SOURCE});
   await delayedPage.goto('https://eomisae.co.kr/os/99000001');
   await delayedPage.waitForTimeout(125);
-  assert.equal(await delayedPage.locator('html').getAttribute('data-hotdeal-focus-lock'),'1');
+  assert.equal(await delayedPage.locator('html').getAttribute('data-hotdeal-focus-lock'),null);
+  assert.equal(await delayedPage.evaluate(()=>globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.state),'recovery');
+  assert.equal(await delayedPage.evaluate(()=>getComputedStyle(document.querySelector('aside')).display),'none');
   const measurementCount=await delayedPage.evaluate(()=>globalThis.__preflightMeasurementCount);
   assert.ok(measurementCount<=8,`Preflight must not observe and retry its own visibility measurement: ${measurementCount}`);
   await delayedPage.evaluate(()=>document.querySelector('#publisher-late-body').remove());
@@ -120,7 +122,7 @@ try {
   await navigationPage.waitForFunction(()=>getComputedStyle(document.querySelector('.cmt-option')).pointerEvents==='none',null,{timeout:1500}).catch(async error=>{throw new Error(JSON.stringify(await navigationPage.evaluate(()=>({diagnostics:globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__,menu:document.querySelector('.cmt-overlay-background').outerHTML}))),{cause:error});});
   assert.doesNotMatch(await navigationPage.evaluate(()=>globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__.targetReason),/^frozen-/);
   await navigation.getByRole('button',{name:'본문',exact:true}).click();
-  await navigationPage.waitForFunction(()=>Math.abs(document.querySelector('[data-hotdeal-focus-role="body"]').getBoundingClientRect().top)<2,null,{timeout:1500});
+  await navigationPage.waitForFunction(()=>Math.abs(document.querySelector('[data-hotdeal-focus-role="product"]').getBoundingClientRect().top)<2,null,{timeout:1500});
   assert.equal(new URL(navigationPage.url()).hash,'');
   assert.equal(await navigationPage.locator('#D_ article a').evaluate(link=>{
    const rect=link.getBoundingClientRect();

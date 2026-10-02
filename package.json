@@ -1,8 +1,8 @@
 {
   "name": "adguard-hotdeal-focus",
-  "version": "0.6.81",
+  "version": "0.6.91",
   "private": true,
-  "description": "Fail-closed AdGuard hot-deal reader gate and cloud DOM monitor",
+  "description": "Content-preserving AdGuard hot-deal reader and cloud DOM monitor",
   "type": "module",
   "license": "MIT",
   "engines": {
@@ -15,7 +15,7 @@
     "check:node": "node --check scripts/audit_pages.mjs && node --check scripts/pages_release_contract.mjs && node --check scripts/probe_adguard_csp.mjs && node --check scripts/csp-probe.user.js && node --check hotdeal-focus.user.js && node --check tests/test_projection_tuple_oracle.mjs && node --check tests/test_pages_release_contract.mjs && node --check tests/test_network_fidelity.mjs && node --check tests/test_algumon_traffic_budget.mjs && node --check tests/test_comment_control_audit.mjs && node --check tests/test_policy_promotion.mjs",
     "integrity": "node scripts/audit_pages.mjs --integrity-only",
     "test:behavior": "node scripts/audit_pages.mjs --fixture-only --no-discover-algumon",
-    "test:oracle": "node tests/test_ruliweb_purchase_link.mjs && node tests/test_eomisae_mobile_structure.mjs && node tests/test_zod_purchase_link.mjs && node tests/test_ppomppu_mobile_handoff.mjs && node tests/test_quasarzone_live_structure.mjs && node tests/test_projection_tuple_oracle.mjs && node tests/test_pages_release_contract.mjs && npm run test:comment-controls && npm run test:policy-promotion",
+    "test:oracle": "node tests/test_ruliweb_purchase_link.mjs && node tests/test_ruliweb_live_structure.mjs && node tests/test_eomisae_mobile_structure.mjs && node tests/test_zod_purchase_link.mjs && node tests/test_ppomppu_mobile_handoff.mjs && node tests/test_quasarzone_live_structure.mjs && node tests/test_arcalive_live_structure.mjs && node tests/test_reader_content_recovery.mjs && node tests/test_normal_article_variants.mjs && node tests/test_projection_tuple_oracle.mjs && node tests/test_pages_release_contract.mjs && npm run test:comment-controls && npm run test:policy-promotion",
     "test:comment-controls": "node tests/test_comment_control_audit.mjs",
     "test:policy-promotion": "node tests/test_policy_promotion.mjs",
     "test:algumon-traffic": "node tests/test_algumon_traffic_budget.mjs",

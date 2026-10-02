@@ -116,6 +116,7 @@ const results = cases.map((item) => ({
     item.algumon,
     item.visible,
     { articleHeadlines: item.metadata?.schema ?? [] },
+    item.knownLayout === true,
   ),
 }));
 process.stdout.write(JSON.stringify(results));
@@ -626,16 +627,18 @@ class SemanticContractTests(unittest.TestCase):
                 self.assertIn("ignored", layout["comment_contract"])
         self.assertIn("roles.commentItems.forEach", self.source)
         self.assertIn("roles.commentControls.forEach", self.source)
-        self.assertIn("seed-item-mismatch", self.source)
+        self.assertIn('provenCommentCountSource = "exact-dom-zero"', self.source)
         resolver = self.source[
             self.source.index("function resolveApprovedLayout"):
             self.source.index("function resolveDocument")
         ]
         self.assertIn("commentItems.concat(commentControls, commentIgnored)", resolver)
-        self.assertIn(
+        self.assertNotIn(
             "hasUnclassifiedCommentContent(commentMount, classifiedCommentRoots)",
             resolver,
         )
+        self.assertIn('reason: "evidence-outside-items"', resolver)
+        self.assertIn('reason: "evidence-outside-items"', resolver)
         self.assertNotIn(
             "commentItems.length === 0 &&\n      hasUnclassifiedCommentContent",
             resolver,
@@ -651,7 +654,9 @@ class SemanticContractTests(unittest.TestCase):
             self.source.index("function installNavigationRevalidation")
         ]
         self.assertIn("!isRendered(state.roles.comments)", verifier)
-        self.assertIn("!isRendered(item)", verifier)
+        self.assertIn("!state.ownedElements.has(item)", verifier)
+        self.assertIn("synchronizeCommentItemVisibility", observer)
+        self.assertIn('roleClass("comment-dormant")', observer)
         self.assertIn("!isRendered(control)", verifier)
         self.assertIn("withPublisherVisibilityMeasurement(", verifier)
         self.assertIn(
@@ -660,7 +665,7 @@ class SemanticContractTests(unittest.TestCase):
         )
         self.assertIn('classification === "control" &&', observer)
         self.assertIn("!renderedAddition && approvedDormantCommentControl(added, state)", observer)
-        self.assertIn("const additionFailure = !dormantControl &&", observer)
+        self.assertIn("const additionFailure = !dormantControl && !dormantItem &&", observer)
         self.assertIn('"hidden-comment-addition"', observer)
         self.assertIn("if (additionFailure)", observer)
         self.assertIn("failureReason = additionFailure", observer)
@@ -674,8 +679,9 @@ class SemanticContractTests(unittest.TestCase):
             self.source.index("function verifyOwnedStateWithPublisherStyles"):
             self.source.index("function paintLockSelectors")
         ]
-        self.assertIn("commentItems.length < provenCommentCount", resolver)
-        self.assertIn('reason: "partial-comment-set"', resolver)
+        self.assertIn("let provenCommentCount = commentItems.length", resolver)
+        self.assertIn('reason: "evidence-outside-items"', resolver)
+        self.assertNotIn('reason: "partial-comment-set"', resolver)
         self.assertIn(
             "currentCommentItems.length !== state.acceptedCommentCount",
             verifier,
@@ -692,7 +698,8 @@ class SemanticContractTests(unittest.TestCase):
         self.assertIn("hasVisibleCommentContinuationControl", resolver)
         self.assertIn('provenCommentCountSource = "exact-dom-paginated"', resolver)
         self.assertNotIn('reason: "incomplete-comment-control"', resolver)
-        self.assertIn("knownCommentTotal", resolver)
+        self.assertNotIn("knownCommentTotal", resolver)
+        self.assertNotIn("seedCommentCount", resolver)
 
     def test_projection_noise_metadata_is_bounded_and_canonicalized(self) -> None:
         noise = self.source[
@@ -889,7 +896,7 @@ class SemanticContractTests(unittest.TestCase):
             set(raw_layout_paths(ruli["layouts"][0])),
         )
 
-    def test_semantic_preflight_runs_under_bootstrap_lock_and_is_dom_read_only(
+    def test_semantic_preflight_restores_readability_while_waiting_for_unique_proof(
         self,
     ) -> None:
         preflight = self.source[
@@ -902,7 +909,9 @@ class SemanticContractTests(unittest.TestCase):
             preflight,
         )
         self.assertIn("if (!resolution.ok) {", preflight)
-        self.assertIn('`locked-preflight-${failure.role || "semantic"}-${failure.reason || "unresolved"}`', preflight)
+        self.assertIn('`recovery-preflight-${failure.role || "semantic"}-${failure.reason || "unresolved"}`', preflight)
+        self.assertIn('recoverOnce(reason)', preflight)
+        self.assertIn('recoverOnce("semantic-preflight-timeout")', preflight)
         self.assertIn(
             '`${entryAuthority}-independent-semantic-tuple`',
             preflight,
@@ -1543,6 +1552,63 @@ class SemanticContractTests(unittest.TestCase):
                         result["evidence"]["metadata"]["sourceCount"], 1
                     )
 
+    def test_short_title_accepts_exact_publisher_metadata_without_loosening_fuzzy_match(self) -> None:
+        visible = "듀얼센스 (64,000원/무료)"
+        cases = [
+            {"algumon": None, "visible": visible, "metadata": {"og": [visible + " - 핫딜 채널"]}},
+            {"algumon": None, "visible": "듀얼센스", "metadata": {"og": ["듀얼센스 - 핫딜 채널"]}},
+            {"algumon": None, "visible": visible, "metadata": {"og": ["듀얼쇼크 (64,000원/무료) - 핫딜 채널"]}},
+            {"algumon": None, "visible": visible, "metadata": {"og": ["듀얼센스 (69,000원/무료) - 핫딜 채널"]}},
+            {"algumon": None, "visible": visible, "metadata": {"og": [visible + " - 핫딜 채널", "다른 상품"]}},
+            {"algumon": None, "visible": visible, "metadata": {"og": [visible + " - 핫딜 채널"], "twitter": ["듀얼쇼크 (64,000원/무료)"]}},
+            {"algumon": None, "visible": "무료 (0원/무료)", "metadata": {"og": ["무료 (0원/무료) - 핫딜 채널"]}},
+        ]
+        for index, result in enumerate(evaluate_title_cases(cases)):
+            with self.subTest(case=index):
+                self.assertEqual(index in (0, 1, 6), result["evidence"]["ok"], result)
+
+    def test_exact_titles_have_no_word_or_character_minimum(self) -> None:
+        titles = ["쌀", "우유", "라면컵", "A", "IT", "DOOM", "0", "무료", "🎮"]
+        cases = [
+            {"algumon": title, "visible": title, "metadata": {"og": [title + " - 핫딜 채널"]}}
+            for title in titles
+        ]
+        for title, result in zip(titles, evaluate_title_cases(cases), strict=True):
+            with self.subTest(title=title):
+                self.assertTrue(result["core"]["ok"], result)
+                self.assertTrue(result["evidence"]["ok"], result)
+
+    def test_known_article_title_is_not_gated_by_absent_or_stale_social_metadata(self) -> None:
+        cases = [
+            {"algumon": None, "visible": "쌀", "metadata": {}},
+            {"algumon": None, "visible": "우유", "metadata": {"twitter": ["우유"]}},
+            {"algumon": None, "visible": "DOOM", "metadata": {"og": ["DOOM"], "twitter": ["예전 제목"]}},
+            {"algumon": "수정 전 상품", "visible": "상품 수정 후", "metadata": {"og": ["수정 전 상품"]}},
+            {"algumon": None, "visible": "무료", "metadata": {"og": ["이전 제목", "무료"]}},
+        ]
+        for result in evaluate_title_cases([dict(case, knownLayout=True) for case in cases]):
+            self.assertTrue(result["evidence"]["ok"], result)
+            self.assertEqual("known-layout-visible-title", result["evidence"]["mode"])
+            self.assertEqual("optional-publisher-metadata", result["evidence"]["metadata"]["reason"])
+        for result in evaluate_title_cases(cases):
+            self.assertFalse(result["evidence"]["ok"], result)
+
+    def test_normal_article_media_and_purchase_link_are_not_noise_by_name_only(self) -> None:
+        strong_noise = self.source[
+            self.source.index("function isStrongProjectionNoiseNode"):
+            self.source.index("function collectJsonLd")
+        ]
+        autonomous_noise = self.source[
+            self.source.index("function isAutonomousProjectionNoiseRoot"):
+            self.source.index("function containsSemanticNoise")
+        ]
+        self.assertNotIn('getAttribute("rel")', strong_noise)
+        self.assertNotIn('getAttribute("rel")', autonomous_noise)
+        self.assertNotIn("normalizeProjectionTokenText(resources)", strong_noise)
+        self.assertNotIn("normalizeProjectionTokenText(resources)", autonomous_noise)
+        self.assertIn("AD_NETWORK_RESOURCE_PATTERN.test(resources)", strong_noise)
+        self.assertIn("isRendered(item) && hasApprovedContent(item)", self.source)
+
     def test_title_evidence_rejects_numeric_model_drift_and_metadata_ambiguity(self) -> None:
         negative_cases = [
             ("티젠 콤부차 100개입", "티젠 콤부차 50개입"),
@@ -1717,21 +1783,22 @@ process.stdout.write(JSON.stringify({
             "const projectionFrozen = freezeVerifiedProjection(reason)"
         )
         frozen_return = terminal_entry.index("if (projectionFrozen)")
-        contained_lock = terminal_entry.index(
-            'html.setAttribute(ATTR.lock, "1")'
+        content_recovery = terminal_entry.index(
+            'restoreReaderContent(browserRoot, contract, reason, styleElement, runtime.bootstrapLock)'
         )
         self.assertLess(freeze_call, frozen_return)
-        self.assertLess(frozen_return, contained_lock)
+        self.assertLess(frozen_return, content_recovery)
         self.assertIn(
             "runtime.rollbackComplete = true",
-            terminal_entry[frozen_return:contained_lock],
+            terminal_entry[frozen_return:content_recovery],
         )
-        self.assertIn("return", terminal_entry[frozen_return:contained_lock])
+        self.assertIn("return", terminal_entry[frozen_return:content_recovery])
         self.assertIn(
-            'targetReason: `contained-${reason || "terminal"}`',
+            'runtime.releasePhase = "recovery"',
             terminal_entry,
         )
-        self.assertNotIn("restorePublisherPage(", terminal_entry)
+        self.assertIn("restorePublisherPage(", terminal_entry)
+        self.assertNotIn('html.setAttribute(ATTR.lock, "1")', terminal_entry)
         self.assertNotIn("installPersistentTerminalGuardian", terminal)
 
     def test_runtime_projection_is_nonce_bound_and_ready_is_committed_last(self) -> None:
@@ -1789,7 +1856,7 @@ process.stdout.write(JSON.stringify({
             ],
             metadata_values(self.source, "grant"),
         )
-        self.assertEqual(2, self.source.count('GM_addElement(parent, "style", {'))
+        self.assertEqual(3, self.source.count('GM_addElement(parent, "style", {'))
         install = self.source[
             self.source.index("function installRuntimeGateStyle"):
             self.source.index("function publisherVisualRecoveryStyleText")
@@ -1799,10 +1866,10 @@ process.stdout.write(JSON.stringify({
             self.source.index("function writeRuntimeGateStyle")
         ]
         self.assertEqual(1, install.count('GM_addElement(parent, "style", {'))
-        self.assertEqual(1, recovery.count('GM_addElement(parent, "style", {'))
+        self.assertEqual(2, recovery.count('GM_addElement(parent, "style", {'))
         self.assertIn('"data-hotdeal-focus-runtime-style": "2"', install)
         self.assertNotIn("createElement", install)
-        self.assertNotIn("createElement", recovery)
+        self.assertIn('state: "recovery"', recovery)
         self.assertNotIn('"nonce"', install)
         self.assertNotIn('"data-source"', install)
 
@@ -1992,7 +2059,7 @@ process.stdout.write(JSON.stringify({
         )
         runtime_return = terminal_navigation.index("return true", runtime_terminal)
         pre_runtime_restore = terminal_navigation.index(
-            "restorePublisherPage(document, activeStyle, activeBootstrapLock)"
+            "restoreReaderContent(browserRoot, contract, navigationTerminalReason, activeStyle, activeBootstrapLock)"
         )
         self.assertLess(runtime_terminal, runtime_return)
         self.assertLess(runtime_return, pre_runtime_restore)

@@ -1342,7 +1342,7 @@ def _validate_route_evidence(
             parsed_entry = urlsplit(entry_url)
             if (
                 (parsed_entry.hostname or "").lower() not in {"algumon.com", "www.algumon.com"}
-                or parsed_entry.path != f"/l/d/{deal_id}"
+                or parsed_entry.path not in {f"/l/d/{deal_id}", f"/n/d/{deal_id}"}
             ):
                 raise ConfigError(f"{sample_location}.algumonEntryUrl does not match its deal id")
             final_url = _validate_absolute_https_url(

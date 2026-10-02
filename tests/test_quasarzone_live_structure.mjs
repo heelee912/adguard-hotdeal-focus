@@ -11,6 +11,8 @@ const body = "많이들 알고 계시는 덕코프 25에서 5% 더해서 30% 할
 const destination = "https://store.steampowered.com/app/3167020/Escape_from_Duckov/";
 const image = 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100" fill="blue"/></svg>');
 const html = `<!doctype html><html><head>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{color:rgb(34,34,34);background:#fafafa}.dark body{background:#202020}.dark main{color:rgb(230,230,230)}nav{height:0;max-height:0;overflow:hidden;opacity:0;transform:scale(0);clip-path:inset(50%)}</style>
 <meta property="og:title" content="${title}">
 <meta property="og:type" content="article">
 <script type="application/ld+json">${JSON.stringify({
@@ -50,11 +52,12 @@ try {
   }, { source });
   assert.equal(result.exact.ok, true, JSON.stringify(result));
   await page.close();
-  for (const { width, drift, handler = "native" } of [{ width: 1280, drift: false }, { width: 1280, drift: true }, { width: 390, drift: true }, { width: 1280, drift: true, handler: "mismatch" }, { width: 390, drift: true, handler: "arbitrary" }]) {
-    const context = await browser.newContext({ viewport: { width, height: 844 } });
+  for (const { width, drift, handler = "native", dark = false, touch = false } of [{ width: 1280, drift: false }, { width: 1280, drift: true }, { width: 390, drift: true }, { width: 1280, drift: true, handler: "mismatch" }, { width: 390, drift: true, handler: "arbitrary" }, { width: 1280, drift: true, dark: true }, { width: 390, drift: true, dark: true, touch: true }]) {
+    const context = await browser.newContext({ viewport: { width, height: 844 }, hasTouch: touch });
     try {
       const runtimePage = await context.newPage();
       let fixture = drift ? html.replace('class="left-con-wrap" id="con-body"', 'class="info-body" id="publisher-root"') : html;
+      if (dark) fixture = fixture.replace('<html>', '<html class="dark">');
       const nativeHref = `javascript:goToLink('${Buffer.from(destination).toString("base64")}');`;
       const purchaseHref = handler === "mismatch"
         ? `javascript:goToLink('${Buffer.from('https://example.com/unrelated').toString("base64")}');`
@@ -104,6 +107,59 @@ try {
       assert.deepEqual(await ui.locator('a, button').allTextContents(), ["알구몬으로 돌아가기", "본문", "댓글"]);
       assert.equal(await ui.locator('button[type="button"]').count(), 2);
       assert.equal(await ui.locator('a').first().getAttribute('href'), 'https://www.algumon.com/');
+      const uiStyle = await ui.evaluate(nav => {
+        const bodyColor = getComputedStyle(document.querySelector('#new_contents')).color;
+        return [...nav.children].map(item => ({
+          inheritsColor: getComputedStyle(item).color === bodyColor,
+          height: item.getBoundingClientRect().height,
+          opacity: getComputedStyle(item).opacity,
+          sameRow: item.getBoundingClientRect().top === nav.firstElementChild.getBoundingClientRect().top,
+        }));
+      });
+      // Compact toolbar: follows the publisher theme and stays on one row at 390px.
+      assert.equal(uiStyle.every(item => item.inheritsColor && item.sameRow), true, JSON.stringify(uiStyle));
+      assert.equal(uiStyle.every(item => item.height >= 32 && item.height <= 44), true, JSON.stringify(uiStyle));
+      assert.equal(uiStyle.every(item => item.opacity === "1"), true, JSON.stringify(uiStyle));
+      if (touch) assert.equal(uiStyle.every(item => item.height >= 44), true, JSON.stringify(uiStyle));
+      const uiIsolation = await runtimePage.evaluate(async () => {
+        const nav = document.querySelector('[data-hotdeal-focus-role="reader-ui"]');
+        let shadowError = null;
+        try { nav.attachShadow({mode:'closed'}).innerHTML = '<div>광고</div>'; }
+        catch (error) { shadowError = error.name; }
+        const outside = document.createElement('div');
+        outside.id = 'html-level-ad';
+        outside.style.cssText = 'position:fixed;inset:0;background:red;z-index:999999';
+        outside.textContent = '인기글 광고';
+        document.documentElement.appendChild(outside);
+        const first = document.createComment('publisher first-child sentinel');
+        let moves = 0;
+        const publisher = new MutationObserver(() => {
+          if (document.body.firstChild !== first && moves < 20) {
+            moves += 1;
+            document.body.prepend(first);
+          }
+        });
+        publisher.observe(document.body, {childList:true});
+        document.body.prepend(first);
+        await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+        publisher.disconnect();
+        const styles = getComputedStyle(nav);
+        return {
+          shadowError, moves,
+          outsideHidden: getComputedStyle(outside).display === 'none',
+          uiHeight: nav.getBoundingClientRect().height,
+          uiOpacity: styles.opacity,
+          border: styles.borderBottomWidth,
+          status: document.documentElement.getAttribute('data-hotdeal-focus-status'),
+        };
+      });
+      assert.equal(uiIsolation.shadowError, 'NotSupportedError', JSON.stringify(uiIsolation));
+      assert.equal(uiIsolation.outsideHidden, true, JSON.stringify(uiIsolation));
+      assert.ok(uiIsolation.moves <= 1, JSON.stringify(uiIsolation));
+      assert.ok(uiIsolation.uiHeight >= 32, JSON.stringify(uiIsolation));
+      assert.equal(uiIsolation.uiOpacity, '1', JSON.stringify(uiIsolation));
+      assert.equal(uiIsolation.border, '0px', JSON.stringify(uiIsolation));
+      assert.equal(uiIsolation.status, 'ready', JSON.stringify(uiIsolation));
       await runtimePage.evaluate(() => {
         globalThis.__originalReaderBody = document.querySelector('#new_contents');
         globalThis.__originalReaderComments = document.querySelector('#ajax-reply-list');
@@ -131,7 +187,9 @@ try {
         const ui = document.querySelector('[data-hotdeal-focus-role="reader-ui"]');
         return ui?.parentElement === document.body && ui.children.length === 3 &&
           ui.firstElementChild.getAttribute('href') === 'https://www.algumon.com/' &&
-          ui.firstElementChild.textContent === '알구몬으로 돌아가기' && !ui.hasAttribute('style');
+          ui.firstElementChild.textContent === '알구몬으로 돌아가기' &&
+          ui.style.getPropertyValue('--hdf-reader-text') === getComputedStyle(document.querySelector('#new_contents')).color &&
+          ui.style.length === 1;
       }, null, {timeout:5000});
       const afterUiRepair = await runtimePage.evaluate(() => {
         const visible = e => getComputedStyle(e).visibility === 'visible' && getComputedStyle(e).display !== 'none' && !!e.getClientRects().length;
@@ -158,6 +216,13 @@ try {
       assert.equal(afterUiRepair.bodyVisible && afterUiRepair.commentsVisible, true, JSON.stringify(afterUiRepair));
       assert.equal(afterUiRepair.noiseVisible, false);
       assert.equal(afterUiRepair.wide, false, JSON.stringify(afterUiRepair));
+      if (dark) {
+        await runtimePage.evaluate(() => document.documentElement.classList.remove('dark'));
+        await runtimePage.waitForFunction(() => {
+          const nav = document.querySelector('[data-hotdeal-focus-role="reader-ui"]');
+          return getComputedStyle(nav.firstElementChild).color === getComputedStyle(document.querySelector('#new_contents')).color;
+        }, null, {timeout:5000});
+      }
       if (handler === 'native') {
         for (let wrapperRound = 0; wrapperRound < 3; wrapperRound += 1) {
           await runtimePage.evaluate(wrapperRound => {
