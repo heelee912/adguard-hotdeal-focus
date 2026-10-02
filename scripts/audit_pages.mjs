@@ -2986,8 +2986,7 @@ function fidelitySelectorsForLayout(layout) {
   ].filter((selector) => typeof selector === "string" && selector.length > 0))];
 }
 
-async function roleReferencedResourceHosts(page, selectors) {
-  const evidence = await evaluateInIsolatedWorld(page, (roleSelectors) => {
+function collectRetainedRoleResourceEvidence(roleSelectors) {
     const maximumRoots = 32;
     const maximumNodes = 2_048;
     const maximumUrls = 4_096;
@@ -3169,9 +3168,23 @@ async function roleReferencedResourceHosts(page, selectors) {
       }
     }
     // Document stylesheets affect the retained article even when linked in head.
-    for (const element of document.head?.children ?? []) {
+    // Count every inspected child, including non-links. A live head collection
+    // must not bypass traversal/time bounds merely by producing few URLs.
+    let headNodeCount = 0;
+    let headElement = document.head?.firstElementChild ?? null;
+    while (headElement) {
+      if (headNodeCount >= maximumNodes) {
+        nodeOverflowCount += 1;
+        break;
+      }
+      if (performance.now() - startedAt > maximumElapsedMs) {
+        elapsedTimeOverflowCount += 1;
+        break;
+      }
+      const element = headElement;
+      headNodeCount += 1;
       if (element.matches("link[rel~='stylesheet'][href]")) append(element.href);
-      if (rawUrls.length >= maximumUrls) break;
+      headElement = element.nextElementSibling;
     }
     const hosts = new Set();
     const urls = new Set();
@@ -3226,6 +3239,7 @@ async function roleReferencedResourceHosts(page, selectors) {
       urls: [...urls],
       rootCount: roots.size,
       nodeCount: nodes.size,
+      headNodeCount,
       urlCount: rawUrls.length,
       selectorErrorCount,
       rootOverflowCount,
@@ -3240,7 +3254,10 @@ async function roleReferencedResourceHosts(page, selectors) {
       }),
       unsafeReferenceOverflowCount,
     };
-  }, selectors);
+}
+
+async function roleReferencedResourceHosts(page, selectors) {
+  const evidence = await evaluateInIsolatedWorld(page, collectRetainedRoleResourceEvidence, selectors);
   const { urls, ...safeEvidence } = evidence;
   return {
     ...safeEvidence,
@@ -11631,6 +11648,7 @@ export {
   classifyAlgumonSourceResponse,
   classifyDestinationResponse,
   classifyProfileLandingRoute,
+  collectRetainedRoleResourceEvidence,
   commentControlProjectionFailures,
   commentControlSelectorDigest,
   commentControlSelectorDigestsForUrl,

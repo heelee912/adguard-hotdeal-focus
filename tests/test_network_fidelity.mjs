@@ -4,6 +4,7 @@ import vm from "node:vm";
 import {
   FIRST_PAINT_PROBE_SOURCE,
   canonicalArticleIdentity,
+  collectRetainedRoleResourceEvidence,
   consumeArticleAccessLease,
   createArticleAccessLease,
   createNetworkPolicyEvidenceRecorder,
@@ -618,6 +619,54 @@ function testConnectAuthorityParser() {
   }
 }
 
+function testHeadStylesheetTraversalBounds() {
+  const collect = (length, elapsedStep = 0) => {
+    let inspections = 0;
+    let clock = 0;
+    const headNodes = Array.from({ length }, (_, index) => ({
+      href: `https://example.com/article-${index}.css`,
+      matches() {
+        inspections += 1;
+        return index === length - 1;
+      },
+      nextElementSibling: null,
+    }));
+    for (let index = 0; index < headNodes.length - 1; index += 1) {
+      headNodes[index].nextElementSibling = headNodes[index + 1];
+    }
+    const evidence = vm.runInNewContext(`(${collectRetainedRoleResourceEvidence.toString()})([])`, {
+      document: { head: { firstElementChild: headNodes[0] ?? null }, baseURI: "https://example.com/deal/7" },
+      performance: { now: () => { const value = clock; clock += elapsedStep; return value; } },
+      URL,
+    });
+    return { evidence, inspections };
+  };
+
+  for (const length of [0, 100, 2048]) {
+    const { evidence, inspections } = collect(length);
+    assert.equal(inspections, length);
+    assert.equal(evidence.headNodeCount, length);
+    assert.equal(evidence.nodeOverflowCount, 0, "exactly completing the head budget is not overflow");
+    assert.equal(evidence.elapsedTimeOverflowCount, 0);
+    assert.equal(evidence.urlCount, length === 0 ? 0 : 1);
+    assert.deepEqual(networkFidelityFailures({}, [], evidence), [], "ordinary metadata does not fail an article");
+  }
+  const overNodes = collect(4096);
+  assert.equal(overNodes.inspections, 2048, "non-link children still consume the head traversal budget");
+  assert.equal(overNodes.evidence.headNodeCount, 2048);
+  assert.equal(overNodes.evidence.nodeOverflowCount, 1);
+  assert.equal(overNodes.evidence.urlCount, 0, "a stylesheet past the inspected bound must not be claimed as inspected");
+  assert.ok(networkFidelityFailures({}, [], overNodes.evidence)
+    .includes("semantic role resource traversal exceeded its node budget"));
+
+  const overTime = collect(1000, 20);
+  assert.ok(overTime.inspections > 0 && overTime.inspections < 1000);
+  assert.equal(overTime.evidence.nodeOverflowCount, 0);
+  assert.equal(overTime.evidence.elapsedTimeOverflowCount, 1);
+  assert.ok(networkFidelityFailures({}, [], overTime.evidence)
+    .includes("semantic role resource traversal exceeded its time budget"));
+}
+
 function testRecoveryPaintClassification() {
   for (const [label, attributes, active] of [
     ["recovery-only", { "data-hotdeal-focus-status": "recovery-preflight-not-ready" }, false],
@@ -667,6 +716,7 @@ async function main() {
   await testSealDrainTimeoutFailsClosed();
   testSpecialIpRanges();
   testConnectAuthorityParser();
+  testHeadStylesheetTraversalBounds();
   process.stdout.write("PASS network fidelity pure-helper regression tests\n");
 }
 
