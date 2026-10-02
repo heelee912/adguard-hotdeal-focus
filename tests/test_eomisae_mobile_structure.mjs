@@ -97,6 +97,36 @@ try {
   assert.equal(await mobileListPage.locator('[data-hotdeal-focus-role="body"] img').count(),2);
   assert.equal(await mobileListPage.locator('.et_vars a').getAttribute('href'),'https://shop.invalid/product');
   await mobileListPage.close();
+  const navigationPage=await context.newPage();
+  const nativeMenuScript=`<script>document.addEventListener('DOMContentLoaded',()=>{const menu=document.querySelector('[data-cmt-overlay]');document.querySelector('[data-press-trigger]').addEventListener('click',()=>{menu.style.visibility='visible';menu.style.opacity='1';});menu.querySelector('.quit').addEventListener('click',event=>{event.preventDefault();menu.style.visibility='hidden';menu.style.opacity='0';});});</script>`;
+  const navigationHtml=fixtureHtml.replace('<head>', '<head><meta name="viewport" content="width=device-width,initial-scale=1"><style>.document_99000001_123{min-height:1800px}html{scroll-behavior:smooth}.cmt-option{width:100%;height:100%}</style>').replace('width:390px;height:176px;', 'inset:0;width:100vw;height:100vh;').replace('</body>',nativeMenuScript+'</body>');
+  await navigationPage.route('**/*',r=>r.fulfill({status:200,contentType:'text/html; charset=utf-8',body:navigationHtml}));
+  await navigationPage.addInitScript(({source,control})=>{(0,eval)(control);(0,eval)(source);},{source,control:PREAUTHORIZED_ADGUARD_CONTROL_SOURCE});
+  await navigationPage.goto('https://eomisae.co.kr/os/99000001');
+  await navigationPage.waitForFunction(()=>document.documentElement.getAttribute('data-hotdeal-focus-state')==='ready'&&!document.documentElement.hasAttribute('data-hotdeal-focus-lock'),null,{timeout:5000});
+  const navigation=navigationPage.getByRole('navigation',{name:'핫딜 읽기 도구'});
+  assert.equal(await navigation.getByRole('button',{name:'댓글',exact:true}).evaluate(button=>{
+   const rect=button.getBoundingClientRect();
+   return document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2)===button;
+  }),true,'A closed native comment overlay must not intercept reader navigation clicks');
+  await navigation.getByRole('button',{name:'댓글',exact:true}).click();
+  await navigationPage.waitForFunction(()=>window.scrollY>500&&document.querySelector('#comment_99000002').getBoundingClientRect().top<window.innerHeight,null,{timeout:1500});
+  assert.equal(await navigationPage.locator('#comment_99000002').getAttribute('data-hotdeal-focus-role'),'comment-item');
+  await navigationPage.locator('#comment_99000002 .comment_99000002_123').click();
+  await navigationPage.waitForFunction(()=>getComputedStyle(document.querySelector('.cmt-overlay-background')).visibility==='visible',null,{timeout:1500}).catch(async error=>{throw new Error(JSON.stringify(await navigationPage.evaluate(()=>({diagnostics:globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__,menu:document.querySelector('.cmt-overlay-background').outerHTML}))),{cause:error});});
+  assert.equal(await navigationPage.locator('html').getAttribute('data-hotdeal-focus-state'),'ready');
+  assert.doesNotMatch(await navigationPage.evaluate(()=>globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__.targetReason),/^frozen-/);
+  await navigationPage.locator('.cmt-overlay-background .quit').click();
+  await navigationPage.waitForFunction(()=>getComputedStyle(document.querySelector('.cmt-option')).pointerEvents==='none',null,{timeout:1500}).catch(async error=>{throw new Error(JSON.stringify(await navigationPage.evaluate(()=>({diagnostics:globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__,menu:document.querySelector('.cmt-overlay-background').outerHTML}))),{cause:error});});
+  assert.doesNotMatch(await navigationPage.evaluate(()=>globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__.targetReason),/^frozen-/);
+  await navigation.getByRole('button',{name:'본문',exact:true}).click();
+  await navigationPage.waitForFunction(()=>Math.abs(document.querySelector('[data-hotdeal-focus-role="body"]').getBoundingClientRect().top)<2,null,{timeout:1500});
+  assert.equal(new URL(navigationPage.url()).hash,'');
+  assert.equal(await navigationPage.locator('#D_ article a').evaluate(link=>{
+   const rect=link.getBoundingClientRect();
+   return document.elementFromPoint(rect.x+rect.width/2,rect.y+rect.height/2)===link;
+  }),true,'Closing the native menu must restore pointer access to the original purchase link');
+  await navigationPage.close();
  } finally {await context.close();}
 } finally {await browser.close();}
 console.log('Eomisae mobile comment context menu and original body regression passed');

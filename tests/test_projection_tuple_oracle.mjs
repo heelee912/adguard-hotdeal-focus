@@ -742,6 +742,8 @@ async function exerciseDynamicControl(page, hidden) {
         setup: { ok: true },
         terminalReason: runtime.terminalReason,
         role: control.getAttribute("data-hotdeal-focus-role"),
+        visibility: getComputedStyle(control).visibility,
+        pointerEvents: getComputedStyle(control).pointerEvents,
       };
     },
     {
@@ -3074,10 +3076,10 @@ try {
 
   const hiddenDynamicControl = await exerciseDynamicControl(page, true);
   assert.equal(hiddenDynamicControl.setup.ok, true);
-  assert.equal(
-    hiddenDynamicControl.terminalReason,
-    "role-projection-hidden-comment-addition",
-  );
+  assert.equal(hiddenDynamicControl.terminalReason, null);
+  assert.equal(hiddenDynamicControl.role, "comment-control");
+  assert.equal(hiddenDynamicControl.visibility, "hidden");
+  assert.equal(hiddenDynamicControl.pointerEvents, "none");
 
   const lowerBoundDynamicComment = await exerciseDynamicComment(page);
   assert.equal(lowerBoundDynamicComment.setup.ok, true);
@@ -4273,7 +4275,7 @@ try {
     const state = await gateState(dormantPublisherControl.page);
     assert.equal(state.diagnostics?.state, "ready");
     assert.equal(state.ready, "1");
-    assert.equal(state.commentControlProjection.projectionEpoch, 1);
+    assert.equal(state.commentControlProjection.projectionEpoch, 1, JSON.stringify(state));
     assert.equal(state.commentControlProjection.currentVisibleCount, 1);
     assert.equal(state.commentControlProjection.currentDormantApprovedCount, 0);
     assert.equal(

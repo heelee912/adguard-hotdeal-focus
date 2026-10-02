@@ -101,7 +101,8 @@ try {
       assert.equal(state.originalBodyImageVisible, true, "The same class on a native body image must never be filtered");
       const ui = runtimePage.locator('[data-hotdeal-focus-role="reader-ui"]');
       assert.equal(await ui.count(), 1);
-      assert.deepEqual(await ui.locator('a').allTextContents(), ["알구몬으로 돌아가기", "본문", "댓글"]);
+      assert.deepEqual(await ui.locator('a, button').allTextContents(), ["알구몬으로 돌아가기", "본문", "댓글"]);
+      assert.equal(await ui.locator('button[type="button"]').count(), 2);
       assert.equal(await ui.locator('a').first().getAttribute('href'), 'https://www.algumon.com/');
       await runtimePage.evaluate(() => {
         globalThis.__originalReaderBody = document.querySelector('#new_contents');

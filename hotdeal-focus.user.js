@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.77
+// @version      0.6.80
 // @description  Fail-closed semantic reader gate for Algumon hot-deal destinations.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
@@ -2576,7 +2576,7 @@
       AD_NETWORK_RESOURCE_PATTERN.test(style.backgroundImage || "");
   }
 
-  function containsPublisherPaintRisk(root, excludedRoots) {
+  function containsPublisherPaintRisk(root, excludedRoots, allowPositionedRoot = false) {
     const document = root.ownerDocument;
     const view = document.defaultView;
     const fullscreenElement = document.fullscreenElement;
@@ -2597,7 +2597,8 @@
       if (canPaint) {
         if (
           pseudoPaintIsStrongNoise(style) ||
-          positionedViewportOverlay(current, style, view) ||
+          (!(allowPositionedRoot && current === root) &&
+            positionedViewportOverlay(current, style, view)) ||
           (current.matches("dialog[open]") || activePopover(current))
         ) {
           return true;
@@ -2652,9 +2653,9 @@
     commentControls.forEach(function collectControlShellChain(surface) {
       const boundary = commentMount.contains(surface) ? commentMount : commentControlScope;
       for (
-        // Dormant native comment menus cannot paint. Inspect their ancestor
-        // shells here; visible controls are still fully paint-checked below.
-        let current = isRendered(surface) ? surface : surface.parentElement;
+        // The selected control is paint-checked separately, including native
+        // menu placement. Only its surrounding layout belongs to this shell check.
+        let current = surface.parentElement;
         current && boundary && boundary.contains(current);
         current = current.parentElement
       ) {
@@ -2705,7 +2706,7 @@
     }
     if (visibleControls.some(function unsafeVisibleControl(control) {
       return containsUnprovenShadowBoundary(control, []) ||
-        containsPublisherPaintRisk(control, []);
+        containsPublisherPaintRisk(control, [], true);
     })) {
       return true;
     }
@@ -5382,6 +5383,10 @@
     roles.commentControls.forEach(function markInitialCommentControl(control) {
       markDeepSubtree(control, "comment-control", ownedElements, nonce);
       markAncestorChain(control, ownedElements, nonce, shellElements);
+      control.classList.toggle(
+        roleClass("comment-dormant"),
+        (roles.commentDormantControls || []).includes(control),
+      );
     });
     markAncestorChain(commonRoot, ownedElements, nonce, shellElements);
     const readerUi = createReaderUi(document, roles);
@@ -5470,16 +5475,18 @@
       ["본문", "#", roles.body],
       ["댓글", "#", roles.comments],
     ].map(function createReaderLink([label, href, destination]) {
-      const link = document.createElement("a");
+      const link = document.createElement(destination ? "button" : "a");
       const text = document.createTextNode(label);
-      link.setAttribute("href", href);
+      const actionAttribute = destination ? "type" : "href";
+      const actionValue = destination ? "button" : href;
+      link.setAttribute(actionAttribute, actionValue);
       link.appendChild(text);
       if (destination) {
         const navigate = function scrollOriginalContent(event) {
           event.preventDefault();
-          event.stopPropagation();
+          event.stopImmediatePropagation();
           if (destination.isConnected) {
-            destination.scrollIntoView({ block: "start", behavior: "auto" });
+            destination.scrollIntoView({ block: "start", behavior: "instant" });
           }
         };
         if (typeof NATIVE.addEventListener === "function") {
@@ -5488,7 +5495,7 @@
           link.addEventListener("click", navigate, true);
         }
       }
-      return Object.freeze({ link, text, label, href });
+      return Object.freeze({ link, text, label, actionAttribute, actionValue });
     });
     root.append(...links.map(function uiLink(entry) { return entry.link; }));
     document.body.prepend(root);
@@ -5527,7 +5534,7 @@
     };
     restoreElement(ui.root, [["aria-label", "핫딜 읽기 도구"]]);
     ui.links.forEach(function restoreOriginalUiLink(entry) {
-      restoreElement(entry.link, [["href", entry.href]]);
+      restoreElement(entry.link, [[entry.actionAttribute, entry.actionValue]]);
       if (entry.text.data !== entry.label) entry.text.data = entry.label;
       if (entry.link.childNodes.length !== 1 || entry.link.firstChild !== entry.text) {
         entry.link.replaceChildren(entry.text);
@@ -6008,6 +6015,8 @@
       `[${ATTR.status}="ready"]`;
     const owned = `.${CLASS.keep}[${ATTR.keep}="${nonce}"]`;
     const shell = `.${CLASS.shell}[${ATTR.shell}="${nonce}"]`;
+    const dormantControl = `${owned}.${roleClass("comment-control")}` +
+      `[${ATTR.role}="comment-control"].${roleClass("comment-dormant")}`;
     const releaseProbe = `[data-hdf-v2-release-probe="${nonce}"]`;
     return [
       lockRule,
@@ -6031,6 +6040,8 @@
         `[${ATTR.role}="comment-item"],`,
       `${readyRoot} ${owned}.${roleClass("comment-control")}` +
         `[${ATTR.role}="comment-control"] { visibility: visible !important; }`,
+      `${readyRoot} ${dormantControl}, ${readyRoot} ${dormantControl} * { ` +
+        `visibility: hidden !important; pointer-events: none !important; }`,
       `${readyRoot} ${owned}${shell}::before,`,
       `${readyRoot} ${owned}${shell}::after { content: none !important; display: none !important; }`,
       `${readyRoot} body { box-sizing: border-box !important; max-width: 1040px !important; ` +
@@ -8550,6 +8561,33 @@
       forgetRemovedTree(node, state);
       return "non-item";
     };
+    const synchronizeCommentControlVisibility = function synchronizeCommentControlVisibility(
+      control,
+      verifyNewContent = false,
+    ) {
+      const publisherState = withPublisherVisibilityMeasurement(
+        document,
+        function measureNativeCommentControl() {
+          const rendered = isRendered(control);
+          return {
+            rendered,
+            safe: (!verifyNewContent || !containsSemanticNoise(control, new WeakMap(), [])) &&
+              !containsUnprovenShadowBoundary(control, []) &&
+              (rendered
+                ? !containsPublisherPaintRisk(control, [], true)
+                : approvedDormantCommentControl(control, state)),
+          };
+        },
+        function rejectUnsafeCommentControlMeasurement() { return null; },
+      );
+      if (!publisherState?.safe) return false;
+      // Deep projection must not turn a publisher's closed native menu into
+      // an invisible, viewport-sized mouse/touch interceptor.
+      control.classList.toggle(roleClass("comment-dormant"), !publisherState.rendered);
+      if (!publisherState.rendered) state.toggleableCommentControls.add(control);
+      rememberAuthorizedMarkerTree(control, state);
+      return consumeAuthorizedMarkerMutations(new Set([control]));
+    };
     const reconcileDynamicCommentControl =
       function reconcileDynamicCommentControl(control) {
         if (
@@ -8604,21 +8642,7 @@
         );
         rememberAuthorizedMarkerTree(control, state);
         if (!consumeAuthorizedMarkerMutations(authorizedTargets)) return false;
-        return withPublisherVisibilityMeasurement(
-          document,
-          function verifyReconciledCommentControl() {
-            if (
-              containsSemanticNoise(control, new WeakMap(), []) ||
-              containsUnprovenShadowBoundary(control, [])
-            ) {
-              return false;
-            }
-            return isRendered(control)
-              ? !containsPublisherPaintRisk(control, [])
-              : approvedDormantCommentControl(control, state);
-          },
-          function rejectUnsafeCommentControlMeasurement() { return false; },
-        );
+        return synchronizeCommentControlVisibility(control, true);
       };
     const observer = createNativeMutationObserver(browserRoot, function sealProjection(mutations) {
       try {
@@ -8635,6 +8659,7 @@
         let commentCountEvidenceChanged = false;
         const atomicRolesChanged = new Set();
         const dynamicCommentControlsChanged = new Set();
+        const commentControlStatesChanged = new Set();
         for (const mutation of mutations) {
         if (failureReason) break;
         if (state.readerUi?.nodes.has(mutation.target)) continue;
@@ -8705,14 +8730,8 @@
             COMMENT_CONTROL_STATE_ATTRIBUTES.has(name) &&
             elementMatchesAny(controlRoot, state.commentControlSelectors)
           ) {
-            if (!isRendered(controlRoot)) {
-              state.toggleableCommentControls.add(controlRoot);
-            } else if (containsPublisherPaintRisk(controlRoot, [])) {
-              failureReason = "projection-mismatch";
-            }
-            if (!failureReason) {
-              commentProjectionChanged = true;
-            }
+            commentControlStatesChanged.add(controlRoot);
+            commentProjectionChanged = true;
             continue;
           }
           if (
@@ -8991,7 +9010,10 @@
             addedCommentItemCount += 1;
           } else {
             state.commentControlRoots.add(added);
-            if (!isRendered(added)) state.toggleableCommentControls.add(added);
+            if (!synchronizeCommentControlVisibility(added)) {
+              failureReason = "comment-control-visibility";
+              break;
+            }
           }
           commentProjectionChanged = true;
           // Empty comment anchors and hidden load-more controls are valid
@@ -9005,7 +9027,7 @@
             ? "hidden-comment-addition"
             : containsUnprovenShadowBoundary(added, [])
               ? "shadow-comment-addition"
-              : renderedAddition && containsPublisherPaintRisk(added, [])
+              : renderedAddition && containsPublisherPaintRisk(added, [], classification === "control")
                 ? "publisher-paint-comment-addition"
                 : null;
           if (additionFailure) {
@@ -9018,6 +9040,15 @@
           for (const control of dynamicCommentControlsChanged) {
             if (!reconcileDynamicCommentControl(control)) {
               failureReason = "comment-control-reconciliation";
+              break;
+            }
+          }
+        }
+        if (!failureReason) {
+          for (const control of commentControlStatesChanged) {
+            if (!dynamicCommentControlsChanged.has(control) &&
+                !synchronizeCommentControlVisibility(control)) {
+              failureReason = "comment-control-visibility";
               break;
             }
           }
