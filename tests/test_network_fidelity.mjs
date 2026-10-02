@@ -3,11 +3,17 @@ import vm from "node:vm";
 
 import {
   FIRST_PAINT_PROBE_SOURCE,
+  canonicalArticleIdentity,
+  consumeArticleAccessLease,
+  createArticleAccessLease,
   createNetworkPolicyEvidenceRecorder,
   isPrivateOrSpecialIp,
   networkFidelityFailures,
   networkRequestDecision,
+  networkResourceUrlSha256,
   parseConnectAuthority,
+  primeDeclaredArticleNavigation,
+  validatePublicDnsAnswers,
 } from "../scripts/audit_pages.mjs";
 
 function assertDecision(label, input, expected) {
@@ -352,15 +358,17 @@ function testConcurrentReservations() {
   assert.equal(recorder.snapshot().attemptedRemoteRequestCount, 3);
 }
 
-function testAllowedResourceFailuresAreTerminalFidelityEvidence() {
+function testOptionalFailuresStayObservedWhileArticleResourcesRemainRequired() {
   const recorder = createNetworkPolicyEvidenceRecorder();
   recorder.recordAllowedRequestFailure(
     "ads.example",
     "script",
     "net::ERR_CONNECTION_RESET",
     false,
+    "https://ads.example/collect/private-token?secret=value",
   );
-  recorder.recordAllowedResponseFailure("api.example", "fetch", 503, false);
+  recorder.recordAllowedResponseFailure("api.example", "fetch", 503, false,
+    "https://api.example/analytics?secret=value");
 
   const evidence = recorder.snapshot();
   assert.deepEqual(evidence.failedAllowedRequestHosts, [{
@@ -377,9 +385,110 @@ function testAllowedResourceFailuresAreTerminalFidelityEvidence() {
     requestTypes: ["fetch"],
     reasons: ["http-503"],
   }]);
-  const failures = networkFidelityFailures(evidence);
+  assert.deepEqual(networkFidelityFailures(evidence), [], "unrelated ads and analytics must not reject an article");
+  assert.equal(JSON.stringify(evidence).includes("private-token"), false);
+  assert.equal(JSON.stringify(evidence).includes("secret=value"), false);
+  const failures = networkFidelityFailures(evidence, [], {
+    hosts: ["ads.example", "api.example"],
+    urlSha256s: [
+      networkResourceUrlSha256("https://ads.example/collect/private-token?secret=value"),
+      networkResourceUrlSha256("https://api.example/analytics?secret=value"),
+    ],
+  });
   assert.ok(failures.includes("an allowed remote request failed before a complete response"));
   assert.ok(failures.includes("an allowed remote response returned HTTP 4xx or 5xx"));
+  const sameHost = createNetworkPolicyEvidenceRecorder();
+  sameHost.recordAllowedResponseFailure("article.example", "script", 404, false,
+    "https://article.example/obsolete-analytics.js");
+  const articleResources = { hosts: ["article.example"], urlSha256s: [
+    networkResourceUrlSha256("https://article.example/product.webp"),
+    networkResourceUrlSha256("https://article.example/article.css"),
+  ] };
+  assert.deepEqual(networkFidelityFailures(sameHost.snapshot(), ["article.example"], articleResources), [],
+    "a stale same-origin analytics script must not be confused with an article resource");
+  sameHost.recordAllowedRequestFailure("article.example", "image", "net::ERR_ABORTED", false,
+    "https://article.example/product.webp#ignored");
+  sameHost.recordAllowedResponseFailure("article.example", "stylesheet", 404, false,
+    "https://article.example/article.css");
+  assert.equal(networkFidelityFailures(sameHost.snapshot(), ["article.example"], articleResources).length, 2);
+  const document = createNetworkPolicyEvidenceRecorder();
+  document.recordAllowedRequestFailure("article.example", "document", "net::ERR_ABORTED", true,
+    "https://article.example/deal/1");
+  assert.equal(networkFidelityFailures(document.snapshot()).length, 1,
+    "main document failures remain terminal without any role evidence");
+}
+
+function testPublicDnsAnswerCardinalityAndPrivacy() {
+  const publicRecords = Array.from({ length: 128 }, (_, index) => ({ address: `8.8.8.${index + 1}` }));
+  const full = validatePublicDnsAnswers(publicRecords);
+  assert.equal(full.reason, "public-addresses-validated");
+  assert.equal(full.answerCount, 128);
+  assert.equal(full.uniqueAddressCount, 128);
+  assert.equal(full.addresses.length, 128);
+  const normalCdn = validatePublicDnsAnswers(publicRecords.slice(0, 32));
+  assert.equal(normalCdn.addresses.length, 32, "a normal CDN may legitimately have more than sixteen public addresses");
+  const duplicates = validatePublicDnsAnswers([...publicRecords.slice(0, 32), ...publicRecords.slice(0, 32)]);
+  assert.equal(duplicates.answerCount, 64);
+  assert.equal(duplicates.uniqueAddressCount, 32);
+  assert.equal(duplicates.addresses.length, 32);
+  const tooMany = validatePublicDnsAnswers([...publicRecords, { address: "1.1.1.1" }]);
+  assert.equal(tooMany.reason, "dns-answer-budget-exceeded");
+  assert.equal(tooMany.uniqueAddressCount, 129);
+  assert.deepEqual(tooMany.addresses, []);
+  for (const address of ["127.0.0.1", "10.0.0.1", "::1", "::ffff:7f00:1", "invalid"]) {
+    const unsafe = validatePublicDnsAnswers([...publicRecords.slice(0, 32), { address }]);
+    assert.equal(unsafe.reason, "dns-not-public", address);
+    assert.deepEqual(unsafe.addresses, [], "one private answer rejects the entire pinned set");
+  }
+}
+
+function testArticleLeaseBudgetsOnlyScopedCookies() {
+  const now = 1_800_000_000_000;
+  const identity = canonicalArticleIdentity("https://example.com/deal/7");
+  const binding = { siteId: "example", profileName: "desktop",
+    requestedArticleIdentitySha256: identity.sha256,
+    resolvedArticleIdentitySha256: identity.sha256, resolvedRouteFamily: identity.routeFamily };
+  const cookie = (index, domain = ".example.com", value = "test-value") => ({
+    name: `c${index}`, value, domain, path: "/", expires: -1,
+    httpOnly: true, secure: true, sameSite: "None",
+  });
+  const foreign = Array.from({ length: 80 }, (_, index) => cookie(index, ".ads.example.net", "x".repeat(1000)));
+  const scoped = Array.from({ length: 64 }, (_, index) => cookie(index));
+  const lease = createArticleAccessLease([...foreign, ...scoped], binding, ["example.com"], now);
+  assert.equal(lease.evidence.cookieCount, 64);
+  assert.deepEqual(lease.storageState.origins, []);
+  assert.equal(lease.storageState.cookies.some(entry => entry.domain === ".ads.example.net"), false);
+  assert.equal(JSON.stringify(lease.evidence).includes("test-value"), false);
+  const consumed = consumeArticleAccessLease(lease, binding, now + 1);
+  assert.equal(consumed.cookies.length, 64);
+  assert.throws(() => consumeArticleAccessLease(lease, binding, now + 2));
+  assert.throws(() => createArticleAccessLease([...scoped, cookie(65)], binding, ["example.com"], now), /cookie count/);
+  assert.throws(() => createArticleAccessLease(Array.from({ length: 17 }, (_, i) => cookie(i, ".example.com", "x".repeat(4096))),
+    binding, ["example.com"], now), /cookie bytes/);
+  assert.throws(() => createArticleAccessLease([cookie(1, ".example.com", "bad\nvalue")], binding, ["example.com"], now), /invalid cookie/);
+  const rejected = createArticleAccessLease([
+    { ...cookie(1), secure: false }, { ...cookie(2), expires: now / 1000 - 1 }, cookie(3, ".example.com.attacker.test"),
+  ], binding, ["example.com"], now);
+  assert.equal(rejected.evidence.cookieCount, 0);
+}
+
+async function testArticleNavigationPrimingIsScopedAndPublic() {
+  const calls = [];
+  const session = { approvePublicHost: async hostname => {
+    calls.push(hostname);
+    return ["8.8.8.8"];
+  } };
+  await primeDeclaredArticleNavigation(session, "https://www.example.com/deal/7", ["example.com"]);
+  assert.deepEqual(calls, ["www.example.com"]);
+  for (const url of ["http://example.com/deal/7", "https://evil.example.net/deal/7",
+    "https://user:secret@example.com/deal/7", "https://example.com:8443/deal/7", "https://127.0.0.1/deal/7"]) {
+    await assert.rejects(primeDeclaredArticleNavigation(session, url, ["example.com"]), /priming refused/);
+  }
+  assert.deepEqual(calls, ["www.example.com"], "invalid destinations must never reach DNS or approval");
+  for (const addresses of [[], ["127.0.0.1"], ["8.8.8.8", "10.0.0.1"]]) {
+    await assert.rejects(primeDeclaredArticleNavigation({ approvePublicHost: async () => addresses },
+      "https://example.com/deal/7", ["example.com"]), /no verified public/);
+  }
 }
 
 async function testSealDrainAndLateRequest() {
@@ -550,7 +659,10 @@ async function main() {
   testRemoteHostBudgetBoundary();
   testRemoteRequestBudgetBoundary();
   testConcurrentReservations();
-  testAllowedResourceFailuresAreTerminalFidelityEvidence();
+  testOptionalFailuresStayObservedWhileArticleResourcesRemainRequired();
+  testPublicDnsAnswerCardinalityAndPrivacy();
+  testArticleLeaseBudgetsOnlyScopedCookies();
+  await testArticleNavigationPrimingIsScopedAndPublic();
   await testSealDrainAndLateRequest();
   await testSealDrainTimeoutFailsClosed();
   testSpecialIpRanges();

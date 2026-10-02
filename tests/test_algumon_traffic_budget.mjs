@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { runInNewContext } from "node:vm";
 
 import {
   AlgumonRequestBudgetExceeded,
   DEFAULT_ALGUMON_REQUEST_START_BUDGET,
   capturedAlgumonTargetsFromReport,
+  classifyAlgumonSourceResponse,
+  countExistingApprovedLayoutMatches,
   createAlgumonRequestStartBudget,
   createLowTrafficAlgumonProbePlan,
   transferAlgumonRelaySession,
@@ -224,9 +227,70 @@ async function testSourceSessionCookiesStayInMemoryAndInScope() {
   assert.equal(actions.length, 2, "invalid source cookies never mutate the private relay context");
 }
 
+async function testRegisteredArticleProjectionDoesNotRequireLegacySeed() {
+  const layout = { id: "jirum", domain: "clien.net", paths: ["/service/board/jirum/"] };
+  const oracleSource = `module.exports = {
+    SITE_CONTRACTS: [{ id: "clien", domain: "clien.net", layouts: [${JSON.stringify(layout)}] }],
+    pathPatternMatches(path, prefix) { return path.startsWith(prefix); },
+    resolveProjectionClasses(document, layouts, seed) {
+      if (seed !== null && seed.siteType !== "clien") throw Error("wrong seed");
+      return { projectionClasses: layouts.map(layout => [{ layoutId: layout.id }]) };
+    }
+  };`;
+  const pageFor = (hostname) => ({ context: () => ({ newCDPSession: async () => ({
+    send: async (method, options) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "fixture" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.callFunctionOn") {
+        const execute = runInNewContext(`(${options.functionDeclaration})`, {
+          location: { hostname, pathname: "/service/board/jirum/123", search: "" },
+          document: {},
+        });
+        return { result: { type: "object", value: execute(options.arguments[0].value) } };
+      }
+      return {};
+    },
+    detach: async () => {},
+  }) }) });
+  const registered = await countExistingApprovedLayoutMatches(pageFor("www.clien.net"), layout, oracleSource, null);
+  assert.equal(registered.semanticProjectionCount, 1);
+  assert.equal(registered.classes[0].canonicalId, "jirum");
+  const seeded = await countExistingApprovedLayoutMatches(pageFor("www.clien.net"), layout, oracleSource, {
+    siteType: "clien", title: "쌀", commentCount: 0,
+  });
+  assert.equal(seeded.semanticProjectionCount, 1);
+  const wrongHost = await countExistingApprovedLayoutMatches(pageFor("www.clien.net.evil.example"), layout, oracleSource, null, [layout]);
+  assert.equal(wrongHost.semanticProjectionCount, 0, "explicit layouts do not override the exact site hostname");
+  const wrongSeed = await countExistingApprovedLayoutMatches(pageFor("www.clien.net"), layout, oracleSource, {
+    siteType: "ruliweb", title: "쌀", commentCount: 0,
+  });
+  assert.equal(wrongSeed.semanticProjectionCount, 0, "a supplied contradictory source identity remains rejected");
+}
+
+function testSourceUrlMismatchRetainsDiagnosticIdentityWithoutQueryValues() {
+  const failure = classifyAlgumonSourceResponse({
+    status: 200,
+    contentType: "text/html",
+    requestedUrl: "https://www.algumon.com/n/deal",
+    responseUrl: "https://www.algumon.com/n/deal",
+    finalUrl: "https://www.algumon.com/n/deal?session=not-to-be-recorded#feed",
+    title: "알구몬", bodyText: "핫딜",
+  });
+  assert.equal(failure.kind, "source-or-infrastructure-failure");
+  assert.equal(failure.exactUrl, false);
+  assert.equal(failure.final.pathname, "/n/deal");
+  assert.deepEqual(failure.final.queryKeys, ["session"]);
+  assert.equal(failure.final.hasFragment, true);
+  assert.equal(failure.response.urlSha256, failure.requested.urlSha256);
+  assert.equal(JSON.stringify(failure).includes("not-to-be-recorded"), false);
+  assert.notEqual(failure.final.urlSha256, failure.requested.urlSha256);
+}
+
 testLowTrafficProbePlan();
 testHardRequestStartBudget();
 testCapturedSnapshotProducesNoSourceRequests();
 testCurrentEncryptedRelaySnapshotRetainsExactProvenance();
 await testSourceSessionCookiesStayInMemoryAndInScope();
+await testRegisteredArticleProjectionDoesNotRequireLegacySeed();
+testSourceUrlMismatchRetainsDiagnosticIdentityWithoutQueryValues();
 process.stdout.write("Algumon traffic budget tests passed\n");

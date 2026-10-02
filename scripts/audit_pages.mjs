@@ -64,7 +64,7 @@ const PINNED_PROXY_MAX_ACTIVE_TUNNELS = 256;
 const PINNED_PROXY_MAX_TRANSFER_BYTES = 512 * 1024 * 1024;
 const PINNED_PROXY_CONNECT_TIMEOUT_MS = 15_000;
 const PINNED_PROXY_DNS_TIMEOUT_MS = 5_000;
-const PINNED_PROXY_MAX_DNS_ADDRESSES = 16;
+const PINNED_PROXY_MAX_DNS_ADDRESSES = 128;
 const PINNED_PROXY_MAX_EVIDENCE_HOSTS = 128;
 const EXACT_CHALLENGE_RESOURCE_HOSTS_BY_SITE = Object.freeze({
   arcalive: Object.freeze(["challenges.cloudflare.com"]),
@@ -1056,6 +1056,9 @@ function createNetworkPolicyEvidenceRecorder({
   const undeclaredPublicByHost = new Map();
   const failedAllowedRequestByHost = new Map();
   const failedAllowedResponseByHost = new Map();
+  const failedAllowedRequests = [];
+  const failedAllowedResponses = [];
+  let failedResourceEvidenceOverflowCount = 0;
   const navigationViolationByAuthority = new Map();
   const navigationViolationKeys = new Set();
   const attemptedRemoteHosts = new Set();
@@ -1101,6 +1104,20 @@ function createNetworkPolicyEvidenceRecorder({
     .sort((left, right) =>
       left.hostname < right.hostname ? -1 : left.hostname > right.hostname ? 1 : 0,
     );
+  const recordFailedResource = (collection, hostname, requestType, reason, isMainNavigation, urlText) => {
+    if (collection.length >= maximumRemoteRequests) {
+      failedResourceEvidenceOverflowCount += 1;
+      return;
+    }
+    collection.push({
+      hostname: normalizedHostname(hostname).slice(0, 253),
+      requestType: String(requestType ?? "unknown").slice(0, 32),
+      reason: String(reason ?? "unknown").slice(0, 64),
+      isMainNavigation: isMainNavigation === true,
+      // URLs may carry signed queries or path tokens. Persist only their digest.
+      urlSha256: networkResourceUrlSha256(urlText),
+    });
+  };
   return {
     reserveRemoteRequest(hostname) {
       lastRemoteEventAt = Date.now();
@@ -1144,10 +1161,11 @@ function createNetworkPolicyEvidenceRecorder({
         record(undeclaredPublicByHost, hostname, requestType, reason, isMainNavigation);
       }
     },
-    recordAllowedRequestFailure(hostname, requestType, reason, isMainNavigation) {
+    recordAllowedRequestFailure(hostname, requestType, reason, isMainNavigation, urlText) {
       record(failedAllowedRequestByHost, hostname, requestType, reason, isMainNavigation);
+      recordFailedResource(failedAllowedRequests, hostname, requestType, reason, isMainNavigation, urlText);
     },
-    recordAllowedResponseFailure(hostname, requestType, status, isMainNavigation) {
+    recordAllowedResponseFailure(hostname, requestType, status, isMainNavigation, urlText) {
       record(
         failedAllowedResponseByHost,
         hostname,
@@ -1155,6 +1173,8 @@ function createNetworkPolicyEvidenceRecorder({
         `http-${Number.isInteger(status) ? status : "invalid"}`,
         isMainNavigation,
       );
+      recordFailedResource(failedAllowedResponses, hostname, requestType,
+        `http-${Number.isInteger(status) ? status : "invalid"}`, isMainNavigation, urlText);
     },
     recordExactChallenge(hostname, requestType, reason, isMainNavigation) {
       record(exactChallengeByHost, hostname, requestType, reason, isMainNavigation);
@@ -1220,6 +1240,9 @@ function createNetworkPolicyEvidenceRecorder({
         undeclaredPublicHosts: serialize(undeclaredPublicByHost),
         failedAllowedRequestHosts: serialize(failedAllowedRequestByHost),
         failedAllowedResponseHosts: serialize(failedAllowedResponseByHost),
+        failedAllowedRequests: failedAllowedRequests.map((entry) => ({ ...entry })),
+        failedAllowedResponses: failedAllowedResponses.map((entry) => ({ ...entry })),
+        failedResourceEvidenceOverflowCount,
         navigationViolations: serialize(navigationViolationByAuthority),
         blockedHosts,
         blockedHostCount: blockedHosts.length,
@@ -1229,6 +1252,29 @@ function createNetworkPolicyEvidenceRecorder({
       };
     },
   };
+}
+
+function networkResourceUrlSha256(urlText) {
+  try {
+    const url = new URL(urlText);
+    url.hash = "";
+    return sha256(url.href);
+  } catch {
+    return null;
+  }
+}
+
+async function primeDeclaredArticleNavigation(session, targetUrl, navigationDomains) {
+  const decision = networkRequestDecision(targetUrl, true, navigationDomains, navigationDomains);
+  if (!decision.allowed || !decision.hostname) {
+    throw new Error(`article navigation priming refused: ${decision.reason}`);
+  }
+  // Chromium may open CONNECT before route interception. Pin only the already
+  // approved article host before goto; redirects still pass the ordinary guard.
+  const addresses = await session.approvePublicHost(decision.hostname);
+  if (!Array.isArray(addresses) || addresses.length === 0 || addresses.some(isPrivateOrSpecialIp)) {
+    throw new Error("article navigation priming found no verified public DNS addresses");
+  }
 }
 
 function networkFidelityFailures(
@@ -1251,6 +1297,22 @@ function networkFidelityFailures(
       }
     : roleReferencedResourceEvidence ?? { hosts: [] };
   const pinnedTransport = networkPolicyEvidence?.pinnedTransport ?? null;
+  const requiredResourceDigests = new Set(roleResourceEvidence.urlSha256s ?? []);
+  const referencedHosts = new Set((roleResourceEvidence.hosts ?? []).map(normalizedHostname));
+  const isRequiredHost = (hostname) =>
+    declaredResourceDomains.some((domain) => hostnameMatches(hostname, domain)) ||
+    referencedHosts.has(normalizedHostname(hostname));
+  const hasRequiredFailure = (requestKey, hostKey) => {
+    const requests = networkPolicyEvidence?.[requestKey];
+    if (Array.isArray(requests)) {
+      return requests.some((entry) => entry.isMainNavigation === true ||
+        (entry.urlSha256 && requiredResourceDigests.has(entry.urlSha256)) ||
+        // Older callers without exact URL evidence keep the conservative host check.
+        (!entry.urlSha256 && isRequiredHost(entry.hostname)));
+    }
+    return (networkPolicyEvidence?.[hostKey] ?? []).some((entry) =>
+      entry.mainNavigationCount > 0 || isRequiredHost(entry.hostname));
+  };
   if (
     networkPolicyEvidence?.mode === "bounded-public-https-fidelity" &&
     pinnedTransport?.mode !== "route-approved-numeric-ip-connect"
@@ -1275,11 +1337,14 @@ function networkFidelityFailures(
   if ((networkPolicyEvidence?.navigationViolations ?? []).length > 0) {
     failures.push("a main frame reached a non-approved or local document URL");
   }
-  if ((networkPolicyEvidence?.failedAllowedRequestHosts ?? []).length > 0) {
+  if (hasRequiredFailure("failedAllowedRequests", "failedAllowedRequestHosts")) {
     failures.push("an allowed remote request failed before a complete response");
   }
-  if ((networkPolicyEvidence?.failedAllowedResponseHosts ?? []).length > 0) {
+  if (hasRequiredFailure("failedAllowedResponses", "failedAllowedResponseHosts")) {
     failures.push("an allowed remote response returned HTTP 4xx or 5xx");
+  }
+  if ((networkPolicyEvidence?.failedResourceEvidenceOverflowCount ?? 0) > 0) {
+    failures.push("failed resource evidence exceeded its bounded request count");
   }
   if ((networkPolicyEvidence?.remoteHostBudgetOverflowCount ?? 0) > 0) {
     failures.push("remote resource host cardinality exceeded its fail-closed budget");
@@ -1344,10 +1409,6 @@ function networkFidelityFailures(
   if ((roleResourceEvidence.unsafeReferences ?? []).length > 0) {
     failures.push("semantic role resources contain insecure or non-default authorities");
   }
-  const referencedHosts = new Set((roleResourceEvidence.hosts ?? []).map(normalizedHostname));
-  const isRequiredHost = (hostname) =>
-    declaredResourceDomains.some((domain) => hostnameMatches(hostname, domain)) ||
-    referencedHosts.has(normalizedHostname(hostname));
   const requiredBlockedHosts = (networkPolicyEvidence?.blockedHosts ?? []).filter(
     (entry) => isRequiredHost(entry.hostname),
   );
@@ -1476,11 +1537,30 @@ function parseConnectAuthority(authority) {
   return { hostname, port };
 }
 
+function validatePublicDnsAnswers(records, maximumAddresses = PINNED_PROXY_MAX_DNS_ADDRESSES) {
+  if (!Array.isArray(records)) {
+    return { addresses: [], answerCount: 0, uniqueAddressCount: 0, reason: "dns-invalid-answer" };
+  }
+  const addresses = [...new Set(records.map((record) => normalizedHostname(record?.address)))].sort();
+  const evidence = { answerCount: records.length, uniqueAddressCount: addresses.length };
+  if (addresses.length > maximumAddresses) {
+    return { ...evidence, addresses: [], reason: "dns-answer-budget-exceeded" };
+  }
+  if (addresses.length === 0) {
+    return { ...evidence, addresses: [], reason: "dns-empty-answer" };
+  }
+  if (addresses.some(isPrivateOrSpecialIp)) {
+    return { ...evidence, addresses: [], reason: "dns-not-public" };
+  }
+  return { ...evidence, addresses, reason: "public-addresses-validated" };
+}
+
 async function createPinnedPublicHttpsProxy() {
   const approvedAddressesByHost = new Map();
   const resolutionCache = new Map();
   const connectedByHost = new Map();
   const rejectedByHost = new Map();
+  const dnsAnswersByHost = new Map();
   const sockets = new Set();
   let connectRequestCount = 0;
   let activeTunnelCount = 0;
@@ -1537,21 +1617,29 @@ async function createPinnedPublicHttpsProxy() {
             }, PINNED_PROXY_DNS_TIMEOUT_MS);
           }),
         ]).finally(() => clearTimeout(timeoutId));
-        const addresses = [
-          ...new Set(records.map(({ address }) => normalizedHostname(address))),
-        ].sort();
-        if (addresses.length > PINNED_PROXY_MAX_DNS_ADDRESSES) {
+        const answer = validatePublicDnsAnswers(records);
+        dnsAnswersByHost.set(normalized, {
+          hostname: normalized,
+          answerCount: answer.answerCount,
+          uniqueAddressCount: answer.uniqueAddressCount,
+          maximumAddresses: PINNED_PROXY_MAX_DNS_ADDRESSES,
+          reason: answer.reason,
+        });
+        if (answer.reason === "dns-answer-budget-exceeded") {
           dnsAddressOverflowCount += 1;
-          return [];
         }
-        if (
-          addresses.length < 1 ||
-          addresses.some((address) => isPrivateOrSpecialIp(address))
-        ) {
-          return [];
+        if (answer.addresses.length === 0) {
+          record(rejectedByHost, normalized, answer.reason);
         }
-        return addresses;
+        return answer.addresses;
       } catch {
+        dnsAnswersByHost.set(normalized, {
+          hostname: normalized,
+          answerCount: null,
+          uniqueAddressCount: null,
+          maximumAddresses: PINNED_PROXY_MAX_DNS_ADDRESSES,
+          reason: "dns-resolution-failed",
+        });
         return [];
       }
     })();
@@ -1739,6 +1827,10 @@ async function createPinnedPublicHttpsProxy() {
   return {
     serverUrl: `http://127.0.0.1:${address.port}`,
     approvePublicHost,
+    rejectionReasonForHost(hostname) {
+      const reason = dnsAnswersByHost.get(normalizedHostname(hostname))?.reason;
+      return reason && reason !== "public-addresses-validated" ? reason : "public-host-not-approved";
+    },
     seal() {
       sealed = true;
     },
@@ -1754,6 +1846,8 @@ async function createPinnedPublicHttpsProxy() {
         transferByteCount,
         transferByteBudgetOverflowCount,
         dnsAddressOverflowCount,
+        dnsAnswerEvidence: [...dnsAnswersByHost.values()].sort((left, right) =>
+          left.hostname < right.hostname ? -1 : left.hostname > right.hostname ? 1 : 0),
         dnsTimeoutCount,
         evidenceHostOverflowCount,
         transportErrorCount,
@@ -2893,7 +2987,7 @@ function fidelitySelectorsForLayout(layout) {
 }
 
 async function roleReferencedResourceHosts(page, selectors) {
-  return evaluateInIsolatedWorld(page, (roleSelectors) => {
+  const evidence = await evaluateInIsolatedWorld(page, (roleSelectors) => {
     const maximumRoots = 32;
     const maximumNodes = 2_048;
     const maximumUrls = 4_096;
@@ -3074,7 +3168,13 @@ async function roleReferencedResourceHosts(page, selectors) {
         break;
       }
     }
+    // Document stylesheets affect the retained article even when linked in head.
+    for (const element of document.head?.children ?? []) {
+      if (element.matches("link[rel~='stylesheet'][href]")) append(element.href);
+      if (rawUrls.length >= maximumUrls) break;
+    }
     const hosts = new Set();
+    const urls = new Set();
     const unsafeReferencesByAuthority = new Map();
     let hostOverflowCount = 0;
     let unsafeReferenceOverflowCount = 0;
@@ -3101,6 +3201,8 @@ async function roleReferencedResourceHosts(page, selectors) {
       try {
         const url = new URL(value, document.baseURI);
         if (["http:", "https:", "ws:", "wss:"].includes(url.protocol)) {
+          url.hash = "";
+          urls.add(url.href);
           const hostname = url.hostname.toLowerCase();
           if (!hosts.has(hostname) && hosts.size >= maximumHosts) {
             hostOverflowCount += 1;
@@ -3121,6 +3223,7 @@ async function roleReferencedResourceHosts(page, selectors) {
     }
     return {
       hosts: [...hosts].sort(),
+      urls: [...urls],
       rootCount: roots.size,
       nodeCount: nodes.size,
       urlCount: rawUrls.length,
@@ -3138,6 +3241,11 @@ async function roleReferencedResourceHosts(page, selectors) {
       unsafeReferenceOverflowCount,
     };
   }, selectors);
+  const { urls, ...safeEvidence } = evidence;
+  return {
+    ...safeEvidence,
+    urlSha256s: [...new Set((urls ?? []).map(networkResourceUrlSha256).filter(Boolean))].sort(),
+  };
 }
 
 function classifyDestinationResponse(responseEvidence) {
@@ -3211,11 +3319,8 @@ function classifyDestinationResponse(responseEvidence) {
 }
 
 function validateArticleAccessCookies(cookies, allowedCookieDomains, nowMs = Date.now()) {
-  if (!Array.isArray(cookies) || cookies.length > ARTICLE_ACCESS_LEASE_MAX_COOKIES) {
-    throw new Error("article access lease cookie count exceeded its bound");
-  }
-  if (Buffer.byteLength(JSON.stringify(cookies), "utf8") > ARTICLE_ACCESS_LEASE_MAX_COOKIE_BYTES) {
-    throw new Error("article access lease cookie bytes exceeded their bound");
+  if (!Array.isArray(cookies)) {
+    throw new Error("article access lease contains an invalid cookie collection");
   }
   const normalizedAllowedDomains = new Set(
     allowedCookieDomains.map((domain) => normalizedHostname(domain)),
@@ -3229,6 +3334,8 @@ function validateArticleAccessCookies(cookies, allowedCookieDomains, nowMs = Dat
     const domainAllowed = [...normalizedAllowedDomains].some((allowedDomain) =>
       hostnameMatches(domain, allowedDomain),
     );
+    // Third-party advertising cookies never enter the lease or its size budget.
+    if (!domainAllowed) continue;
     const validShape =
       typeof cookie.name === "string" &&
       cookie.name.length >= 1 &&
@@ -3248,7 +3355,7 @@ function validateArticleAccessCookies(cookies, allowedCookieDomains, nowMs = Dat
       throw new Error("article access lease contains an invalid cookie record");
     }
     const unexpired = cookie.expires === -1 || cookie.expires * 1_000 > nowMs;
-    if (!domainAllowed || cookie.secure !== true || !unexpired) continue;
+    if (cookie.secure !== true || !unexpired) continue;
     accepted.push({
       name: cookie.name,
       value: cookie.value,
@@ -3259,6 +3366,12 @@ function validateArticleAccessCookies(cookies, allowedCookieDomains, nowMs = Dat
       secure: cookie.secure,
       sameSite: cookie.sameSite,
     });
+    if (accepted.length > ARTICLE_ACCESS_LEASE_MAX_COOKIES) {
+      throw new Error("article access lease cookie count exceeded its bound");
+    }
+    if (Buffer.byteLength(JSON.stringify(accepted), "utf8") > ARTICLE_ACCESS_LEASE_MAX_COOKIE_BYTES) {
+      throw new Error("article access lease cookie bytes exceeded their bound");
+    }
   }
   return accepted;
 }
@@ -4079,7 +4192,7 @@ async function countExistingApprovedLayoutMatches(
 ) {
   const verdict = await evaluateInIsolatedWorld(
     page,
-    ({ expectedSiteId, sourceBytes, oracleSeed, projectionLayouts }) => {
+    ({ expectedSiteId, expectedDomain, sourceBytes, oracleSeed, projectionLayouts }) => {
       const originalModule = Object.getOwnPropertyDescriptor(globalThis, "module");
       if (originalModule && originalModule.configurable !== true) {
         throw new Error("page has a non-configurable global module");
@@ -4104,14 +4217,15 @@ async function countExistingApprovedLayoutMatches(
       }
       const site = api.SITE_CONTRACTS.find((contract) => {
         const hostname = location.hostname.toLocaleLowerCase();
-        return contract.id === expectedSiteId &&
+        return (!expectedSiteId || contract.id === expectedSiteId) &&
+          contract.domain === expectedDomain &&
           (hostname === contract.domain || hostname.endsWith(`.${contract.domain}`));
       });
       const pathAndQuery = `${location.pathname}${location.search}`;
-      const layouts = (projectionLayouts ?? site?.layouts ?? []).filter((candidate) =>
+      const layouts = (site ? projectionLayouts ?? site.layouts : []).filter((candidate) =>
         (candidate.paths ?? [candidate.path]).some((configuredPath) =>
           api.pathPatternMatches(pathAndQuery, configuredPath)));
-      const projectionSeed = oracleSeed?.siteType === site?.id
+      const projectionSeed = oracleSeed && site && oracleSeed.siteType === site.id
         ? Object.freeze({
           siteType: oracleSeed.siteType,
           title: oracleSeed.title,
@@ -4133,6 +4247,7 @@ async function countExistingApprovedLayoutMatches(
     },
     {
       expectedSiteId: seed?.siteType ?? null,
+      expectedDomain: layout.domain,
       sourceBytes: userscriptContent,
       oracleSeed: seed,
       projectionLayouts: explicitLayouts,
@@ -5649,6 +5764,7 @@ async function createPageContext(
       lifecycle.requestType,
       failureText,
       lifecycle.isMainNavigation,
+      request.url(),
     );
     finishInFlightReservation(request);
   };
@@ -5663,6 +5779,7 @@ async function createPageContext(
       lifecycle.requestType,
       response.status(),
       lifecycle.isMainNavigation,
+      request.url(),
     );
   });
   await context.route("**/*", async (route) => {
@@ -5741,7 +5858,7 @@ async function createPageContext(
         networkEvidenceRecorder.recordBlocked(
           parsed.hostname,
           request.resourceType(),
-          decision.allowed ? "dns-not-public" : decision.reason,
+          decision.allowed ? pinnedTransport.rejectionReasonForHost(parsed.hostname) : decision.reason,
           isMainNavigation,
         );
         await route.abort("blockedbyclient");
@@ -5826,7 +5943,7 @@ async function createPageContext(
         networkEvidenceRecorder.recordBlocked(
           parsed.hostname,
           "websocket",
-          "dns-not-public",
+          pinnedTransport.rejectionReasonForHost(parsed.hostname),
           false,
         );
         await webSocketRoute.close({ code: 1008, reason: "network-policy" });
@@ -6012,6 +6129,7 @@ async function auditOneTarget({
     let sourceSnapshot;
     let sourceClassification;
     try {
+      await primeDeclaredArticleNavigation(staticSession, auditedTarget.url, navigationDomains);
       navigation = await navigate(
         staticSession.page,
         auditedTarget.url,
@@ -6321,6 +6439,7 @@ async function auditOneTarget({
   let auditedPage = userscriptSession.page;
   let runtimeCandidateExtractionAllowed = false;
   try {
+    await primeDeclaredArticleNavigation(userscriptSession, auditedTarget.url, navigationDomains);
     const navigation = await navigateThroughAlgumon(
       userscriptSession.page,
       auditedTarget,
@@ -8690,6 +8809,21 @@ function classifyAlgumonSourceResponse(responseEvidence) {
     `${responseEvidence?.title ?? ""}\n${responseEvidence?.bodyText ?? ""}`,
   );
   let exactUrl = false;
+  const describeUrl = (value) => {
+    try {
+      const url = new URL(value);
+      return {
+        protocol: url.protocol,
+        hostname: url.hostname,
+        pathname: url.pathname,
+        queryKeys: [...url.searchParams.keys()],
+        hasFragment: Boolean(url.hash),
+        urlSha256: sha256(url.href),
+      };
+    } catch {
+      return null;
+    }
+  };
   try {
     exactUrl =
       new URL(responseEvidence?.finalUrl).href ===
@@ -8716,6 +8850,10 @@ function classifyAlgumonSourceResponse(responseEvidence) {
       exactUrl,
       htmlResponse,
       blockPage,
+      requested: describeUrl(responseEvidence?.requestedUrl),
+      final: describeUrl(responseEvidence?.finalUrl),
+      response: describeUrl(responseEvidence?.responseUrl),
+      navigationError: responseEvidence?.navigationError ?? null,
     };
   }
   return null;
@@ -8898,6 +9036,7 @@ async function navigateAlgumonSourcePage(page, requestedUrl, timeoutMs) {
       requestedUrl,
       finalUrl: page.url(),
       status: null,
+      responseUrl: null,
       contentType: "",
       title: await page.title().catch(() => ""),
       bodyText: await page.locator("body").innerText().catch(() => ""),
@@ -8909,6 +9048,7 @@ async function navigateAlgumonSourcePage(page, requestedUrl, timeoutMs) {
     requestedUrl,
     finalUrl: page.url(),
     status: response?.status() ?? null,
+    responseUrl: response?.url() ?? null,
     contentType: response?.headers()?.["content-type"] ?? "",
     title: await page.title().catch(() => ""),
     bodyText: (await page.locator("body").innerText().catch(() => "")).slice(0, 4_096),
@@ -11498,6 +11638,7 @@ export {
   committedProjectionEvidence,
   compareSemanticVersions,
   consumeArticleAccessLease,
+  countExistingApprovedLayoutMatches,
   createArticleAccessLease,
   createAlgumonRequestStartBudget,
   createLowTrafficAlgumonProbePlan,
@@ -11508,11 +11649,13 @@ export {
   finalizeProfileLandingCoverage,
   matchingApprovedPaths,
   networkFidelityFailures,
+  networkResourceUrlSha256,
   networkRequestDecision,
   isPrivateOrSpecialIp,
   isTopLevelNavigationRequest,
   incrementStablePatchVersion,
   parseConnectAuthority,
+  primeDeclaredArticleNavigation,
   projectionCardinalityEvidence,
   promotionVariantId,
   recordedSignedRelayAcquisitionEvidence,
@@ -11528,6 +11671,7 @@ export {
   staticRuntimeConsistencyFailures,
   transferAlgumonRelaySession,
   validateDiagnostics,
+  validatePublicDnsAnswers,
 };
 
 if (path.resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
