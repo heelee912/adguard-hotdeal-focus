@@ -56,21 +56,23 @@ class AlgumonAdsWebFilterTests(unittest.TestCase):
         self.assertIn("NextDNS alone cannot", policy)
         self.assertNotIn("@@||algumon.com^$document", FILTER_PATH.read_text(encoding="utf-8"))
 
-    def test_stale_policy_is_replaced_without_refreshing_other_subscriptions(self) -> None:
+    def test_policy_refresh_shadow_installs_before_disabling_prior_lineage(self) -> None:
         cli = CLI_PATH.read_text(encoding="utf-8")
         install = cli[
             cli.index("function Install-AlgumonAdDeliveryPolicy"):
             cli.index("function Get-EnabledAlgumonDocumentWideExceptions")
         ]
-        self.assertIn("$requiresRefresh", install)
-        self.assertIn("RemoveFilterSubscription", install)
+        self.assertIn("$targetBefore", install)
+        self.assertIn("$priorState", install)
         self.assertIn("InstallCustomFilter", install)
         self.assertNotIn("CheckForFilterSubscriptionsUpdate", install)
+        self.assertIn("Assert-AlgumonAdDeliveryPolicyTargetInstalled", install)
         self.assertIn("Assert-AlgumonAdDeliveryPolicyInstalled", install)
         self.assertLess(
-            install.index("RemoveFilterSubscription"),
-            install.index("Assert-AlgumonAdDeliveryPolicyInstalled"),
+            install.index("InstallCustomFilter"),
+            install.index("foreach ($previous in $priorState)"),
         )
+        self.assertNotIn("RemoveFilterSubscription(\n                    $before", install)
 
 
 if __name__ == "__main__":

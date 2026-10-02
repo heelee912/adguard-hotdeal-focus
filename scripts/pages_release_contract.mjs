@@ -10,6 +10,19 @@ const INSTALL_URL =
   "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js";
 const USERSCRIPT_NAME_VALUE = "AdGuard Hotdeal Focus Reader Gate";
 const USERSCRIPT_NAMESPACE = "https://github.com/heelee912/adguard-hotdeal-focus";
+const USERSCRIPT_MATCHES = Object.freeze([
+  "https://*.clien.net/*",
+  "https://*.ppomppu.co.kr/*",
+  "https://*.ruliweb.com/*",
+  "https://*.quasarzone.com/*",
+  "https://*.eomisae.co.kr/*",
+  "https://*.zod.kr/*",
+  "https://*.arca.live/*",
+]);
+const USERSCRIPT_GRANTS = Object.freeze([
+  "GM_addElement",
+  "window.onurlchange",
+]);
 const MANIFEST_NAME = "release-manifest.json";
 const USERSCRIPT_NAME = "hotdeal-focus.user.js";
 const HIGH_WATER_NAME = "state/release-high-water.json";
@@ -169,8 +182,16 @@ function compareVersions(left, right) {
 }
 
 function metadataValues(source, key) {
-  return [...source.matchAll(new RegExp(`^//\\s+@${key}\\s+(.+?)\\s*$`, "gm"))]
+  return [...source.matchAll(
+    new RegExp(`^//[\\t ]+@${key}[\\t ]+([^\\r\\n]*?)[\\t ]*$`, "gm"),
+  )]
     .map((match) => match[1]);
+}
+
+function metadataDirectiveCount(source, key) {
+  return [...source.matchAll(
+    new RegExp(`^//[\\t ]+@${key}\\b[^\\r\\n]*$`, "gm"),
+  )].length;
 }
 
 function verifyUserscriptMetadata(bytes, version) {
@@ -184,7 +205,11 @@ function verifyUserscriptMetadata(bytes, version) {
   }
   const exact = (key, expected) => {
     const values = metadataValues(source, key);
-    if (values.length !== 1 || values[0] !== expected) {
+    if (
+      metadataDirectiveCount(source, key) !== values.length ||
+      values.length !== 1 ||
+      values[0] !== expected
+    ) {
       fail(`userscript @${key} is not exactly ${expected}`);
     }
   };
@@ -194,18 +219,25 @@ function verifyUserscriptMetadata(bytes, version) {
   exact("downloadURL", INSTALL_URL);
   exact("updateURL", INSTALL_URL);
   exact("run-at", "document-start");
+  const matches = metadataValues(source, "match");
+  if (
+    metadataDirectiveCount(source, "match") !== matches.length ||
+    JSON.stringify(matches) !== JSON.stringify(USERSCRIPT_MATCHES)
+  ) {
+    fail("userscript matches are not the exact seven target-domain scopes");
+  }
+  if (metadataDirectiveCount(source, "include") !== 0) {
+    fail("userscript @include is forbidden in the standalone release");
+  }
   const grants = metadataValues(source, "grant");
-  if (JSON.stringify(grants) !== JSON.stringify([
-    "GM_addElement",
-    "GM_getValue",
-    "GM_setValue",
-    "GM_deleteValue",
-    "window.onurlchange",
-  ])) {
+  if (
+    metadataDirectiveCount(source, "grant") !== grants.length ||
+    JSON.stringify(grants) !== JSON.stringify(USERSCRIPT_GRANTS)
+  ) {
     fail("userscript grants are not the exact standalone contract");
   }
   for (const forbidden of ["connect", "require", "resource"]) {
-    if (metadataValues(source, forbidden).length !== 0) {
+    if (metadataDirectiveCount(source, forbidden) !== 0) {
       fail(`userscript @${forbidden} is forbidden in the standalone release`);
     }
   }

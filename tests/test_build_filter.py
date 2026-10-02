@@ -53,7 +53,7 @@ def minimal_layout() -> dict:
         "preserve_shallow": [".title"],
         "required_roles": ["title", "body", "comments"],
         "role_projection": {
-            "title": {"mode": "seeded-shallow"},
+            "title": {"mode": "metadata-shallow"},
             "body": {"mode": "atomic-boundary", "ignored": []},
             "product": {
                 "mode": "absent",

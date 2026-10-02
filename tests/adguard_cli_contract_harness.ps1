@@ -21,7 +21,16 @@ $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false, $true)
 $script:MaximumSourceBytes = 8MB
 $script:ReaderGateProtocolVersion = 2
 $script:ReaderGateGrants = @(
-    'GM_addElement', 'GM_getValue', 'GM_setValue', 'GM_deleteValue', 'window.onurlchange'
+    'GM_addElement', 'window.onurlchange'
+)
+$script:ReaderGateMatches = @(
+    'https://*.clien.net/*',
+    'https://*.ppomppu.co.kr/*',
+    'https://*.ruliweb.com/*',
+    'https://*.quasarzone.com/*',
+    'https://*.eomisae.co.kr/*',
+    'https://*.zod.kr/*',
+    'https://*.arca.live/*'
 )
 $script:ReleaseUserscriptUrl = ('https://heelee912.github.io/' +
     'adguard-hotdeal-focus/hotdeal-focus.user.js')
@@ -34,7 +43,12 @@ $script:AdGuardStateVisibilityRequiredConsecutiveReads = 2
 $script:FreshInstallGmProperties = '{}'
 $script:TemporaryPaths = New-Object 'System.Collections.Generic.List[string]'
 $script:StandardFilterType = 'Standard'
+$script:DnsFilterType = 'Dns'
 $script:FilterSubscriptionType = [string]
+$script:AlgumonAdDnsExceptionRules = @(
+    '@@||doubleclick.net^',
+    '@@||googlesyndication.com^'
+)
 $script:HistoricalSnapshotRules = @()
 $UserscriptName = 'AdGuard Hotdeal Focus Reader Gate'
 $FilterName = 'AdGuard Hotdeal Focus Marker Gate'
@@ -182,6 +196,9 @@ function New-FakeClient {
             } else { $content }
             IsCustom = $false
             IsStyle = $false
+            Match = @($script:ReaderGateMatches)
+            Include = @()
+            Grant = @($script:ReaderGateGrants)
         }
         $this.State.LastParsedMeta = $meta
         return $meta
@@ -245,6 +262,12 @@ function New-FakeClient {
         Assert-FakeUserscriptWriteIntent -State $this.State -Write 'set-status'
         $this.State.UserscriptWrites = @($this.State.UserscriptWrites) + @('set-status')
         $this.State.Userscripts[0].IsEnabled = [bool] $enabled
+        if ([bool] $this.State.MutateUserscriptCodeOnStatusChange) {
+            $this.State.UserscriptCode = [string] $this.State.UserscriptCode + '-tampered'
+        }
+        if ([bool] $this.State.MutateProtectedFilterOnStatusChange) {
+            $this.State.UserRules = @($this.State.UserRules) + @('||status-write-tamper.example^')
+        }
     }
     Add-Member -InputObject $client -MemberType ScriptMethod -Name EnableFilterRules -Value {
         param($filterId, $rules, $filterType)
@@ -460,6 +483,8 @@ $state = [pscustomobject]@{
     Userscripts = @()
     UserscriptCode = ''
     UserscriptGmProperties = ''
+    MutateUserscriptCodeOnStatusChange = $false
+    MutateProtectedFilterOnStatusChange = $false
     Filters = @()
     FilterRules = @{}
 }
@@ -500,6 +525,64 @@ Assert-ThrowsLike -Action {
             -Backup $protectedBackup -Phase 'contract User-filter tamper')
 } -Pattern '*User filter or subscription inventory changed*'
 $state.UserRules = @($ruleA, $ruleB, $ruleC, $unrelated)
+
+# Emergency disable changes only the enabled bit. The full script code, the
+# independent GM value-store, and every protected filter byte remain exact.
+$state.Userscripts = @((New-UserscriptSnapshot -Version '1.5.0' -Enabled $true `
+            -Code '' -GmProperties '' -Custom $true).Info)
+$state.UserscriptCode = "disable-code`r`nwith-exact-newlines"
+$state.UserscriptGmProperties = '{"saved-values":["exact"]}'
+$state.UserscriptWrites = @()
+$protectedBeforeDisable = Get-StableProtectedFilterStateEvidence -Client $client
+$disabled = Disable-TargetUserscriptSafely -Client $client
+$protectedAfterDisable = Get-StableProtectedFilterStateEvidence -Client $client
+Assert-Contract ([bool] $disabled.Changed) 'enabled userscript was not disabled'
+Assert-Contract (-not [bool] $disabled.After.Info.IsEnabled) `
+    'userscript enabled state did not become false'
+Assert-Contract ([string] $state.UserscriptCode -ceq "disable-code`r`nwith-exact-newlines") `
+    'userscript code changed during disable'
+Assert-Contract ([string] $state.UserscriptGmProperties -ceq `
+        '{"saved-values":["exact"]}') `
+    'userscript GM value-store changed during disable'
+Assert-Contract ([string] $protectedBeforeDisable.Evidence.StateSha256 -ceq `
+        [string] $protectedAfterDisable.Evidence.StateSha256) `
+    'protected filter state changed during disable'
+Assert-Contract (@($state.UserscriptWrites).Count -eq 1 -and `
+        [string] $state.UserscriptWrites[0] -ceq 'set-status') `
+    'disable issued a write other than the single status change'
+
+$disabledAgain = Disable-TargetUserscriptSafely -Client $client
+Assert-Contract (-not [bool] $disabledAgain.Changed) `
+    'already-disabled userscript was not idempotent'
+Assert-Contract (@($state.UserscriptWrites).Count -eq 1 -and `
+        [string] $state.UserscriptWrites[0] -ceq 'set-status') `
+    'already-disabled userscript issued another write'
+
+$state.Userscripts = @()
+Assert-ThrowsLike -Action {
+    [void] (Disable-TargetUserscriptSafely -Client $client)
+} -Pattern '*not installed; refusing an ambiguous mutation*'
+
+$state.Userscripts = @((New-UserscriptSnapshot -Version '1.5.0' -Enabled $true `
+            -Code '' -GmProperties '' -Custom $true).Info)
+$state.UserscriptCode = 'identity-before-disable'
+$state.UserscriptGmProperties = '{"saved":"identity"}'
+$state.MutateUserscriptCodeOnStatusChange = $true
+Assert-ThrowsLike -Action {
+    [void] (Disable-TargetUserscriptSafely -Client $client)
+} -Pattern '*did not preserve the exact executable and saved-state identity*'
+$state.MutateUserscriptCodeOnStatusChange = $false
+
+$state.Userscripts[0].IsEnabled = $true
+$state.UserscriptCode = 'protected-before-disable'
+$state.UserscriptGmProperties = '{"saved":"protected"}'
+$protectedRulesBeforeFailure = @($state.UserRules)
+$state.MutateProtectedFilterOnStatusChange = $true
+Assert-ThrowsLike -Action {
+    [void] (Disable-TargetUserscriptSafely -Client $client)
+} -Pattern '*changed protected AdGuard filter state*'
+$state.MutateProtectedFilterOnStatusChange = $false
+$state.UserRules = @($protectedRulesBeforeFailure)
 $state.Filters = @()
 $state.FilterRules = @{}
 
@@ -980,10 +1063,11 @@ try {
     $ExpectedUserscriptSha256 = $null
     $builtUserscript = Get-UserscriptSource -Source (
         (Join-Path $PSScriptRoot '..\hotdeal-focus.user.js'))
+    Assert-Contract (Test-ExactStringSequence -Left $builtUserscript.Matches `
+            -Right $script:ReaderGateMatches) `
+        'actual release Userscript matches are not exact'
     Assert-Contract (Test-ExactStringSequence -Left $builtUserscript.Grants `
-            -Right @(
-                'GM_addElement', 'GM_getValue', 'GM_setValue', 'GM_deleteValue', 'window.onurlchange'
-            )) `
+            -Right @('GM_addElement', 'window.onurlchange')) `
         'actual release Userscript grants are not exact'
     Assert-Contract ($builtUserscript.InstallUrl -ceq $script:ReleaseUserscriptUrl) `
         'actual release Userscript install URL is not exact'
@@ -1114,9 +1198,116 @@ finally {
     }
 }
 
+function New-FakeDnsExceptionClient {
+    param([Parameter(Mandatory = $true)] $State)
+    $client = [pscustomobject]@{ State = $State }
+    Add-Member -InputObject $client -MemberType ScriptMethod `
+        -Name GetAllFilterSubscriptions -Value {
+        return @($this.State.Filter)
+    }
+    Add-Member -InputObject $client -MemberType ScriptMethod `
+        -Name GetFilterSubscriptionRules -Value {
+        param($filterId, $filterType)
+        $rules = @($this.State.Rules)
+        if ([bool] $this.State.FaultNextRead) {
+            $this.State.FaultNextRead = $false
+            $rules += '||one-shot-postcondition-fault.invalid^'
+        }
+        return [pscustomobject]@{
+            Rules = @($rules)
+            DisabledRules = @($this.State.DisabledRules)
+        }
+    }
+    Add-Member -InputObject $client -MemberType ScriptMethod `
+        -Name AddUserFilterRules -Value {
+        param($rules, $filterId, $filterType)
+        $this.State.Rules = @($this.State.Rules) + @($rules | ForEach-Object {
+                [string] $_
+            })
+    }
+    Add-Member -InputObject $client -MemberType ScriptMethod `
+        -Name RemoveUserFilterRules -Value {
+        param($rules, $filterId, $filterType)
+        $remove = @($rules | ForEach-Object { [string] $_ })
+        $this.State.Rules = @($this.State.Rules | Where-Object {
+                $remove -cnotcontains [string] $_
+            })
+        $this.State.DisabledRules = @($this.State.DisabledRules | Where-Object {
+                $remove -cnotcontains [string] $_
+            })
+    }
+    Add-Member -InputObject $client -MemberType ScriptMethod `
+        -Name EnableFilterRules -Value {
+        param($filterId, $rules, $filterType)
+        $enable = @($rules | ForEach-Object { [string] $_ })
+        $this.State.DisabledRules = @($this.State.DisabledRules | Where-Object {
+                $enable -cnotcontains [string] $_
+            })
+        if ([bool] $this.State.InjectOneShotPostconditionFault) {
+            $this.State.InjectOneShotPostconditionFault = $false
+            $this.State.FaultNextRead = $true
+        }
+    }
+    Add-Member -InputObject $client -MemberType ScriptMethod `
+        -Name DisableFilterRules -Value {
+        param($filterId, $rules, $filterType)
+        foreach ($rule in @($rules | ForEach-Object { [string] $_ })) {
+            if (@($this.State.DisabledRules | Where-Object { $_ -ceq $rule }).Count -eq 0) {
+                $this.State.DisabledRules = @($this.State.DisabledRules) + @($rule)
+            }
+        }
+    }
+    return $client
+}
+
+$dnsFilter = [pscustomobject]@{
+    FilterId = [int]::MinValue
+    FilterType = 'Dns'
+    IsEditable = $true
+    IsCustom = $true
+}
+$dnsState = [pscustomobject]@{
+    Filter = $dnsFilter
+    Rules = @('||preserved.example^', '@@||doubleclick.net^')
+    DisabledRules = @('@@||doubleclick.net^')
+    InjectOneShotPostconditionFault = $false
+    FaultNextRead = $false
+}
+$dnsClient = New-FakeDnsExceptionClient -State $dnsState
+$dnsResult = Enable-AlgumonAdDnsExceptions -Client $dnsClient
+Assert-Contract ([bool] $dnsResult.Changed) 'DNS exception delta was not applied'
+Assert-Contract ([int] $dnsResult.AddedRuleCount -eq 1) `
+    'DNS exception delta did not add only the missing rule'
+Assert-Contract ([int] $dnsResult.EnabledRuleCount -eq 1) `
+    'DNS exception delta did not enable only the disabled rule'
+Assert-Contract (@($dnsState.Rules).Count -eq 3) `
+    'DNS exception delta changed an unrelated rule'
+Assert-Contract (@($dnsState.DisabledRules).Count -eq 0) `
+    'DNS exception delta left a managed rule disabled'
+
+$dnsRollbackState = [pscustomobject]@{
+    Filter = $dnsFilter
+    Rules = @('||preserved.example^', '@@||doubleclick.net^')
+    DisabledRules = @('@@||doubleclick.net^')
+    InjectOneShotPostconditionFault = $true
+    FaultNextRead = $false
+}
+$dnsRollbackClient = New-FakeDnsExceptionClient -State $dnsRollbackState
+Assert-ThrowsLike -Action {
+    [void] (Enable-AlgumonAdDnsExceptions -Client $dnsRollbackClient)
+} -Pattern '*did not persist the exact DNS exception delta*'
+Assert-Contract (Test-ExactStringMultiset `
+        -Left @('||preserved.example^', '@@||doubleclick.net^') `
+        -Right $dnsRollbackState.Rules) `
+    'DNS exception rollback did not restore every original rule'
+Assert-Contract (Test-ExactStringMultiset `
+        -Left @('@@||doubleclick.net^') -Right $dnsRollbackState.DisabledRules) `
+    'DNS exception rollback did not restore the disabled-rule state'
+
 [ordered]@{
     ok = $true
     tests = @('scope-classification', 'userscript-all-crash-prefixes',
+        'userscript-emergency-disable',
         'userscript-authenticated-custom-promotion',
         'migration-authenticated-userscript-precondition',
         'userscript-owned-noncustom-reclassification-and-exact-rollback',
@@ -1125,5 +1316,6 @@ finally {
         'prewrite-mutation-rejection', 'actual-release-source-contract',
         'backup-complete-state-hash', 'backup-raw-hash-tamper',
         'https-content-length-runtime-shapes', 'durable-journal',
-        'legacy-all-crash-prefixes', 'idempotent-restore')
+        'legacy-all-crash-prefixes', 'idempotent-restore',
+        'dns-exception-exact-delta-and-rollback')
 } | ConvertTo-Json -Depth 3

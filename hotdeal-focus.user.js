@@ -1,9 +1,8 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.26
+// @version      0.6.66
 // @description  Fail-closed semantic reader gate for Algumon hot-deal destinations.
-// @match        https://www.algumon.com/*
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
 // @match        https://*.ruliweb.com/*
@@ -13,9 +12,6 @@
 // @match        https://*.arca.live/*
 // @run-at       document-start
 // @grant        GM_addElement
-// @grant        GM_getValue
-// @grant        GM_setValue
-// @grant        GM_deleteValue
 // @grant        window.onurlchange
 // @noframes
 // @downloadURL  https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
@@ -29,18 +25,23 @@
     module.exports = api;
     return;
   }
-  Object.defineProperty(root, "__HOTDEAL_FOCUS_AUDIT__", {
-    value: Object.freeze({ discoverSemanticContract: api.discoverSemanticContract }),
-    configurable: false,
-    enumerable: false,
-    writable: false,
-  });
+  try {
+    Object.defineProperty(root, "__HOTDEAL_FOCUS_AUDIT__", {
+      value: Object.freeze({ discoverSemanticContract: api.discoverSemanticContract }),
+      configurable: true,
+      enumerable: false,
+      writable: false,
+    });
+  } catch (_error) {
+    // Audit exposure is optional; a hostile page-global must not prevent the
+    // independently sandboxed reader gate from starting.
+  }
   api.start(root);
 })(typeof globalThis === "object" ? globalThis : this, function hotdealFocusFactory() {
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.6.26";
+  const GENERATOR_VERSION = "0.6.66";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -66,6 +67,7 @@
     rolePrefix: "hdf-v2-role-",
   });
   const HDF_ATTRIBUTE_PREFIX = "data-hotdeal-focus-";
+  const HDF_CLASS_PREFIX = "hdf-v2-";
   const HDF_CLASS_PATTERN = /^hdf-v\d+-/u;
   const COMMENT_CONTROL_STATE_ATTRIBUTES = new Set([
     "class",
@@ -90,9 +92,10 @@
   const MEASUREMENT_HTML_RESTORES = new WeakMap();
   let measurementStyleSheetMutationDepth = 0;
   const CASCADE_PROOF_FRAMES = 2;
-  const ALGUMON_NAVIGATION_STORAGE_KEY = "hdf-v2.algumon-navigation-seeds";
-  const ALGUMON_NAVIGATION_SEED_TTL_MS = 120_000;
-  const MAX_ALGUMON_NAVIGATION_SEEDS = 8;
+  const ALGUMON_HANDOFF_SETTLE_TIMEOUT_MS = 5_000;
+  const ALGUMON_HANDOFF_POLL_INTERVAL_MS = 100;
+  const SEMANTIC_PREFLIGHT_TIMEOUT_MS = 15_000;
+  const LOCKED_ACTIVATION_TIMEOUT_MS = 5_000;
   const RUNTIME_GLOBAL = typeof globalThis === "object" ? globalThis : null;
   const NATIVE = Object.freeze({
     MutationObserver: RUNTIME_GLOBAL?.MutationObserver ?? null,
@@ -111,6 +114,9 @@
     setTimeout: typeof RUNTIME_GLOBAL?.setTimeout === "function"
       ? RUNTIME_GLOBAL.setTimeout.bind(RUNTIME_GLOBAL)
       : null,
+    clearTimeout: typeof RUNTIME_GLOBAL?.clearTimeout === "function"
+      ? RUNTIME_GLOBAL.clearTimeout.bind(RUNTIME_GLOBAL)
+      : null,
     cryptoGetRandomValues: typeof RUNTIME_GLOBAL?.crypto?.getRandomValues === "function"
       ? RUNTIME_GLOBAL.crypto.getRandomValues.bind(RUNTIME_GLOBAL.crypto)
       : null,
@@ -118,32 +124,22 @@
     removeEventListener: RUNTIME_GLOBAL?.EventTarget?.prototype?.removeEventListener ?? null,
     defineProperty: Object.defineProperty,
     reflectApply: Reflect.apply,
-    history: RUNTIME_GLOBAL?.history ?? null,
-    historyPushState: RUNTIME_GLOBAL?.history?.pushState ?? null,
-    historyReplaceState: RUNTIME_GLOBAL?.history?.replaceState ?? null,
     locationReplace: RUNTIME_GLOBAL?.Location?.prototype?.replace ?? null,
     anchorClick: RUNTIME_GLOBAL?.HTMLAnchorElement?.prototype?.click ?? null,
-    cssStyleSheetPrototype: RUNTIME_GLOBAL?.CSSStyleSheet?.prototype ?? null,
-    cssStyleSheetMethods: Object.freeze(Object.fromEntries(
-      ["insertRule", "deleteRule", "replace", "replaceSync"].map(function capture(methodName) {
-        return [methodName, RUNTIME_GLOBAL?.CSSStyleSheet?.prototype?.[methodName] ?? null];
-      })
-    )),
   });
-  const CSSOM_MUTATION_LISTENERS = new WeakMap();
-  const ADOPTED_STYLE_SHEET_LISTENERS = new WeakMap();
-  const STYLE_SHEET_STATE_LISTENERS = new WeakMap();
-  const SHADOW_TRACKER_KEY = typeof Symbol === "function"
-    ? Symbol.for("hotdeal-focus.shadow-tracker.v1")
-    : "__HOTDEAL_FOCUS_SHADOW_TRACKER_V1__";
+  const SHADOW_TRACKERS = new WeakMap();
 
   function initializeShadowTracker(browserRoot) {
     if (!browserRoot) return null;
-    const existing = browserRoot[SHADOW_TRACKER_KEY];
+    const existing = SHADOW_TRACKERS.get(browserRoot);
     if (existing?.installed === true) return existing;
     const prototype = browserRoot.Element?.prototype;
     const nativeAttachShadow = prototype?.attachShadow;
     if (!prototype || typeof nativeAttachShadow !== "function") return null;
+    const descriptor = Object.getOwnPropertyDescriptor(prototype, "attachShadow");
+    if (!descriptor || descriptor.configurable !== true || descriptor.writable !== true) {
+      return null;
+    }
     const hosts = new WeakSet();
     const listeners = new Set();
     const trackedAttachShadow = function hotdealFocusTrackedAttachShadow() {
@@ -160,11 +156,10 @@
       return shadowRoot;
     };
     try {
-      const descriptor = Object.getOwnPropertyDescriptor(prototype, "attachShadow");
       NATIVE.defineProperty(prototype, "attachShadow", {
-        configurable: false,
+        configurable: descriptor.configurable,
         enumerable: descriptor?.enumerable === true,
-        writable: false,
+        writable: descriptor.writable,
         value: trackedAttachShadow,
       });
       const tracker = Object.freeze({
@@ -172,20 +167,24 @@
         listeners,
         installed: prototype.attachShadow === trackedAttachShadow,
         wrapper: trackedAttachShadow,
+        uninstall: function uninstallShadowTracker() {
+          if (prototype.attachShadow !== trackedAttachShadow) return false;
+          try {
+            NATIVE.defineProperty(prototype, "attachShadow", descriptor);
+            SHADOW_TRACKERS.delete(browserRoot);
+            return prototype.attachShadow === nativeAttachShadow;
+          } catch (_error) {
+            return false;
+          }
+        },
       });
-      NATIVE.defineProperty(browserRoot, SHADOW_TRACKER_KEY, {
-        configurable: false,
-        enumerable: false,
-        writable: false,
-        value: tracker,
-      });
-      return tracker.installed ? tracker : null;
+      if (!tracker.installed) return null;
+      SHADOW_TRACKERS.set(browserRoot, tracker);
+      return tracker;
     } catch (_error) {
       return null;
     }
   }
-
-  const SHADOW_TRACKER = initializeShadowTracker(RUNTIME_GLOBAL);
 
   function createNativeMutationObserver(browserRoot, callback) {
     const Constructor = browserRoot === RUNTIME_GLOBAL
@@ -220,6 +219,21 @@
       : browserRoot?.cancelAnimationFrame?.bind(browserRoot);
     if (typeof cancel === "function") cancel(frameId);
   }
+
+  function nativeTimeout(browserRoot, callback, delayMs) {
+    const schedule = browserRoot === RUNTIME_GLOBAL
+      ? NATIVE.setTimeout
+      : browserRoot?.setTimeout?.bind(browserRoot);
+    if (typeof schedule !== "function") throw new Error("setTimeout is unavailable");
+    return schedule(callback, delayMs);
+  }
+
+  function nativeClearTimeout(browserRoot, timeoutId) {
+    const cancel = browserRoot === RUNTIME_GLOBAL
+      ? NATIVE.clearTimeout
+      : browserRoot?.clearTimeout?.bind(browserRoot);
+    if (typeof cancel === "function" && timeoutId) cancel(timeoutId);
+  }
   const MAX_PROJECTION_CANDIDATE_EVALUATIONS = 800;
   const MAX_PROJECTION_ROLE_CANDIDATES = 32;
   const MAX_PROJECTION_TUPLES = 4096;
@@ -236,6 +250,9 @@
   const BACKGROUND_RESOURCE_NOISE_TOKEN_PATTERN = /(?:^|[-_\s])(ad(?:s|vert|vertise|vertisement)?|sponsor(?:ed)?|promot(?:e|ed|ion|ional)?|promo|affiliate|광고|広告|廣告|广告)(?:$|[-_\s])/i;
   const PSEUDO_NOISE_TOKEN_PATTERN = /(?:^|\s)(?:partner\s+offer|click\s+here|read\s+this|promot(?:e|ed|ion|ional)?|sponsor(?:ed)?|affiliate|advertisement|recommend(?:ed)?\s+(?:deal|post)|popular\s+(?:deal|post))(?:$|\s)/i;
   const RELATED_NOISE_TOKEN_PATTERN = /(?:^|[-_\s])related(?:$|[-_\s])/i;
+  const AUTONOMOUS_NOISE_METADATA_PATTERN = /(?:^|[-_\s])(?:best|trend(?:ing)?|most[-_\s]?viewed|hot[-_\s]?(?:post|deal|list)|인기(?:글|게시물|핫딜)?|추천(?:글|게시물|핫딜)?|관련(?:글|게시물|핫딜)?|베스트(?:글|게시물|핫딜)?|실시간[-_\s]?인기|人気(?:記事|投稿)?|おすすめ|関連記事|ランキング|热门(?:文章|帖子)?|推荐(?:文章|帖子)?|相关文章|排行)(?:$|[-_\s])/iu;
+  const AUTONOMOUS_NOISE_LABEL_PATTERN = /^(?:(?:(?:실시간|오늘의|주간|월간)\s*)?인기\s*(?:글|게시물|핫딜|상품|콘텐츠)?|추천\s*(?:글|게시물|핫딜|상품|콘텐츠)|관련\s*(?:글|게시물|핫딜|상품|콘텐츠)|베스트\s*(?:글|게시물|핫딜)?|많이\s*본\s*(?:글|게시물)|popular(?:\s+(?:posts?|deals?|articles?|content))?|recommended?(?:\s+(?:posts?|deals?|articles?|content))?|related(?:\s+(?:posts?|deals?|articles?|content))?|trending(?:\s+(?:posts?|deals?|articles?|content))?|best(?:\s+(?:posts?|deals?|articles?|content))?|most\s+(?:viewed|read)(?:\s+(?:posts?|articles?))?|人気(?:記事|投稿|ランキング)?|おすすめ(?:記事|投稿)?|関連記事|ランキング|热门(?:文章|帖子|内容)?|推荐(?:文章|帖子|内容)?|相关文章|排行)(?:\s*(?:더\s*보기|모두\s*보기|전체\s*보기|view\s*all|more|もっと見る|查看更多))?$/iu;
+  const AUTONOMOUS_NOISE_RESOURCE_PATTERN = /(?:^|[/_.?&#=-])(?:popular|recommend(?:ed|ation|ations)?|related|ranking|trending|most[-_]?viewed|best[-_]?(?:post|deal|list)?)(?:$|[/_.?&#=-])/iu;
   const AD_NETWORK_RESOURCE_PATTERN = /(?:doubleclick\.net|googlesyndication\.com|googleadservices\.com|adservice\.google\.|amazon-adsystem\.com|taboola\.com|outbrain\.com|criteo\.(?:com|net)|adnxs\.com|adform\.net|adroll\.com|adsrvr\.org|dable\.io|adfit\.co\.kr|mobon\.net)(?:[/:?]|$)/i;
   const STRUCTURAL_NOISE_ELEMENTS = "aside, nav, footer, [role='navigation'], [role='complementary'], [role='banner']";
   const STRUCTURAL_CONTAINER_ELEMENTS = "div, section, header, ul, ol, menu, form, dialog, table";
@@ -275,7 +292,7 @@
             "pageRoot": ".content_view",
             "allowEmptyComments": true,
             "requiredRoles": ["title", "body", "comments"],
-            "roleProjection": {"title":{"mode":"seeded-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"absent","cardinality":"zero","selectors":[],"ignored":[]},"comments":{"mode":"classified-children"}},
+            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"absent","cardinality":"zero","selectors":[],"ignored":[]},"comments":{"mode":"classified-children"}},
             "hints": {
               "title": [".post_subject"],
               "body": [".post_article"],
@@ -298,7 +315,7 @@
             "pageRoot": ".wrapper",
             "allowEmptyComments": true,
             "requiredRoles": ["title", "product", "body", "comments"],
-            "roleProjection": {"title":{"mode":"seeded-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".topTitle-link"],"ignored":[".topTitle-link > .affiliate-img",".topTitle-link > .affiliate-sign"]},"comments":{"mode":"classified-children"}},
+            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".topTitle-link"],"ignored":[".topTitle-link > .affiliate-img",".topTitle-link > .affiliate-sign"]},"comments":{"mode":"classified-children"}},
             "hints": {
               "title": ["#topTitle > h1"],
               "product": [".topTitle-link"],
@@ -316,7 +333,7 @@
             "pageRoot": ".bbs.view",
             "allowEmptyComments": true,
             "requiredRoles": ["title", "product", "body", "comments"],
-            "roleProjection": {"title":{"mode":"seeded-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".bbs.view > h4 .info a.noeffect"],"ignored":[]},"comments":{"mode":"classified-children"}},
+            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".bbs.view > h4 .info a.noeffect"],"ignored":[]},"comments":{"mode":"classified-children"}},
             "hints": {
               "title": [".bbs.view > h4"],
               "product": [".bbs.view > h4 .info a.noeffect"],
@@ -340,15 +357,15 @@
             "pageRoot": "#board_read",
             "allowEmptyComments": true,
             "requiredRoles": ["title", "body", "comments"],
-            "roleProjection": {"title":{"mode":"seeded-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"optional","order":"after-body","selectors":[".source_url.box_line_with_shadow"],"ignored":[]},"comments":{"mode":"classified-children"}},
+            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"optional","order":"after-body","selectors":[".source_url"],"ignored":[]},"comments":{"mode":"classified-children"}},
             "hints": {
               "title": [".subject_inner_text"],
-              "product": [".source_url.box_line_with_shadow"],
+              "product": [".source_url"],
               "body": [".view_content"],
-              "comments": [".comment_view.normal"],
+              "comments": [".comment_view.normal", "#cmt.comment_wrapper"],
               "commentItems": [".comment_view.normal > table.comment_table > tbody > tr.comment_element"],
               "commentControls": [".comment_view.normal .comment_more", ".comment_view.normal .pagination", ".comment_view.normal .btn_reply"],
-              "commentIgnored": []
+              "commentIgnored": ["#cmt.comment_wrapper > input", "#cmt.comment_wrapper > .comment_count_wrapper", "#cmt.comment_wrapper > .comment_disable", "#cmt.comment_wrapper > br"]
             }
           }
         ]
@@ -364,13 +381,13 @@
             "pageRoot": ".left-con-wrap",
             "allowEmptyComments": true,
             "requiredRoles": ["title", "product", "body", "comments"],
-            "roleProjection": {"title":{"mode":"seeded-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".market-info-view-table"],"ignored":[]},"comments":{"mode":"classified-children"}},
+            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".market-info-view-table"],"ignored":[]},"comments":{"mode":"classified-children"}},
             "hints": {
-              "title": ["h1.title"],
+              "title": ["h1.title", "h1.v2-view-head__title"],
               "product": [".market-info-view-table"],
               "body": [".view-content > .note-editor"],
               "comments": ["#ajax-reply-list"],
-              "commentItems": ["#ajax-reply-list > li[id^='comment']"],
+              "commentItems": ["#ajax-reply-list > li[id^='comment']", "#ajax-reply-list > ul.common-reply-list > li[id^='comment']"],
               "commentControls": ["#ajax-reply-list .more-btn", "#ajax-reply-list .pagination", "#ajax-reply-list .reply-toggle"],
               "commentIgnored": ["#ajax-reply-list > .best-comment-wrap"]
             }
@@ -382,13 +399,13 @@
             "pageRoot": "#con-body",
             "allowEmptyComments": true,
             "requiredRoles": ["title", "product", "body", "comments"],
-            "roleProjection": {"title":{"mode":"seeded-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".market-info-view-table"],"ignored":[]},"comments":{"mode":"classified-children"}},
+            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".market-info-view-table"],"ignored":[]},"comments":{"mode":"classified-children"}},
             "hints": {
-              "title": [".content.market-info-view-wrap .view-style01 .tit .ment > h1"],
+              "title": [".content.market-info-view-wrap .view-style01 .tit .ment > h1", "h1.v2-view-head__title"],
               "product": [".market-info-view-table"],
               "body": [".view-content > .note-editor"],
               "comments": ["#ajax-reply-list"],
-              "commentItems": ["#ajax-reply-list > .commnet-main[id^='comment']"],
+              "commentItems": ["#ajax-reply-list > .commnet-main[id^='comment']", "#ajax-reply-list > ul.common-reply-list > li[id^='comment']"],
               "commentControls": ["#ajax-reply-list .more-btn", "#ajax-reply-list .pagination", "#ajax-reply-list .reply-toggle"],
               "commentIgnored": ["#ajax-reply-list > .best-comment-wrap"]
             }
@@ -406,14 +423,14 @@
             "pageRoot": "#bd",
             "allowEmptyComments": true,
             "requiredRoles": ["title", "product", "body", "comments"],
-            "roleProjection": {"title":{"mode":"seeded-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":["#D_ .et_vars"],"ignored":[]},"comments":{"mode":"classified-children"}},
+            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":["#D_ .et_vars"],"ignored":["#D_ .et_vars > caption","#D_ .et_vars .tooltip"]},"comments":{"mode":"classified-children"}},
             "hints": {
               "title": ["#D_ ._hd h2"],
               "product": ["#D_ .et_vars"],
               "body": ["#D_ article > .rhymix_content"],
               "comments": ["#C_"],
               "commentItems": ["#C_ > ._bd > ._comment[id^='comment_']"],
-              "commentControls": ["#C_ > #comment", "#C_ > ._bd .pagination", "#C_ > ._bd .more", "#C_ > ._bd .reply"],
+              "commentControls": ["#C_ > #comment", "#C_ > ._bd > .cmt-overlay-background[data-cmt-overlay]", "#C_ > ._bd .pagination", "#C_ > ._bd .more", "#C_ > ._bd .reply"],
               "commentIgnored": ["#C_ > ._hd._hdc", "#C_ > center", "#C_ > ._ft"]
             }
           }
@@ -430,7 +447,7 @@
             "pageRoot": "main",
             "allowEmptyComments": true,
             "requiredRoles": ["title", "product", "body", "comments"],
-            "roleProjection": {"title":{"mode":"seeded-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".app-article-container > .app-board-extra-value"],"ignored":[]},"comments":{"mode":"classified-children"}},
+            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".app-article-container > .app-board-extra-value"],"ignored":[]},"comments":{"mode":"classified-children"}},
             "hints": {
               "title": [".app-board-article-head h1"],
               "product": [".app-article-container > .app-board-extra-value"],
@@ -454,7 +471,7 @@
             "pageRoot": "article.board-article",
             "allowEmptyComments": true,
             "requiredRoles": ["title", "body", "comments"],
-            "roleProjection": {"title":{"mode":"seeded-shallow"},"body":{"mode":"atomic-boundary","ignored":[".article-body > .ad"]},"product":{"mode":"absent","cardinality":"zero","selectors":[],"ignored":[]},"comments":{"mode":"classified-children"}},
+            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[".article-body > .ad"]},"product":{"mode":"absent","cardinality":"zero","selectors":[],"ignored":[]},"comments":{"mode":"classified-children"}},
             "hints": {
               "title": [".article-head h1", ".article-head h2", ".article-head .title"],
               "body": [".article-body"],
@@ -618,6 +635,18 @@
       /(?:(?<=[A-Za-z])[-_.\/](?=[A-Za-z0-9])|(?<=[A-Za-z0-9])[-_.\/](?=[A-Za-z]))/g,
       "",
     );
+  }
+
+  function punctuationInvariantTitleMatch(leftValue, rightValue) {
+    const skeleton = function titleGlyphSkeleton(value) {
+      return String(value || "")
+        .normalize("NFKC")
+        .toLocaleLowerCase()
+        .replace(/[^\p{L}\p{N}]+/gu, "");
+    };
+    const left = skeleton(leftValue);
+    const right = skeleton(rightValue);
+    return left.length >= 8 && left === right;
   }
 
   function titleWordTokens(value) {
@@ -1183,15 +1212,47 @@
       : null;
   }
 
+  function referrerScopedArticleIdentity(locationLike, siteId) {
+    const approvedIdentity = articleIdentity(locationLike, siteId);
+    if (approvedIdentity) return approvedIdentity;
+    let url;
+    try {
+      url = new URL(
+        typeof locationLike === "string" ? locationLike : locationLike.href,
+      );
+    } catch (_error) {
+      return null;
+    }
+    const contract = SITE_CONTRACTS.find(function scopedIdentityContract(candidate) {
+      return candidate.id === siteId &&
+        hostnameMatches(url.hostname, candidate.domain);
+    });
+    if (
+      !contract ||
+      url.protocol !== "https:" ||
+      url.username ||
+      url.password ||
+      url.port ||
+      !url.pathname ||
+      url.pathname === "/"
+    ) {
+      return null;
+    }
+    const stableQuery = new URLSearchParams(url.search);
+    Array.from(stableQuery.keys()).forEach(function removeTrackingParameter(name) {
+      if (/^(?:utm_.+|fbclid|gclid|dclid|msclkid|ref|source)$/iu.test(name)) {
+        stableQuery.delete(name);
+      }
+    });
+    stableQuery.sort();
+    const query = stableQuery.toString();
+    return `${siteId}:referrer-url:${url.pathname}${query ? `?${query}` : ""}`;
+  }
+
   function sameArticleNavigation(sourceLocation, destinationLocation, siteId) {
     const sourceIdentity = articleIdentity(sourceLocation, siteId);
     const destinationIdentity = articleIdentity(destinationLocation, siteId);
     return Boolean(sourceIdentity) && sourceIdentity === destinationIdentity;
-  }
-
-  function isAlgumonHostname(hostname) {
-    const normalizedHostname = String(hostname || "").toLocaleLowerCase();
-    return normalizedHostname === "algumon.com" || normalizedHostname.endsWith(".algumon.com");
   }
 
   function isAlgumonReferrer(referrer) {
@@ -1205,216 +1266,30 @@
     }
   }
 
-  function canonicalAlgumonNavigationUrl(urlLike) {
+  function canonicalAlgumonReferrerOrigin(urlLike) {
     try {
       const url = new URL(urlLike);
-      if (
-        url.protocol !== "https:" || !isAlgumonHostname(url.hostname) ||
-        url.username || url.password || url.port
-      ) return null;
-      url.hash = "";
-      return url.href;
+      return isAlgumonReferrer(url.href) ? `${url.origin}/` : null;
     } catch (_error) {
       return null;
     }
   }
 
-  function navigationStorageApi(browserRoot) {
-    const get = browserRoot?.GM_getValue;
-    const set = browserRoot?.GM_setValue;
-    const remove = browserRoot?.GM_deleteValue;
-    return typeof get === "function" && typeof set === "function" && typeof remove === "function"
-      ? Object.freeze({ get, set, remove })
-      : null;
-  }
-
-  function readAlgumonNavigationSeeds(browserRoot) {
-    const storage = navigationStorageApi(browserRoot);
-    if (!storage) return null;
+  function readerEntryAuthority(locationLike, referrer) {
+    if (canonicalAlgumonReferrerOrigin(referrer)) return "algumon-referrer";
     try {
-      const raw = NATIVE.reflectApply(storage.get, browserRoot, [
-        ALGUMON_NAVIGATION_STORAGE_KEY,
-        "",
-      ]);
-      if (raw === null || typeof raw === "undefined" || String(raw) === "") {
-        return [];
-      }
-      const payload = JSON.parse(String(raw));
-      if (!Array.isArray(payload?.records)) return [];
-      const now = Date.now();
-      return payload.records.filter(function validStoredSeed(record) {
-        return record && typeof record === "object" &&
-          /^[a-f0-9]{48}$/u.test(String(record.token || "")) &&
-          typeof record.siteType === "string" &&
-          typeof record.title === "string" &&
-          canonicalAlgumonNavigationUrl(record.sourceReferrer) === record.sourceReferrer &&
-          Number.isSafeInteger(record.expiresAt) &&
-          record.expiresAt >= now &&
-          record.expiresAt <= now + ALGUMON_NAVIGATION_SEED_TTL_MS &&
-          (record.commentCount === null || normalizeCommentCount(record.commentCount) === record.commentCount);
-      }).slice(-MAX_ALGUMON_NAVIGATION_SEEDS);
+      const target = new URL(typeof locationLike === "string" ? locationLike : locationLike.href);
+      const contract = findSiteContract(target.hostname);
+      // Mobile publisher redirects may replace or remove document.referrer.
+      // The registered hot-deal route and article identity are sufficient to
+      // start discovery; the full semantic/body/comment proof still controls
+      // release. Unknown routes retain the exact Algumon-origin requirement.
+      return contract && articleIdentity(target.href, contract.id)
+        ? "registered-hotdeal-route"
+        : null;
     } catch (_error) {
       return null;
     }
-  }
-
-  function writeAlgumonNavigationSeeds(browserRoot, records) {
-    const storage = navigationStorageApi(browserRoot);
-    if (!storage || !Array.isArray(records)) return false;
-    try {
-      if (records.length === 0) {
-        NATIVE.reflectApply(storage.remove, browserRoot, [ALGUMON_NAVIGATION_STORAGE_KEY]);
-      } else {
-        NATIVE.reflectApply(storage.set, browserRoot, [
-          ALGUMON_NAVIGATION_STORAGE_KEY,
-          JSON.stringify({ records: records.slice(-MAX_ALGUMON_NAVIGATION_SEEDS) }),
-        ]);
-      }
-      return true;
-    } catch (_error) {
-      return false;
-    }
-  }
-
-  function createAlgumonNavigationToken(browserRoot) {
-    const getRandomValues = browserRoot === RUNTIME_GLOBAL
-      ? NATIVE.cryptoGetRandomValues
-      : browserRoot?.crypto?.getRandomValues?.bind(browserRoot.crypto);
-    if (typeof getRandomValues !== "function") return null;
-    const bytes = new Uint8Array(24);
-    try {
-      getRandomValues(bytes);
-      return Array.from(bytes).map(function encodeByte(value) {
-        return value.toString(16).padStart(2, "0");
-      }).join("");
-    } catch (_error) {
-      return null;
-    }
-  }
-
-  function seedCardForAnchor(anchor) {
-    return anchor.closest(
-      "[data-site-type], [data-source-site], [data-source-comment-count], " +
-      "[data-origin-comment-count], article, li, section",
-    ) || anchor.parentElement;
-  }
-
-  function sourceSeedSiteType(anchor, destination) {
-    const directContract = findSiteContract(destination.hostname);
-    if (directContract && articleIdentity(destination, directContract.id)) {
-      return directContract.id;
-    }
-    if (!isAlgumonHostname(destination.hostname)) return null;
-    const card = seedCardForAnchor(anchor);
-    const declared = [
-      card?.getAttribute("data-site-type"),
-      card?.getAttribute("data-source-site"),
-      anchor.getAttribute("data-site-type"),
-    ].map(function normalizeSiteType(value) {
-      return String(value || "").trim().toLocaleLowerCase();
-    }).find(Boolean);
-    return declared && findSiteContractById(declared) ? declared : null;
-  }
-
-  function findSiteContractById(siteId) {
-    return SITE_CONTRACTS.find(function matchingSiteContract(contract) {
-      return contract.id === siteId;
-    }) || null;
-  }
-
-  function captureAlgumonNavigationSeed(browserRoot, anchor) {
-    const sourceReferrer = canonicalAlgumonNavigationUrl(browserRoot.location?.href);
-    if (!sourceReferrer || !anchor?.href) return false;
-    let destination;
-    try {
-      destination = new URL(anchor.href, sourceReferrer);
-    } catch (_error) {
-      return false;
-    }
-    const siteType = sourceSeedSiteType(anchor, destination);
-    const card = seedCardForAnchor(anchor);
-    const titleCandidates = [
-      card?.getAttribute("data-source-title"),
-      card?.getAttribute("data-title"),
-      card?.querySelector("h1, h2, h3, .title, [data-title]")?.textContent,
-      anchor.textContent,
-    ];
-    const title = titleCandidates.map(function normalizeSourceTitle(candidate) {
-      return truncateRawTitle(candidate, 240);
-    }).find(Boolean);
-    if (!siteType || !title) return false;
-    const commentCount = [
-      card?.getAttribute("data-source-comment-count"),
-      card?.getAttribute("data-origin-comment-count"),
-      card?.getAttribute("data-comment-count"),
-      anchor.getAttribute("data-source-comment-count"),
-    ].map(normalizeCommentCount).find(function knownCount(value) { return value !== null; }) ?? null;
-    const records = readAlgumonNavigationSeeds(browserRoot);
-    const token = createAlgumonNavigationToken(browserRoot);
-    if (!records || !token) return false;
-    const expiresAt = Date.now() + ALGUMON_NAVIGATION_SEED_TTL_MS;
-    const retainedRecords = records.filter(function discardSupersededSourceSeed(record) {
-      return record.sourceReferrer !== sourceReferrer;
-    });
-    return writeAlgumonNavigationSeeds(browserRoot, retainedRecords.concat([{
-      token,
-      sourceReferrer,
-      siteType,
-      title,
-      commentCount,
-      expiresAt,
-    }]));
-  }
-
-  function forwardAlgumonNavigationSeed(browserRoot) {
-    const current = canonicalAlgumonNavigationUrl(browserRoot.location?.href);
-    const referrer = canonicalAlgumonNavigationUrl(browserRoot.document?.referrer);
-    const records = readAlgumonNavigationSeeds(browserRoot);
-    if (!current || !referrer || !records) return false;
-    const candidates = records.filter(function matchingSource(record) {
-      return record.sourceReferrer === referrer;
-    });
-    if (candidates.length !== 1) return false;
-    return writeAlgumonNavigationSeeds(browserRoot, records.map(function forwardRecord(record) {
-      return record.token === candidates[0].token ? { ...record, sourceReferrer: current } : record;
-    }));
-  }
-
-  function installAlgumonSeedCapture(browserRoot) {
-    const document = browserRoot?.document;
-    if (!document || typeof NATIVE.addEventListener !== "function") return false;
-    forwardAlgumonNavigationSeed(browserRoot);
-    const capture = function captureQualifiedAlgumonClick(event) {
-      if (event.defaultPrevented || (event.type === "click" && event.button !== 0) ||
-        (event.type === "auxclick" && event.button !== 1)) return;
-      const anchor = event.target?.closest?.("a[href]");
-      if (anchor) captureAlgumonNavigationSeed(browserRoot, anchor);
-    };
-    ["click", "auxclick"].forEach(function registerSeedCapture(type) {
-      NATIVE.reflectApply(NATIVE.addEventListener, document, [type, capture, true]);
-    });
-    return true;
-  }
-
-  function consumeAlgumonNavigationSeed(browserRoot) {
-    const document = browserRoot?.document;
-    const referrer = canonicalAlgumonNavigationUrl(document?.referrer);
-    if (!referrer || !isAlgumonReferrer(referrer)) return null;
-    const records = readAlgumonNavigationSeeds(browserRoot);
-    if (!records) return null;
-    const candidates = records.filter(function matchingNavigationSeed(record) {
-      return record.sourceReferrer === referrer;
-    });
-    if (candidates.length !== 1) return null;
-    const seed = candidates[0];
-    if (!writeAlgumonNavigationSeeds(browserRoot, records.filter(function discardConsumedSeed(record) {
-      return record.token !== seed.token;
-    }))) return null;
-    return Object.freeze({
-      siteType: seed.siteType,
-      title: seed.title,
-      commentCount: seed.commentCount,
-    });
   }
 
   function utf8ByteLength(value) {
@@ -1427,14 +1302,19 @@
   }
 
   function createRunNonce(browserRoot) {
-    if (!browserRoot.crypto || typeof browserRoot.crypto.getRandomValues !== "function") {
+    const getRandomValues = browserRoot === RUNTIME_GLOBAL
+      ? NATIVE.cryptoGetRandomValues
+      : browserRoot?.crypto?.getRandomValues?.bind(browserRoot.crypto);
+    if (typeof getRandomValues !== "function") return null;
+    const words = new Uint32Array(4);
+    try {
+      getRandomValues(words);
+      return `hdf-${Array.from(words).map(function encodeWord(word) {
+        return word.toString(36).padStart(7, "0");
+      }).join("")}`;
+    } catch (_error) {
       return null;
     }
-    const words = new Uint32Array(4);
-    browserRoot.crypto.getRandomValues(words);
-    return `hdf-${Array.from(words).map(function encodeWord(word) {
-      return word.toString(36).padStart(7, "0");
-    }).join("")}`;
   }
 
   function addSignal(evaluation, signal, points) {
@@ -1685,14 +1565,19 @@
     const gateStyles = document.querySelectorAll(
       `style[data-hotdeal-focus-runtime-style="${PROTOCOL_VERSION}"]`
     );
+    const bootstrapOnlyLock = gateStyles.length === 0 &&
+      html.getAttribute(ATTR.lock) === "1" &&
+      BOOTSTRAP_PUBLISHER_INLINE.has(html);
     if (
-      gateStyles.length !== 1 ||
-      !gateStyles[0].sheet ||
-      gateStyles[0].sheet.disabled
+      (!bootstrapOnlyLock && gateStyles.length !== 1) ||
+      (gateStyles.length === 1 && (
+        !gateStyles[0].sheet ||
+        gateStyles[0].sheet.disabled
+      ))
     ) {
       return measurementConflict();
     }
-    const gateSheet = gateStyles[0].sheet;
+    const gateSheet = gateStyles[0]?.sheet || null;
     const previousTransition = html.style.getPropertyValue("transition");
     const previousTransitionPriority = html.style.getPropertyPriority("transition");
     const previousAnimation = html.style.getPropertyValue("animation");
@@ -1721,7 +1606,7 @@
         inlinePropertySnapshot(html, "clip-path"),
       ]),
     });
-    const previouslyDisabled = gateSheet.disabled;
+    const previouslyDisabled = gateSheet?.disabled || false;
     html.style.setProperty("transition", "none", "important");
     html.style.setProperty("animation", "none", "important");
     html.style.setProperty("opacity", "0", "important");
@@ -1730,11 +1615,13 @@
     html.style.setProperty("clip-path", "inset(50%)", "important");
     html.setAttribute(ATTR.measure, "1");
     try {
-      measurementStyleSheetMutationDepth += 1;
-      try {
-        gateSheet.disabled = true;
-      } finally {
-        measurementStyleSheetMutationDepth -= 1;
+      if (gateSheet) {
+        measurementStyleSheetMutationDepth += 1;
+        try {
+          gateSheet.disabled = true;
+        } finally {
+          measurementStyleSheetMutationDepth -= 1;
+        }
       }
       const view = document.defaultView;
       const rootStyle = view ? nativeComputedStyle(view, html) : null;
@@ -1772,11 +1659,13 @@
       return inspect();
     } finally {
       html.style.setProperty("visibility", "hidden", "important");
-      measurementStyleSheetMutationDepth += 1;
-      try {
-        gateSheet.disabled = previouslyDisabled;
-      } finally {
-        measurementStyleSheetMutationDepth -= 1;
+      if (gateSheet) {
+        measurementStyleSheetMutationDepth += 1;
+        try {
+          gateSheet.disabled = previouslyDisabled;
+        } finally {
+          measurementStyleSheetMutationDepth -= 1;
+        }
       }
       html.removeAttribute(ATTR.measure);
       if (previousOpacity) {
@@ -2021,8 +1910,13 @@
   }
 
   function titleEvidence(document, algumonTitle, visibleTitle, jsonLdValue) {
-    const algumonCore = titleConsistency(algumonTitle, visibleTitle);
-    const algumonSingle = singleLongTitleTokenEquivalence(algumonTitle, visibleTitle);
+    const hasAlgumonTitle = Boolean(truncateRawTitle(algumonTitle, 300));
+    const algumonCore = hasAlgumonTitle
+      ? titleConsistency(algumonTitle, visibleTitle)
+      : Object.freeze({ ok: true, score: 1, mode: "not-required" });
+    const algumonSingle = hasAlgumonTitle
+      ? singleLongTitleTokenEquivalence(algumonTitle, visibleTitle)
+      : algumonCore;
     const algumon = algumonCore.ok ? algumonCore : algumonSingle.ok ? algumonSingle : algumonCore;
     const metadata = collectArticleTitleMetadata(document, jsonLdValue);
     const metadataComparisons = metadata.sources.map(function compareMetadata(source) {
@@ -2030,19 +1924,27 @@
       const metadataToVisible = titleCoreEquivalence(source.value, visibleTitle);
       const visibleSingle = singleLongTitleTokenEquivalence(visibleTitle, source.value);
       const metadataSingle = singleLongTitleTokenEquivalence(source.value, visibleTitle);
-      const coreOk = visibleToMetadata.ok && metadataToVisible.ok;
+      const punctuationInvariant = punctuationInvariantTitleMatch(
+        visibleTitle,
+        source.value,
+      );
+      const coreOk = (visibleToMetadata.ok && metadataToVisible.ok) ||
+        punctuationInvariant;
       const singleOk = visibleSingle.ok && metadataSingle.ok;
       const matchedCoreRatio = visibleToMetadata.referenceDistinctiveTokenCount
         ? visibleToMetadata.matchedDistinctiveTokenCount /
           visibleToMetadata.referenceDistinctiveTokenCount
         : 0;
       const conflictsWithVisibleArticle =
-        visibleToMetadata.protectedTokenAgreement !== true ||
-        matchedCoreRatio < 0.5;
+        !punctuationInvariant && (
+          visibleToMetadata.protectedTokenAgreement !== true ||
+          matchedCoreRatio < 0.5
+        );
       return Object.freeze({
         kind: source.kind,
         ok: coreOk || singleOk,
         conflictsWithVisibleArticle,
+        punctuationInvariant,
         boundedCommerceFormatting: boundedMetadataCommerceFormattingMatch(
           visibleTitle,
           source.value,
@@ -2050,9 +1952,11 @@
         score: coreOk || singleOk
           ? 1
           : Number(Math.min(visibleToMetadata.score, metadataToVisible.score).toFixed(3)),
-        mode: singleOk
-          ? "single-long-token-consensus"
-          : `${visibleToMetadata.mode}/${metadataToVisible.mode}`,
+        mode: punctuationInvariant
+          ? "punctuation-invariant-consensus"
+          : singleOk
+            ? "single-long-token-consensus"
+            : `${visibleToMetadata.mode}/${metadataToVisible.mode}`,
       });
     });
     const exactSchemaArticleMatch = metadataComparisons.some(
@@ -2077,7 +1981,7 @@
     const metadataOk = metadata.ok &&
       authoritativeMatches.length > 0 &&
       !metadataComparisons.some(effectiveMetadataConflict);
-    const ok = algumon.ok && metadataOk;
+    const ok = (!hasAlgumonTitle || algumon.ok) && metadataOk;
     return Object.freeze({
       ok,
       score: ok
@@ -2091,8 +1995,10 @@
               : 0,
           ).toFixed(3)),
       mode: ok
-        ? `algumon-${algumon.mode}+metadata-consensus`
-        : !algumon.ok
+        ? hasAlgumonTitle
+          ? `algumon-${algumon.mode}+metadata-consensus`
+          : "algumon-referrer+metadata-consensus"
+        : hasAlgumonTitle && !algumon.ok
           ? `algumon-${algumon.mode}`
           : `metadata-${
               metadataComparisons.some(effectiveMetadataConflict)
@@ -2258,7 +2164,16 @@
   }
 
   function isStructuralNoiseNode(element) {
-    if (isStrongProjectionNoiseNode(element)) return true;
+    if (isStrongProjectionNoiseNode(element)) {
+      if (
+        RELATED_NOISE_TOKEN_PATTERN.test(projectionNoiseMetadataText(element)) &&
+        containsSubstantialArticleContent(element) &&
+        !isAutonomousProjectionNoiseRoot(element)
+      ) {
+        return false;
+      }
+      return true;
+    }
     if (element.matches(LEAF_MEDIA_ELEMENTS)) {
       const tagName = element.tagName.toLocaleLowerCase();
       const resourceTokens = ["src", "srcset", "data-src", "data-srcset", "poster", "href"]
@@ -2271,7 +2186,7 @@
       return false;
     }
     if (element.matches(STRUCTURAL_NOISE_ELEMENTS)) {
-      return true;
+      return !containsSubstantialArticleContent(element);
     }
     if (!element.matches(STRUCTURAL_CONTAINER_ELEMENTS)) {
       return false;
@@ -2287,6 +2202,156 @@
       "a[href], button, [role='link'], [role='menuitem']"
     ).length;
     return navigationLinks >= 2 || element.matches("ul, ol, menu, form, [role='menu'], [role='list']");
+  }
+
+  function canonicalAutonomousNoiseLabel(value) {
+    return normalizeText(value)
+      .replace(/^[\s#·•|:：\-–—]+|[\s#·•|:：\-–—]+$/gu, "")
+      .replace(/\s*[\[(（]\s*\d{1,4}\s*[\])）]\s*$/u, "")
+      .trim();
+  }
+
+  function directAutonomousNoiseLabel(element) {
+    const samples = [
+      element.getAttribute("aria-label"),
+      element.getAttribute("title"),
+      element.getAttribute("data-title"),
+      Array.from(element.childNodes)
+        .filter(function directLabelText(node) { return node.nodeType === 3; })
+        .map(function directLabelValue(node) { return node.data; })
+        .join(" "),
+    ];
+    Array.from(element.children).slice(0, 8).forEach(function directHeading(child) {
+      if (child.matches("h1, h2, h3, h4, h5, h6, legend, [role='heading']")) {
+        samples.push(child.textContent);
+        return;
+      }
+      if (child.matches("header")) {
+        const heading = child.querySelector("h1, h2, h3, h4, h5, h6, [role='heading']");
+        if (heading) samples.push(heading.textContent);
+      }
+    });
+    return samples.some(function exactNoiseLabel(sample) {
+      const label = canonicalAutonomousNoiseLabel(sample || "");
+      return label.length > 0 &&
+        label.length <= 80 &&
+        AUTONOMOUS_NOISE_LABEL_PATTERN.test(label);
+    });
+  }
+
+  function autonomousNoiseResourceLinkCount(element) {
+    const links = (element.matches("a[href]") ? [element] : [])
+      .concat(Array.from(element.querySelectorAll("a[href]")).slice(0, 256));
+    return links.filter(function recognizedNoiseEndpoint(link) {
+      const href = link.getAttribute("href") || "";
+      try {
+        const url = new URL(href, element.ownerDocument.location.href);
+        return AUTONOMOUS_NOISE_RESOURCE_PATTERN.test(
+          `${url.pathname}${url.search}${url.hash}`,
+        );
+      } catch (_error) {
+        return AUTONOMOUS_NOISE_RESOURCE_PATTERN.test(href);
+      }
+    }).length;
+  }
+
+  function containsSubstantialArticleContent(element) {
+    const prose = Array.from(
+      element.querySelectorAll("p, blockquote, pre, code"),
+    ).slice(0, 64).reduce(function proseLength(total, node) {
+      return total + normalizeText(node.textContent).length;
+    }, 0);
+    return prose >= 48 ||
+      Boolean(element.querySelector(
+        "article, main, [itemprop='articleBody'], table, video, audio",
+      ));
+  }
+
+  function isAutonomousProjectionNoiseRoot(element) {
+    const metadata = projectionNoiseMetadataText(element);
+    const resources = projectionResourceText(element);
+    const relation = (element.getAttribute("rel") || "")
+      .split(/\s+/)
+      .map(function canonicalRelation(token) { return token.toLocaleLowerCase(); });
+    if (
+      AD_NETWORK_RESOURCE_PATTERN.test(resources) ||
+      relation.includes("sponsored")
+    ) {
+      return true;
+    }
+    const strongMetadataSignal =
+      STRONG_NOISE_TOKEN_PATTERN.test(metadata) ||
+      RELATED_NOISE_TOKEN_PATTERN.test(metadata);
+    if (
+      strongMetadataSignal &&
+      (
+        !RELATED_NOISE_TOKEN_PATTERN.test(metadata) ||
+        (!containsSubstantialArticleContent(element) && directAutonomousNoiseLabel(element))
+      )
+    ) {
+      return true;
+    }
+    if (
+      element.matches(STRUCTURAL_NOISE_ELEMENTS) &&
+      !containsSubstantialArticleContent(element)
+    ) {
+      return true;
+    }
+    const structuralSurface = element.matches(
+      `${STRUCTURAL_CONTAINER_ELEMENTS}, ${STRUCTURAL_NOISE_ELEMENTS}, ` +
+      `${LEAF_MEDIA_ELEMENTS}, [role='list'], [role='menu']`,
+    );
+    if (!structuralSurface) return false;
+    const directLabel = directAutonomousNoiseLabel(element);
+    const metadataSignal =
+      strongMetadataSignal ||
+      AUTONOMOUS_NOISE_METADATA_PATTERN.test(metadata);
+    const boundedNavigationCandidate =
+      metadataSignal ||
+      directLabel ||
+      element.matches(
+        `${STRUCTURAL_NOISE_ELEMENTS}, ul, ol, menu, [role='list'], [role='menu'], ` +
+        `${LEAF_MEDIA_ELEMENTS}`,
+      );
+    if (!boundedNavigationCandidate) return false;
+    const interactiveCount = (
+      element.matches("a[href], button, [role='link'], [role='button'], [role='menuitem']")
+        ? 1
+        : 0
+    ) + element.querySelectorAll(
+      "a[href], button, [role='link'], [role='button'], [role='menuitem']",
+    ).length;
+    const rowCount = element.querySelectorAll(
+      ":scope > li, :scope > tr, :scope > article, :scope > [role='listitem']",
+    ).length;
+    const resourceLinkCount = autonomousNoiseResourceLinkCount(element);
+    const ancillarySignal = element.matches(STRUCTURAL_NOISE_ELEMENTS) &&
+      interactiveCount > 0;
+    const navigationShapeSignal =
+      interactiveCount >= 2 ||
+      rowCount >= 2 ||
+      ((directLabel || metadataSignal || ancillarySignal || resourceLinkCount > 0) &&
+        interactiveCount >= 1);
+    const mediaNoiseSignal = element.matches(LEAF_MEDIA_ELEMENTS) &&
+      (
+        MEDIA_NOISE_TOKEN_PATTERN.test(metadata) ||
+        MEDIA_NOISE_TOKEN_PATTERN.test(normalizeProjectionTokenText(resources))
+      );
+    const signalCount = Number(metadataSignal) +
+      Number(directLabel) +
+      Number(resourceLinkCount > 0) +
+      Number(ancillarySignal) +
+      Number(navigationShapeSignal) +
+      Number(mediaNoiseSignal);
+    if (signalCount < 2) return false;
+    if (
+      containsSubstantialArticleContent(element) &&
+      !metadataSignal &&
+      !resourceLinkCount
+    ) {
+      return false;
+    }
+    return true;
   }
 
   function containsSemanticNoise(element, noiseCache, excludedRoots) {
@@ -2365,8 +2430,7 @@
         protectedSet.some(function overlapsProtected(protectedRoot) {
           return nodesOverlap(candidate, protectedRoot);
         }) ||
-        !isStructuralNoiseNode(candidate) ||
-        containsMeaningfulIgnoredContent(candidate)
+        !isAutonomousProjectionNoiseRoot(candidate)
       ) {
         return;
       }
@@ -2386,10 +2450,12 @@
   function containsUnprovenShadowBoundary(root, excludedRoots) {
     const view = root.ownerDocument.defaultView;
     const prototype = view?.Element?.prototype;
+    const shadowTracker = view ? SHADOW_TRACKERS.get(view) : null;
     if (
+      shadowTracker &&
       prototype &&
       typeof prototype.attachShadow === "function" &&
-      (!SHADOW_TRACKER || prototype.attachShadow !== SHADOW_TRACKER.wrapper)
+      prototype.attachShadow !== shadowTracker.wrapper
     ) {
       return true;
     }
@@ -2403,7 +2469,7 @@
       const tagName = current.tagName.toLocaleLowerCase();
       if (
         current.shadowRoot ||
-        SHADOW_TRACKER?.hosts.has(current) ||
+        shadowTracker?.hosts.has(current) ||
         (tagName.includes("-") && !isInspectableLightDomCustomElement(current)) ||
         current.hasAttribute("is") ||
         current.matches("template[shadowrootmode], template[shadowroot]")
@@ -2585,7 +2651,9 @@
     commentControls.forEach(function collectControlShellChain(surface) {
       const boundary = commentMount.contains(surface) ? commentMount : commentControlScope;
       for (
-        let current = surface;
+        // Dormant native comment menus cannot paint. Inspect their ancestor
+        // shells here; visible controls are still fully paint-checked below.
+        let current = isRendered(surface) ? surface : surface.parentElement;
         current && boundary && boundary.contains(current);
         current = current.parentElement
       ) {
@@ -3032,7 +3100,8 @@
         return !insideAnyRoot(item, excludedRoots);
       }
     ).length;
-    const apparentItemCount = Math.max(schemaCount, repeatedCount, hintedItems);
+    const singletonItems = singletonSemanticCommentEvidence(element);
+    const apparentItemCount = Math.max(schemaCount, repeatedCount, hintedItems, singletonItems.length);
     const labelMatch = COMMENT_TOKEN_PATTERN.test(`${tokenText} ${shortText.slice(0, 200)}`);
     const semantic = schemaCount > 0 || /comment|reply/i.test(tokenText);
     const anchorCount = element.querySelectorAll("a[href]").length;
@@ -3216,7 +3285,10 @@
           element.matches("[itemtype*='schema.org/Comment'], [itemprop='comment']") ||
           elementMatchesAny(element, itemHints) ||
           elementMatchesAny(element, controlHints) ||
-          elementMatchesAny(element, ignoredHints)
+          elementMatchesAny(element, ignoredHints) ||
+          (element.parentElement && !elementMatchesAny(element, hints) &&
+            hasSingularSemanticCommentIdentity(element) &&
+            COMMENT_TOKEN_PATTERN.test(semanticTokenText(element.parentElement)))
         ) {
           return false;
         }
@@ -3564,7 +3636,11 @@
       evaluation.features?.tokenText || semanticTokenText(evaluation.node),
       evaluation.node.getAttribute("aria-label") || "",
     ].join(" "));
+    const classifiedRoots = commentClassificationRoots(
+      evaluation.node, roleHints(layouts, "commentControls"), roleHints(layouts, "commentIgnored"),
+    ).concat(Array.from(evaluation.node.children).filter(isFormOnlyCommentEvidenceSurface));
     return evaluation.features?.apparentItemCount === 0 &&
+      !hasUnclassifiedCommentContent(evaluation.node, classifiedRoots) &&
       (isRendered(evaluation.node) || isStableZeroAreaCommentMount(evaluation.node)) &&
       (elementMatchesAny(evaluation.node, roleHints(layouts, "comments")) || semanticIdentity);
   }
@@ -3580,9 +3656,47 @@
     });
   }
 
+  function singletonSemanticCommentEvidence(mount) {
+    if (!COMMENT_TOKEN_PATTERN.test(semanticTokenText(mount))) return [];
+    const items = Array.from(mount.children).filter(function explicitSingularItem(item) {
+      return hasSingularSemanticCommentIdentity(item) &&
+        isRendered(item) && normalizeText(item.textContent).length > 0 &&
+        parseVisibleCommentTotal(item.textContent) === null &&
+        !isFormOnlyCommentEvidenceSurface(item) &&
+        !isCommentContinuationControl(item) &&
+        !isAutonomousProjectionNoiseRoot(item) &&
+        !containsSemanticNoise(item, new WeakMap(), []) &&
+        !containsUnprovenShadowBoundary(item, []) &&
+        !containsPublisherPaintRisk(item, []);
+    });
+    if (items.length !== 1) return [];
+    const controls = Array.from(mount.querySelectorAll("button, a[href], [role='button']"))
+      .filter(function independentContinuation(control) {
+        return !items[0].contains(control) && isCommentContinuationControl(control) &&
+          !isAutonomousProjectionNoiseRoot(control);
+      });
+    const ignored = Array.from(mount.children).filter(function explicitNoise(child) {
+      return child !== items[0] && isAutonomousProjectionNoiseRoot(child);
+    });
+    // Singular item identity, a comment-labelled mount, and exhaustive child
+    // coverage are all required. A lone unlabelled paragraph is not a comment.
+    return hasUnclassifiedCommentContent(mount, items.concat(controls, ignored)) ? [] : items;
+  }
+
+  function hasSingularSemanticCommentIdentity(element) {
+    return /(?:^|[\s_-])(?:comment|reply)(?:$|[\s_-](?:item|row|entry)(?:$|[\s_-]))/iu
+      .test(semanticTokenText(element));
+  }
+
   function inferredRepeatedCommentEvidence(evaluation, layouts, evidenceCache) {
     if (evidenceCache.has(evaluation.node)) {
       return evidenceCache.get(evaluation.node);
+    }
+    const singletonItems = singletonSemanticCommentEvidence(evaluation.node);
+    if (singletonItems.length) {
+      const result = Object.freeze({ ok: true, count: 1, elements: Object.freeze(singletonItems) });
+      evidenceCache.set(evaluation.node, result);
+      return result;
     }
     if (
       evaluation.features?.apparentItemCount < 2 ||
@@ -3780,7 +3894,10 @@
          elementMatchesAny(element, itemHints) ||
           elementMatchesAny(element, controlHints) ||
           elementMatchesAny(element, ignoredHints) ||
-          isFormOnlyCommentEvidenceSurface(element)
+          isFormOnlyCommentEvidenceSurface(element) ||
+          (element.parentElement && !elementMatchesAny(element, mountHints) &&
+            hasSingularSemanticCommentIdentity(element) &&
+            COMMENT_TOKEN_PATTERN.test(semanticTokenText(element.parentElement)))
         ) {
           return false;
         }
@@ -4570,6 +4687,23 @@
         productCardinality: configuredProductCardinality,
         productOrder: configuredProductOrder,
       }),
+      runtimeProjection: Object.freeze({
+        commonRoot: winner.root,
+        title: winner.title.node,
+        body: winner.body.node,
+        comments: winner.comments.node,
+        product: winner.product?.node || null,
+        commentItems: Object.freeze(winner.commentEvidence.slice()),
+        bodyAutonomousIgnored: Object.freeze(
+          Array.from(winner.body.features?.autonomousIgnored?.roots || []),
+        ),
+        productAutonomousIgnored: Object.freeze(
+          Array.from(winner.product?.features?.autonomousIgnored?.roots || []),
+        ),
+        resolvedTitle: winner.title.resolvedTitle ||
+          normalizeText(winner.title.node.textContent),
+        productOrder: winner.productOrder,
+      }),
       policyProposal,
     });
   }
@@ -4694,12 +4828,13 @@
       .forEach(function removeRoleClass(className) { element.classList.remove(className); });
   }
 
-  function stripOwnedAttributes(element) {
+  function stripOwnedAttributes(element, preservedOwnedElements) {
     if (!element || element.nodeType !== 1) {
       return;
     }
     [element].concat(Array.from(element.querySelectorAll("*"))).forEach(
       function removeAllReservedPublisherMarkers(candidate) {
+        if (preservedOwnedElements?.has(candidate)) return;
         Array.from(candidate.attributes || []).forEach(function removeReserved(attribute) {
           if (attribute.name.startsWith(HDF_ATTRIBUTE_PREFIX)) {
             candidate.removeAttribute(attribute.name);
@@ -4758,18 +4893,48 @@
   }
 
   function projectedTitleLeaves(titleNode, resolvedTitle) {
+    const resolvedCore = normalizeText(stripBoundedTitleAffixes(resolvedTitle));
     return Array.from(titleNode.querySelectorAll("span, strong, b, em, a, div"))
       .filter(function titleTextLeaf(element) {
         if (TITLE_METADATA_PATTERN.test(semanticTokenText(element))) {
           return false;
         }
         const text = normalizeText(element.textContent);
-        return text &&
-          textSimilarity(text, resolvedTitle) >= 0.54 &&
-          !Array.from(element.children).some(function nestedTitleText(child) {
+        if (
+          !text ||
+          Array.from(element.children).some(function nestedTitleText(child) {
             return normalizeText(child.textContent) &&
               !TITLE_METADATA_PATTERN.test(semanticTokenText(child));
-          });
+          })
+        ) {
+          return false;
+        }
+        if (textSimilarity(text, resolvedTitle) >= 0.54) {
+          return true;
+        }
+        if (
+          !resolvedCore ||
+          element.parentElement !== titleNode ||
+          !element.matches("span, strong, b, em") ||
+          element.children.length !== 0 ||
+          isStrongProjectionNoiseNode(element) ||
+          AUTONOMOUS_NOISE_LABEL_PATTERN.test(
+            canonicalAutonomousNoiseLabel(element.textContent),
+          ) ||
+          STRONG_NOISE_TOKEN_PATTERN.test(
+            normalizeProjectionTokenText(element.textContent),
+          )
+        ) {
+          return false;
+        }
+        const rawText = truncateRawTitle(element.textContent, 80);
+        const prefixCore = normalizeText(
+          stripBoundedTitleAffixes(`${rawText} ${resolvedTitle}`),
+        );
+        const suffixCore = normalizeText(
+          stripBoundedTitleAffixes(`${resolvedTitle} ${rawText}`),
+        );
+        return prefixCore === resolvedCore || suffixCore === resolvedCore;
       });
   }
 
@@ -4844,9 +5009,7 @@
 
   function claimBootstrapLock(document, removePublisherMarkers = true) {
     const html = document.documentElement;
-    if (!html || (removePublisherMarkers && !removePublisherHdfMarkers(document))) {
-      return null;
-    }
+    if (!html) return null;
     const declarations = Object.freeze([
       ["animation", BOOTSTRAP_INLINE_LOCK.animation],
       ["caret-color", BOOTSTRAP_INLINE_LOCK.caretColor],
@@ -4857,38 +5020,68 @@
       ["transition", BOOTSTRAP_INLINE_LOCK.transition],
       ["visibility", BOOTSTRAP_INLINE_LOCK.visibility],
     ]);
-    const previous = Object.freeze(
-      declarations.map(function captureDeclaration([property]) {
-        return inlinePropertySnapshot(html, property);
-      })
-    );
-    BOOTSTRAP_PUBLISHER_INLINE.set(
-      html,
-      Object.freeze(Object.fromEntries(previous.map(function indexSnapshot(snapshot) {
-        return [snapshot.property, snapshot];
-      }))),
-    );
-    declarations.forEach(function applyGeometryPreservingLock([property, value]) {
-      html.style.setProperty(property, value, "important");
-    });
-    const claimedDeclarations = Object.freeze(
-      declarations.map(function captureClaimedDeclaration([property]) {
-        return Object.freeze([
-          property,
-          html.style.getPropertyValue(property),
-          html.style.getPropertyPriority(property),
-        ]);
-      })
-    );
-    if (claimedDeclarations.some(function failedInlineClaim([, value, priority]) {
-      return !value || priority !== "important";
-    })) {
-      return null;
-    }
-    html.classList.add(CLASS.lock);
-    html.setAttribute(ATTR.lock, "1");
-    html.setAttribute(ATTR.state, "locked");
+    let previous = [];
+    let claimedDeclarations = [];
     let restored = false;
+    const restorePublisherDeclarations = function restorePublisherDeclarations() {
+      if (restored) return true;
+      let restoredAll = true;
+      previous.forEach(function restoreDeclaration(snapshot) {
+        try {
+          applyInlinePropertySnapshot(html, snapshot);
+        } catch (_error) {
+          restoredAll = false;
+        }
+      });
+      BOOTSTRAP_PUBLISHER_INLINE.delete(html);
+      restored = true;
+      return restoredAll;
+    };
+    const abandonLock = function abandonLock() {
+      restorePublisherDeclarations();
+      try { html.removeAttribute(ATTR.lock); } catch (_error) {}
+      try { html.removeAttribute(ATTR.state); } catch (_error) {}
+      try { html.classList.remove(CLASS.lock); } catch (_error) {}
+      return null;
+    };
+    try {
+      if (removePublisherMarkers && !removePublisherHdfMarkers(document)) {
+        return null;
+      }
+      previous = Object.freeze(
+        declarations.map(function captureDeclaration([property]) {
+          return inlinePropertySnapshot(html, property);
+        })
+      );
+      BOOTSTRAP_PUBLISHER_INLINE.set(
+        html,
+        Object.freeze(Object.fromEntries(previous.map(function indexSnapshot(snapshot) {
+          return [snapshot.property, snapshot];
+        }))),
+      );
+      declarations.forEach(function applyGeometryPreservingLock([property, value]) {
+        html.style.setProperty(property, value, "important");
+      });
+      claimedDeclarations = Object.freeze(
+        declarations.map(function captureClaimedDeclaration([property]) {
+          return Object.freeze([
+            property,
+            html.style.getPropertyValue(property),
+            html.style.getPropertyPriority(property),
+          ]);
+        })
+      );
+      if (claimedDeclarations.some(function failedInlineClaim([, value, priority]) {
+        return !value || priority !== "important";
+      })) {
+        return abandonLock();
+      }
+      html.classList.add(CLASS.lock);
+      html.setAttribute(ATTR.lock, "1");
+      html.setAttribute(ATTR.state, "locked");
+    } catch (_error) {
+      return abandonLock();
+    }
     return Object.freeze({
       intact() {
         return !restored &&
@@ -4914,21 +5107,79 @@
       },
       restoreInline() {
         if (restored || !this.intact()) return false;
-        previous.forEach(function restoreDeclaration(snapshot) {
-          applyInlinePropertySnapshot(html, snapshot);
+        return restorePublisherDeclarations();
+      },
+      restorePublisherInline() {
+        return restorePublisherDeclarations();
+      },
+      repairInline() {
+        if (restored) return false;
+        claimedDeclarations.forEach(function repairClaimedProperty([property, value, priority]) {
+          if (html.style.getPropertyValue(property) !== value ||
+              html.style.getPropertyPriority(property) !== priority) {
+            html.style.setProperty(property, value, priority);
+          }
         });
-        BOOTSTRAP_PUBLISHER_INLINE.delete(html);
-        restored = true;
-        return true;
+        return this.intact();
       },
     });
+  }
+
+  function restorePublisherPage(document, styleElement, bootstrapLock) {
+    if (!document?.documentElement) return false;
+    const html = document.documentElement;
+    let restored = true;
+    try {
+      if (styleElement?.isConnected) {
+        try {
+          styleElement.remove();
+        } catch (_error) {
+          try {
+            styleElement.parentNode?.removeChild(styleElement);
+          } catch (_fallbackError) {
+            restored = false;
+          }
+        }
+      }
+    } finally {
+      try {
+        clearProtocolState(document);
+      } catch (_error) {
+        restored = false;
+      } finally {
+        try {
+          bootstrapLock?.restorePublisherInline?.();
+        } catch (_error) {
+          restored = false;
+        } finally {
+          [ATTR.lock, ATTR.ready, ATTR.protocol, ATTR.state, ATTR.status, ATTR.measure]
+            .forEach(function removeRootProtocolAttribute(attribute) {
+              try {
+                html.removeAttribute(attribute);
+              } catch (_error) {
+                restored = false;
+              }
+            });
+          try {
+            html.classList.remove(CLASS.lock, CLASS.ready);
+          } catch (_error) {
+            restored = false;
+          }
+        }
+      }
+    }
+    return restored && !html.classList.contains(CLASS.lock) &&
+      !html.hasAttribute(ATTR.lock) && !html.classList.contains(CLASS.ready) &&
+      !html.hasAttribute(ATTR.ready) && !styleElement?.isConnected;
   }
 
   function orderedCommentControls(state) {
     return uniqueElements(queryAllSafe(
       state.commentControlScope,
       state.commentControlSelectors,
-    )).sort(documentOrder);
+    )).filter(function trackedCommentControl(control) {
+      return state.commentControlRoots.has(control);
+    }).sort(documentOrder);
   }
 
   function commentControlSelectorDigest(selectors) {
@@ -4971,7 +5222,6 @@
   function approvedDormantCommentControl(control, state) {
     return control.isConnected &&
       state.commentControlScope.contains(control) &&
-      state.toggleableCommentControls.has(control) &&
       state.commentControlRoots.has(control) &&
       state.ownedElements.has(control) &&
       control.getAttribute(ATTR.role) === "comment-control" &&
@@ -5087,13 +5337,22 @@
       ),
       toggleableCommentControls: new Set(roles.commentDormantControls || []),
       commentIgnoredRoots: new Set(roles.commentIgnored),
+      commentConfiguredIgnoredRoots: new Set(roles.commentConfiguredIgnored || []),
+      commentAutonomousIgnoredRoots: new Set(roles.commentAutonomousIgnored || []),
+      commentSafetyIgnoredRoots: new Set(),
       commentCountBoundary: roles.commentCountBoundary || commonRoot,
       commentTotalEvidenceRoots: new Set(roles.commentTotalEvidence || []),
       acceptedCommentCount: roles.commentItems.length,
       requiresVisibleExactCommentTotal:
         projectionPolicy.provenCommentCountSource === "visible-comment-total",
       bodyIgnoredRoots: new Set(roles.bodyIgnored),
+      bodyConfiguredIgnoredRoots: new Set(roles.bodyConfiguredIgnored || []),
+      bodyAutonomousIgnoredRoots: new Set(roles.bodyAutonomousIgnored || []),
+      bodySafetyIgnoredRoots: new Set(),
       productIgnoredRoots: new Set(roles.productIgnored),
+      productConfiguredIgnoredRoots: new Set(roles.productConfiguredIgnored || []),
+      productAutonomousIgnoredRoots: new Set(roles.productAutonomousIgnored || []),
+      productSafetyIgnoredRoots: new Set(),
       projectionPolicy,
       titleMarked,
       resolvedTitle,
@@ -5137,7 +5396,11 @@
     if (!root || root.nodeType !== 1) {
       return;
     }
-    [root].concat(Array.from(root.querySelectorAll(`[${ATTR.keep}]`))).forEach(
+    const markerClosure = [root].concat(Array.from(root.querySelectorAll(`[${ATTR.keep}]`)));
+    for (let ancestor = root.parentElement; ancestor; ancestor = ancestor.parentElement) {
+      markerClosure.push(ancestor);
+    }
+    uniqueElements(markerClosure).forEach(
       function rememberAuthorized(element) {
         if (
           !state.ownedElements.has(element) ||
@@ -5178,13 +5441,18 @@
           (state.commentCountBoundary !== evidence &&
             !state.commentCountBoundary.contains(evidence))
         ) {
-          return false;
+          continue;
         }
         const count = parseVisibleCommentTotal(evidence.textContent);
-        if (count === null) return false;
-        values.add(count);
+        if (count !== null) values.add(count);
       }
-      if (values.size !== 1 || !values.has(currentItems.length)) return false;
+      // A publisher may update its total before or after adding a reply,
+      // or leave a cached total unchanged. After the initial projection,
+      // only the exact, individually classified DOM item set is authoritative.
+      // A lagging counter must not stop the observer or hide later replies.
+      state.publisherCommentCount = values.size === 1
+        ? values.values().next().value
+        : null;
     }
     state.acceptedCommentCount = currentItems.length;
     return true;
@@ -5198,6 +5466,33 @@
       },
       function rejectUnsafeOwnershipMeasurement() { return false; },
     );
+  }
+
+  function verifyOwnedMarkerState(document, state) {
+    if (!state?.titleMarked || !state.commonRoot?.isConnected) return false;
+    if (!state.ownedElements.has(state.commonRoot)) return false;
+    if (!state.ownedElementSet.size) return false;
+    if (!state.requiredRoles.every(function requiredRoleIsOwned(role) {
+      const element = state.roles[role];
+      return element?.isConnected && state.ownedElements.has(element) &&
+        element.getAttribute(ATTR.role) === role;
+    })) {
+      return false;
+    }
+    const markedElements = document.querySelectorAll(
+      `[${ATTR.keep}], [${ATTR.shell}], [${ATTR.deep}], [${ATTR.role}], ` +
+      `.${CLASS.keep}, .${CLASS.shell}, .${CLASS.deep}, [class*="${CLASS.rolePrefix}"]`
+    );
+    if (markedElements.length !== state.ownedElementSet.size) return false;
+    return Array.from(markedElements).every(function exactOwnedMarker(element) {
+      return state.ownedElementSet.has(element) && state.ownedElements.has(element) &&
+        element.getAttribute(ATTR.keep) === state.nonce &&
+        markerShapeMatches(element, state.expectedMarkerShapes.get(element));
+    }) && Array.from(state.ownedElementSet).every(function intactOwnedMarker(element) {
+      return element.isConnected && state.ownedElements.has(element) &&
+        element.getAttribute(ATTR.keep) === state.nonce &&
+        markerShapeMatches(element, state.expectedMarkerShapes.get(element));
+    });
   }
 
   function projectionHasPublisherPaintRiskWithPublisherStyles(state) {
@@ -5305,19 +5600,78 @@
       return current.length === expectedSet.size &&
         current.every(function expectedRoot(root) { return expectedSet.has(root); });
     };
-    const currentBodyIgnored = ignoredRootsWithin(
+    const currentBodyConfiguredIgnored = ignoredRootsWithin(
       state.roles.body,
       state.projectionPolicy.bodyIgnoredSelectors,
     );
-    const currentProductIgnored = state.roles.product
+    const currentProductConfiguredIgnored = state.roles.product
       ? ignoredRootsWithin(
           state.roles.product,
           state.projectionPolicy.productIgnoredSelectors,
         )
       : [];
+    const currentBodySafetyIgnored = Array.from(state.bodySafetyIgnoredRoots)
+      .filter(function connectedBodySafetyRoot(root) {
+        return root?.isConnected &&
+          root !== state.roles.body &&
+          state.roles.body.contains(root);
+      });
+    const currentProductSafetyIgnored = state.roles.product
+      ? Array.from(state.productSafetyIgnoredRoots)
+          .filter(function connectedProductSafetyRoot(root) {
+            return root?.isConnected &&
+              root !== state.roles.product &&
+              state.roles.product.contains(root);
+          })
+      : [];
+    const currentBodyAutonomousDiscovery = discoverAutonomousIgnoredRoots(
+      state.roles.body,
+      currentBodyConfiguredIgnored.concat(currentBodySafetyIgnored),
+    );
+    const currentProductAutonomousDiscovery = state.roles.product
+      ? discoverAutonomousIgnoredRoots(
+          state.roles.product,
+          currentProductConfiguredIgnored.concat(currentProductSafetyIgnored),
+        )
+      : Object.freeze({ ok: true, roots: Object.freeze([]), count: 0 });
+    const currentBodyAutonomous = currentBodyAutonomousDiscovery.ok
+      ? Array.from(currentBodyAutonomousDiscovery.roots)
+      : [];
+    const currentProductAutonomous = currentProductAutonomousDiscovery.ok
+      ? Array.from(currentProductAutonomousDiscovery.roots)
+      : [];
     if (
-      !sameRootSet(currentBodyIgnored, state.bodyIgnoredRoots) ||
-      !sameRootSet(currentProductIgnored, state.productIgnoredRoots)
+      !currentBodyAutonomousDiscovery.ok ||
+      !currentProductAutonomousDiscovery.ok ||
+      !sameRootSet(
+        currentBodyConfiguredIgnored,
+        state.bodyConfiguredIgnoredRoots,
+      ) ||
+      !sameRootSet(
+        currentProductConfiguredIgnored,
+        state.productConfiguredIgnoredRoots,
+      ) ||
+      !sameRootSet(currentBodySafetyIgnored, state.bodySafetyIgnoredRoots) ||
+      !sameRootSet(currentProductSafetyIgnored, state.productSafetyIgnoredRoots) ||
+      !sameRootSet(currentBodyAutonomous, state.bodyAutonomousIgnoredRoots) ||
+      !sameRootSet(
+        currentProductAutonomous,
+        state.productAutonomousIgnoredRoots,
+      ) ||
+      !sameRootSet(
+        currentBodyConfiguredIgnored.concat(
+          currentBodySafetyIgnored,
+          currentBodyAutonomous,
+        ),
+        state.bodyIgnoredRoots,
+      ) ||
+      !sameRootSet(
+        currentProductConfiguredIgnored.concat(
+          currentProductSafetyIgnored,
+          currentProductAutonomous,
+        ),
+        state.productIgnoredRoots,
+      )
     ) {
       return false;
     }
@@ -5370,15 +5724,28 @@
     ) {
       return false;
     }
-    const currentCommentItems = uniqueElements(
-      queryAllSafe(state.roles.comments, state.commentItemSelectors)
+    const currentCommentProjection = deriveCommentProjectionRoots(
+      state.roles.comments,
+      state.commentControlScope,
+      state.commentItemSelectors,
+      state.commentControlSelectors,
+      state.commentIgnoredSelectors,
+      state.commentControlRoots,
+      state.commentItemRoots,
     );
-    const currentCommentControls = uniqueElements(
-      queryAllSafe(state.commentControlScope, state.commentControlSelectors)
-    );
-    const currentCommentIgnored = uniqueElements(
-      queryAllSafe(state.roles.comments, state.commentIgnoredSelectors)
-    );
+    if (!currentCommentProjection.ok) return false;
+    const {
+      commentItems: currentCommentItems,
+      commentControls: currentCommentControls,
+      commentConfiguredIgnored: currentCommentConfiguredIgnored,
+      commentAutonomousIgnored: currentCommentAutonomousIgnored,
+      commentIgnored: derivedCurrentCommentIgnored,
+    } = currentCommentProjection;
+    const currentCommentIgnored = uniqueElements(derivedCurrentCommentIgnored.concat(
+      Array.from(state.commentSafetyIgnoredRoots).filter(function ignoredRootStillInMount(root) {
+        return root.isConnected && state.roles.comments.contains(root);
+      }),
+    ));
     if (
       !Number.isInteger(state.acceptedCommentCount) ||
       currentCommentItems.length !== state.acceptedCommentCount ||
@@ -5389,6 +5756,14 @@
     if (
       !sameRootSet(currentCommentItems, state.commentItemRoots) ||
       !sameRootSet(currentCommentControls, state.commentControlRoots) ||
+      !sameRootSet(
+        currentCommentConfiguredIgnored,
+        state.commentConfiguredIgnoredRoots,
+      ) ||
+      !sameRootSet(
+        currentCommentAutonomousIgnored,
+        state.commentAutonomousIgnoredRoots,
+      ) ||
       !sameRootSet(currentCommentIgnored, state.commentIgnoredRoots)
     ) {
       return false;
@@ -5412,7 +5787,7 @@
           item.getAttribute(ATTR.role) !== "comment-item";
       }) ||
       currentCommentControls.some(function unownedControl(control) {
-        return (!isRendered(control) && !state.toggleableCommentControls.has(control)) ||
+        return (!isRendered(control) && !approvedDormantCommentControl(control, state)) ||
           !state.ownedElements.has(control) ||
           control.getAttribute(ATTR.role) !== "comment-control";
       }) ||
@@ -5497,6 +5872,36 @@
         `[${ATTR.role}="comment-control"] { visibility: visible !important; }`,
       `${readyRoot} ${owned}${shell}::before,`,
       `${readyRoot} ${owned}${shell}::after { content: none !important; display: none !important; }`,
+      `@media (max-width: 720px) {`,
+      `${readyRoot}, ${readyRoot} body { ` +
+        `box-sizing: border-box !important; width: 100% !important; ` +
+        `min-width: 0 !important; max-width: 100% !important; ` +
+        `margin-left: 0 !important; margin-right: 0 !important; }`,
+      `${readyRoot} body ${owned}${shell} { ` +
+        `box-sizing: border-box !important; width: 100% !important; ` +
+        `min-width: 0 !important; max-width: 100% !important; ` +
+        `margin-left: 0 !important; margin-right: 0 !important; }`,
+      `${readyRoot} body ${owned}.${CLASS.deep}[${ATTR.deep}],` +
+        `${readyRoot} body ${owned}.${roleClass("title")}[${ATTR.role}="title"],` +
+        `${readyRoot} body ${owned}.${roleClass("body")}[${ATTR.role}="body"],` +
+        `${readyRoot} body ${owned}.${roleClass("product")}[${ATTR.role}="product"],` +
+        `${readyRoot} body ${owned}.${roleClass("comments")}[${ATTR.role}="comments"] { ` +
+        `box-sizing: border-box !important; min-width: 0 !important; ` +
+        `max-width: 100% !important; margin-left: 0 !important; ` +
+        `margin-right: 0 !important; }`,
+      `${readyRoot} body ${owned}.${roleClass("title")}[${ATTR.role}="title"] { ` +
+        `display: block !important; width: 100% !important; ` +
+        `white-space: normal !important; overflow-wrap: anywhere !important; }`,
+      `${readyRoot} body ${owned}.${roleClass("body")}[${ATTR.role}="body"],` +
+        `${readyRoot} body ${owned}.${roleClass("product")}[${ATTR.role}="product"],` +
+        `${readyRoot} body ${owned}.${roleClass("comments")}[${ATTR.role}="comments"] { ` +
+        `width: 100% !important; }`,
+      `${readyRoot} body ${owned}.${CLASS.deep}[${ATTR.deep}] img,` +
+        `${readyRoot} body ${owned}.${CLASS.deep}[${ATTR.deep}] picture,` +
+        `${readyRoot} body ${owned}.${CLASS.deep}[${ATTR.deep}] video,` +
+        `${readyRoot} body ${owned}.${CLASS.deep}[${ATTR.deep}] iframe { ` +
+        `max-width: 100% !important; height: auto !important; }`,
+      `}`,
     ].join("\n");
   }
 
@@ -5523,14 +5928,28 @@
     return style;
   }
 
-  function canonicalRuntimeCssRules(styleElement) {
+  function publisherVisualRecoveryStyleText() {
+    return [
+      "html { transition: none !important; animation: none !important; " +
+        "visibility: visible !important; content-visibility: visible !important; " +
+        "opacity: 1 !important; clip-path: none !important; pointer-events: auto !important; }",
+      "html::before, html::after, body::before, body::after { " +
+        "content: none !important; display: none !important; background: none !important; " +
+        "background-image: none !important; box-shadow: none !important; " +
+        "pointer-events: none !important; }",
+    ].join("\n");
+  }
+
+  function installPublisherVisualRecoveryStyle(document) {
+    const parent = document?.head || document?.documentElement;
+    const textContent = publisherVisualRecoveryStyleText();
+    if (!parent || typeof GM_addElement !== "function") return null;
     try {
-      if (!styleElement.sheet || styleElement.sheet.disabled) {
-        return null;
-      }
-      return Array.from(styleElement.sheet.cssRules).map(function canonicalRule(rule) {
-        return rule.cssText;
-      }).join("\n");
+      const style = GM_addElement(parent, "style", { textContent });
+      return style?.nodeType === 1 && style.localName === "style" &&
+        style.isConnected && style.textContent === textContent
+        ? style
+        : null;
     } catch (_error) {
       return null;
     }
@@ -5540,7 +5959,6 @@
     const expectedText = gateStyleText(nonce);
     styleElement.textContent = expectedText;
     runtime.expectedStyleText = expectedText;
-    runtime.expectedStyleRules = canonicalRuntimeCssRules(styleElement);
   }
 
   function runtimeGateStyleFailure(styleElement, runtime) {
@@ -5550,131 +5968,11 @@
       styleElement.getAttribute("data-hotdeal-focus-runtime-style") !== PROTOCOL_VERSION
     ) return "marker";
     if (styleElement.textContent !== runtime.expectedStyleText) return "text";
-    if (runtime.expectedStyleRules === null) return "expected-rules";
-    if (canonicalRuntimeCssRules(styleElement) !== runtime.expectedStyleRules) return "rules";
     return null;
   }
 
   function runtimeGateStyleIntact(styleElement, runtime) {
     return runtimeGateStyleFailure(styleElement, runtime) === null;
-  }
-
-  function installPersistentTerminalGuardian(browserRoot, styleElement, status) {
-    const document = browserRoot.document;
-    const html = document.documentElement;
-    let terminalStatus = String(status || "terminal-blocked").slice(0, 96);
-    let expectedRules = null;
-    let enforcing = false;
-    const enforce = function enforceTerminalState() {
-      if (enforcing) return;
-      enforcing = true;
-      try {
-        const expectedText = gateStyleText(null);
-        if (styleElement?.sheet?.disabled) {
-          styleElement.sheet.disabled = false;
-        }
-        if (styleElement && (
-          !styleElement.isConnected ||
-          styleElement.textContent !== expectedText ||
-          canonicalRuntimeCssRules(styleElement) !== expectedRules
-        )) {
-          styleElement.textContent = expectedText;
-          (document.head || document.documentElement).appendChild(styleElement);
-          expectedRules = canonicalRuntimeCssRules(styleElement);
-        }
-        if (!html.classList.contains(CLASS.lock)) html.classList.add(CLASS.lock);
-        if (html.getAttribute(ATTR.lock) !== "1") html.setAttribute(ATTR.lock, "1");
-        clearProtocolState(document);
-        if (html.hasAttribute(ATTR.measure)) html.removeAttribute(ATTR.measure);
-        if (html.classList.contains(CLASS.ready)) html.classList.remove(CLASS.ready);
-        if (html.hasAttribute(ATTR.ready)) html.removeAttribute(ATTR.ready);
-        if (html.hasAttribute(ATTR.protocol)) html.removeAttribute(ATTR.protocol);
-        if (html.getAttribute(ATTR.state) !== "blocked") {
-          html.setAttribute(ATTR.state, "blocked");
-        }
-        if (html.getAttribute(ATTR.status) !== terminalStatus) {
-          html.setAttribute(ATTR.status, terminalStatus);
-        }
-        if (
-          html.style.getPropertyValue("visibility") !== "hidden" ||
-          html.style.getPropertyPriority("visibility") !== "important"
-        ) {
-          html.style.setProperty("visibility", "hidden", "important");
-        }
-        if (
-          html.style.getPropertyValue("transition") !== "none" ||
-          html.style.getPropertyPriority("transition") !== "important"
-        ) {
-          html.style.setProperty("transition", "none", "important");
-        }
-        if (
-          html.style.getPropertyValue("animation") !== "none" ||
-          html.style.getPropertyPriority("animation") !== "important"
-        ) {
-          html.style.setProperty("animation", "none", "important");
-        }
-        if (
-          html.style.getPropertyValue("display") !== "none" ||
-          html.style.getPropertyPriority("display") !== "important"
-        ) {
-          html.style.setProperty("display", "none", "important");
-        }
-        if (
-          html.style.getPropertyValue("opacity") !== "0" ||
-          html.style.getPropertyPriority("opacity") !== "important"
-        ) {
-          html.style.setProperty("opacity", "0", "important");
-        }
-        if (
-          html.style.getPropertyValue("content-visibility") !== "hidden" ||
-          html.style.getPropertyPriority("content-visibility") !== "important"
-        ) {
-          html.style.setProperty("content-visibility", "hidden", "important");
-        }
-        if (
-          html.style.getPropertyValue("clip-path") !== "inset(50%)" ||
-          html.style.getPropertyPriority("clip-path") !== "important"
-        ) {
-          html.style.setProperty("clip-path", "inset(50%)", "important");
-        }
-        if (
-          html.style.getPropertyValue("pointer-events") !== "none" ||
-          html.style.getPropertyPriority("pointer-events") !== "important"
-        ) {
-          html.style.setProperty("pointer-events", "none", "important");
-        }
-        if (
-          html.style.getPropertyValue("caret-color") !== "transparent" ||
-          html.style.getPropertyPriority("caret-color") !== "important"
-        ) {
-          html.style.setProperty("caret-color", "transparent", "important");
-        }
-      } finally {
-        enforcing = false;
-      }
-    };
-    enforce();
-    const observer = createNativeMutationObserver(browserRoot, enforce);
-    observer.observe(document.documentElement, {
-      subtree: true,
-      childList: true,
-      characterData: true,
-      attributes: true,
-    });
-    let frameId = 0;
-    const frame = function terminalSentinelFrame() {
-      enforce();
-      frameId = nativeAnimationFrame(browserRoot, frame);
-    };
-    frameId = nativeAnimationFrame(browserRoot, frame);
-    return Object.freeze({
-      update(nextStatus) {
-        terminalStatus = String(nextStatus || terminalStatus).slice(0, 96);
-        enforce();
-      },
-      observer,
-      frameId,
-    });
   }
 
   function publishDiagnostics(browserRoot, details) {
@@ -5691,14 +5989,55 @@
       commentControlProjection: details.commentControlProjection
         ? Object.freeze({ ...details.commentControlProjection })
         : null,
-      visibleLeakCount: 0,
+      visibleLeakCount: Number(details.visibleLeakCount || 0),
+      reconciliationFailure: details.reconciliationFailure
+        ? Object.freeze({ ...details.reconciliationFailure })
+        : null,
     });
-    NATIVE.defineProperty(browserRoot, "__HOTDEAL_FOCUS_DIAGNOSTICS__", {
-      value: safeDetails,
-      configurable: true,
-      enumerable: false,
-      writable: false,
+    try {
+      NATIVE.defineProperty(browserRoot, "__HOTDEAL_FOCUS_DIAGNOSTICS__", {
+        value: safeDetails,
+        configurable: true,
+        enumerable: false,
+        writable: false,
+      });
+    } catch (_error) {
+      // Diagnostics never participate in reader authorization or rollback.
+    }
+  }
+
+  function currentVisibleProjectionLeakCount(document, state) {
+    const elements = Array.from(document.body?.querySelectorAll("*") || []);
+    if (elements.length > MAX_SEMANTIC_DESCENDANTS) {
+      return elements.length;
+    }
+    let count = 0;
+    const countedNoiseRoots = [];
+    elements.forEach(function countVisibleLeak(element) {
+      if (
+        countedNoiseRoots.some(function nestedNoise(root) {
+          return root.contains(element);
+        })
+      ) {
+        return;
+      }
+      const owned = state?.ownedElements?.has(element) === true;
+      // Role roots have already passed role-specific content, resource and
+      // paint checks. Publisher presentation classes on an exact purchase or
+      // article root must not reclassify that verified role as page chrome.
+      // Unowned elements and noise nested inside a role remain checked.
+      const verifiedRoleRoot = owned && ["title", "body", "product", "comments"]
+        .some(function exactVerifiedRole(role) { return state.roles[role] === element; });
+      const autonomousNoise = !verifiedRoleRoot && isAutonomousProjectionNoiseRoot(element);
+      if (autonomousNoise) countedNoiseRoots.push(element);
+      if (
+        isRendered(element) &&
+        (!owned || autonomousNoise)
+      ) {
+        count += 1;
+      }
     });
+    return count;
   }
 
   function structuralRoleDiagnostics(signalCount) {
@@ -5774,6 +6113,84 @@
     });
   }
 
+  function deriveCommentProjectionFromItems(
+    commentMount,
+    pageRoot,
+    suppliedCommentItems,
+    controlHints,
+    ignoredHints,
+    trustedControlRoots
+  ) {
+    const commentItems = uniqueElements(Array.from(suppliedCommentItems || []));
+    const rawCommentControls = uniqueElements(queryAllSafe(pageRoot, controlHints));
+    const commentConfiguredIgnored = uniqueElements(
+      queryAllSafe(commentMount, ignoredHints),
+    );
+    const autonomousNoiseControls = rawCommentControls.filter(
+      function autonomousNoiseControl(control) {
+        if (trustedControlRoots?.has(control)) return false;
+        return !commentItems.some(function overlapsCommentItem(item) {
+          return nodesOverlap(control, item);
+        }) && isAutonomousProjectionNoiseRoot(control);
+      },
+    );
+    const commentControls = rawCommentControls.filter(
+      function approvedCommentControl(control) {
+        return !autonomousNoiseControls.includes(control);
+      },
+    );
+    const protectedCommentRoots = commentItems
+      .concat(commentControls, commentConfiguredIgnored);
+    const autonomousDiscovery = discoverAutonomousIgnoredRoots(
+      commentMount,
+      protectedCommentRoots,
+    );
+    if (!autonomousDiscovery.ok) {
+      return Object.freeze({
+        ok: false,
+        reason: "ignored-bound",
+      });
+    }
+    const commentAutonomousIgnored = uniqueElements(
+      autonomousNoiseControls.filter(function noiseInsideCommentMount(control) {
+        return commentMount.contains(control);
+      }).concat(Array.from(autonomousDiscovery.roots)),
+    );
+    return Object.freeze({
+      ok: true,
+      commentItems: Object.freeze(commentItems),
+      commentControls: Object.freeze(commentControls),
+      commentConfiguredIgnored: Object.freeze(commentConfiguredIgnored),
+      commentAutonomousIgnored: Object.freeze(commentAutonomousIgnored),
+      commentIgnored: Object.freeze(uniqueElements(
+        commentConfiguredIgnored.concat(commentAutonomousIgnored),
+      )),
+    });
+  }
+
+  function deriveCommentProjectionRoots(
+    commentMount,
+    pageRoot,
+    itemHints,
+    controlHints,
+    ignoredHints,
+    trustedControlRoots,
+    trustedItemRoots
+  ) {
+    return deriveCommentProjectionFromItems(
+      commentMount,
+      pageRoot,
+      uniqueElements(queryAllSafe(commentMount, itemHints).concat(
+        Array.from(trustedItemRoots || []).filter(function acceptedItemStillInMount(item) {
+          return item.isConnected && commentMount.contains(item);
+        }),
+      )),
+      controlHints,
+      ignoredHints,
+      trustedControlRoots,
+    );
+  }
+
   function resolveApprovedLayout(document, layout, seed) {
     return withPublisherVisibilityMeasurement(
       document,
@@ -5787,9 +6204,6 @@
   }
 
   function resolveApprovedLayoutWithPublisherStyles(document, layout, seed) {
-    if (!seed) {
-      return { ok: false, role: "seed", reason: "required" };
-    }
     const pageRoots = uniqueElements(queryAllSafe(document, [layout.pageRoot]));
     if (pageRoots.length !== 1) {
       return { ok: false, role: "page-root", reason: "cardinality" };
@@ -5800,12 +6214,12 @@
       return { ok: false, role: "title", reason: "approved-structure" };
     }
     const titleNode = titleCandidates[0];
-    const visibleTitle = approvedVisibleTitle(document, seed.title, titleNode);
+    const visibleTitle = approvedVisibleTitle(document, seed?.title || null, titleNode);
     const seedTitleEvidence = visibleTitle.evidence;
-    if (!seedTitleEvidence.algumon.ok) {
+    if (seed && !seedTitleEvidence.algumon.ok) {
       return { ok: false, role: "seed", reason: "title-mismatch" };
     }
-    if (!seedTitleEvidence.metadata.ok) {
+    if (!visibleTitle.ok || !seedTitleEvidence.metadata.ok) {
       return { ok: false, role: "title", reason: "metadata-mismatch" };
     }
     if (shallowTitleSurfaceHasRisk(
@@ -5832,7 +6246,7 @@
     const configuredProductCardinality = roleProjection?.product?.cardinality;
     const configuredProductOrder = roleProjection?.product?.order;
     if (
-      roleProjection?.title?.mode !== "seeded-shallow" ||
+      roleProjection?.title?.mode !== "metadata-shallow" ||
       roleProjection?.body?.mode !== "atomic-boundary" ||
       roleProjection?.comments?.mode !== "classified-children" ||
       !["zero", "required", "optional"].includes(
@@ -5844,13 +6258,22 @@
     ) {
       return { ok: false, role: "projection", reason: "policy" };
     }
-    const bodyIgnored = ignoredRootsWithin(
+    const bodyConfiguredIgnored = ignoredRootsWithin(
       bodyNode,
       roleProjection.body.ignored,
     );
-    if (rootsOverlap(bodyIgnored)) {
+    if (rootsOverlap(bodyConfiguredIgnored)) {
       return { ok: false, role: "body", reason: "ignored-overlap" };
     }
+    const bodyAutonomousIgnoredDiscovery = discoverAutonomousIgnoredRoots(
+      bodyNode,
+      bodyConfiguredIgnored,
+    );
+    if (!bodyAutonomousIgnoredDiscovery.ok) {
+      return { ok: false, role: "body", reason: "ignored-bound" };
+    }
+    const bodyAutonomousIgnored = Array.from(bodyAutonomousIgnoredDiscovery.roots);
+    const bodyIgnored = bodyConfiguredIgnored.concat(bodyAutonomousIgnored);
     if (!hasApprovedContentOutside(bodyNode, bodyIgnored)) {
       return { ok: false, role: "body", reason: "approved-structure" };
     }
@@ -5878,12 +6301,22 @@
       return { ok: false, role: "product", reason: "cardinality" };
     }
     const productNode = productCandidates[0] || null;
-    const productIgnored = productNode
+    const productConfiguredIgnored = productNode
       ? ignoredRootsWithin(productNode, roleProjection.product.ignored)
       : [];
-    if (rootsOverlap(productIgnored)) {
+    if (rootsOverlap(productConfiguredIgnored)) {
       return { ok: false, role: "product", reason: "ignored-overlap" };
     }
+    const productAutonomousIgnoredDiscovery = productNode
+      ? discoverAutonomousIgnoredRoots(productNode, productConfiguredIgnored)
+      : Object.freeze({ ok: true, roots: Object.freeze([]), count: 0 });
+    if (!productAutonomousIgnoredDiscovery.ok) {
+      return { ok: false, role: "product", reason: "ignored-bound" };
+    }
+    const productAutonomousIgnored = Array.from(
+      productAutonomousIgnoredDiscovery.roots,
+    );
+    const productIgnored = productConfiguredIgnored.concat(productAutonomousIgnored);
     if (productNode && (
       !isRendered(productNode) ||
       !hasApprovedContentOutside(productNode, productIgnored) ||
@@ -5916,10 +6349,17 @@
     const controlHints = layout.hints.commentControls || [];
     const ignoredHints = layout.hints.commentIgnored || [];
     const commentCandidates = uniqueElements(queryAllSafe(pageRoot, commentHints));
-    if (commentCandidates.length !== 1) {
+    const nestedCommentCandidates = commentCandidates.filter(
+      function uniqueInnermostCommentMount(candidate) {
+        return commentCandidates.every(function candidateContainsSelected(other) {
+          return other === candidate || other.contains(candidate);
+        });
+      },
+    );
+    if (nestedCommentCandidates.length !== 1) {
       return { ok: false, role: "comments", reason: "mount-cardinality" };
     }
-    const commentMount = commentCandidates[0];
+    const commentMount = nestedCommentCandidates[0];
     const allowStableZeroAreaMount = layout.allowEmptyComments === true;
     if (
       (!isRendered(commentMount) &&
@@ -5931,9 +6371,27 @@
     if (productNode && !followsNode(commentMount, productNode)) {
       return { ok: false, role: "product", reason: "approved-order" };
     }
-    const commentItems = uniqueElements(queryAllSafe(commentMount, itemHints));
-    const commentControls = uniqueElements(queryAllSafe(pageRoot, controlHints));
-    const commentIgnored = uniqueElements(queryAllSafe(commentMount, ignoredHints));
+    const derivedCommentProjection = deriveCommentProjectionRoots(
+      commentMount,
+      pageRoot,
+      itemHints,
+      controlHints,
+      ignoredHints,
+    );
+    if (!derivedCommentProjection.ok) {
+      return {
+        ok: false,
+        role: "comments",
+        reason: derivedCommentProjection.reason,
+      };
+    }
+    const {
+      commentItems,
+      commentControls,
+      commentConfiguredIgnored,
+      commentAutonomousIgnored,
+      commentIgnored,
+    } = derivedCommentProjection;
     const commentDormantControls = commentControls.filter(
       function dormantInitialControl(control) { return !isRendered(control); }
     );
@@ -5960,7 +6418,7 @@
     }
     const classifiedCommentRoots = commentItems.concat(commentControls, commentIgnored);
     const commentJsonLd = collectJsonLd(document);
-    const seedCommentCount = Number.isInteger(seed.commentCount) ? seed.commentCount : null;
+    const seedCommentCount = Number.isInteger(seed?.commentCount) ? seed.commentCount : null;
     const metadataCommentCount = Number.isInteger(commentJsonLd.commentCount)
       ? commentJsonLd.commentCount
       : null;
@@ -6022,13 +6480,16 @@
       knownCommentTotal &&
       hasVisibleCommentContinuationControl(commentControls)
     ) {
-      return {
-        ok: false,
-        role: "comments",
-        reason: "incomplete-comment-control",
-      };
+      // Pagination and collapsed reply controls are part of the publisher's
+      // comment UI, not a reason to hide an otherwise verified article.
+      // Every currently loaded item and control was classified above; future
+      // replies are classified by the integrity observer when they arrive.
+      provenCommentCount = commentItems.length;
+      provenCommentCountSource = "exact-dom-paginated";
     }
-    if (visibleCommentTotal.count !== null) {
+    if (provenCommentCount !== null) {
+      // The total describes the whole thread, including unloaded pages.
+    } else if (visibleCommentTotal.count !== null) {
       if (commentItems.length !== visibleCommentTotal.count) {
         return {
           ok: false,
@@ -6111,11 +6572,17 @@
       commentControls,
       commentDormantControls,
       commentIgnored,
+      commentConfiguredIgnored,
+      commentAutonomousIgnored,
       commentControlScope: pageRoot,
       commentCountBoundary: pageRoot,
       commentTotalEvidence: visibleCommentTotal.elements,
       bodyIgnored,
+      bodyConfiguredIgnored,
+      bodyAutonomousIgnored,
       productIgnored,
+      productConfiguredIgnored,
+      productAutonomousIgnored,
       product: productNode,
     };
     const roleDiagnostics = {
@@ -6261,29 +6728,341 @@
     };
   }
 
-  function resolveDocumentFromSeedCandidates(document, layouts, candidates) {
-    const resolutions = candidates.map(function resolveCandidate(seed) {
-      return Object.freeze({ seed, resolution: resolveDocument(document, layouts, seed) });
+  function exactObservedElementSelectors(scope, elements, configuredSelectors) {
+    const expected = uniqueElements(Array.from(elements || []));
+    if (!expected.length) return [];
+    const sameExpectedSet = function sameExpectedSet(selector) {
+      const matches = uniqueElements(queryAllSafe(scope, [selector]));
+      return matches.length === expected.length &&
+        matches.every(function expectedMatch(element) {
+          return expected.includes(element);
+        });
+    };
+    const groupCandidates = Array.from(new Set(
+      Array.from(configuredSelectors || [])
+        .concat(proposalSelectorCandidates(expected[0])),
+    ));
+    const groupSelector = groupCandidates.find(sameExpectedSet);
+    if (groupSelector) return [groupSelector];
+    const uniqueSelectors = expected.map(function uniqueObservedSelector(element) {
+      return stableExactProposalSelector(scope.ownerDocument || scope, element);
     });
-    const approved = resolutions.filter(function approvedCandidate(candidate) {
-      return candidate.resolution.ok;
-    });
-    if (approved.length === 1) {
-      return Object.freeze({ ok: true, seed: approved[0].seed, resolution: approved[0].resolution });
+    if (
+      uniqueSelectors.some(function unavailableSelector(selector) {
+        return !selector;
+      })
+    ) {
+      return null;
     }
-    if (approved.length > 1) {
-      return Object.freeze({
-        ok: false,
-        reason: "ambiguous-seed-candidate",
-        resolution: Object.freeze({ ok: false, role: "seed", reason: "ambiguous-candidate" }),
-      });
-    }
-    return Object.freeze({
-      ok: false,
-      reason: "no-seed-candidate-match",
-      resolution: resolutions[0]?.resolution ||
-        Object.freeze({ ok: false, role: "seed", reason: "no-candidate" }),
-    });
+    const selectors = Array.from(new Set(uniqueSelectors));
+    const combined = uniqueElements(queryAllSafe(scope, selectors));
+    return combined.length === expected.length &&
+      combined.every(function exactObservedElement(element) {
+        return expected.includes(element);
+      })
+      ? selectors
+      : null;
+  }
+
+  function resolveIndependentSemanticDocument(document, layouts) {
+    return withPublisherVisibilityMeasurement(
+      document,
+      function resolveMeasuredIndependentProjection() {
+        const semantic = discoverSemanticContract(document, layouts, null);
+        const projection = semantic.runtimeProjection;
+        if (
+          !semantic.ok ||
+          semantic.projectionTupleCount < 1 ||
+          !projection?.commonRoot ||
+          semantic.policyProposal?.complete !== true
+        ) {
+          return {
+            ok: false,
+            role: "semantic",
+            reason: semantic.reason || "incomplete-independent-projection",
+          };
+        }
+        const bodyIgnoredSelectors = Array.from(new Set(
+          layouts.flatMap(function configuredBodyIgnored(layout) {
+            return layout.roleProjection?.body?.ignored || [];
+          }),
+        ));
+        const productIgnoredSelectors = Array.from(new Set(
+          layouts.flatMap(function configuredProductIgnored(layout) {
+            return layout.roleProjection?.product?.ignored || [];
+          }),
+        ));
+        const commentItemHints = roleHints(layouts, "commentItems");
+        const configuredCommentControlHints = roleHints(layouts, "commentControls");
+        const semanticContinuationControls = Array.from(
+          projection.comments.querySelectorAll("button, a[href], [role='button']"),
+        ).filter(function independentContinuation(control) {
+          return !projection.commentItems.some(function insideItem(item) {
+            return item === control || item.contains(control);
+          }) && isCommentContinuationControl(control) &&
+            !isAutonomousProjectionNoiseRoot(control) &&
+            !containsSemanticNoise(control, new WeakMap(), []);
+        });
+        const observedControlSelectors = exactObservedElementSelectors(
+          projection.commonRoot, semanticContinuationControls, configuredCommentControlHints,
+        );
+        if (semanticContinuationControls.length && !observedControlSelectors) {
+          return { ok: false, role: "comments", reason: "independent-control-selector" };
+        }
+        const commentControlHints = Array.from(new Set(
+          configuredCommentControlHints.concat(observedControlSelectors || []),
+        ));
+        const commentIgnoredHints = roleHints(layouts, "commentIgnored");
+        const commentItemSelectors = exactObservedElementSelectors(
+          projection.comments,
+          projection.commentItems,
+          commentItemHints,
+        );
+        if (
+          projection.commentItems.length > 0 &&
+          (!commentItemSelectors || !commentItemSelectors.length)
+        ) {
+          return {
+            ok: false,
+            role: "comments",
+            reason: "independent-item-selector",
+          };
+        }
+        const derivedComments = deriveCommentProjectionFromItems(
+          projection.comments,
+          projection.commonRoot,
+          projection.commentItems,
+          commentControlHints,
+          commentIgnoredHints,
+        );
+        if (!derivedComments.ok) {
+          return {
+            ok: false,
+            role: "comments",
+            reason: derivedComments.reason,
+          };
+        }
+        const {
+          commentItems,
+          commentControls,
+          commentConfiguredIgnored,
+          commentAutonomousIgnored,
+          commentIgnored,
+        } = derivedComments;
+        const allowEmptyComments = layouts.every(function approvedEmptyComments(layout) {
+          return layout.allowEmptyComments === true;
+        });
+        if (
+          (!commentItems.length && !allowEmptyComments) ||
+          commentItems.some(function hiddenIndependentComment(item) {
+            return !isRendered(item);
+          }) ||
+          hasUnclassifiedCommentContent(
+            projection.comments,
+            commentItems.concat(commentControls, commentIgnored),
+          ) ||
+          commentProjectionHasRisk(
+            projection.comments,
+            commentItems,
+            commentControls,
+            commentIgnored,
+            allowEmptyComments,
+            projection.commonRoot,
+          )
+        ) {
+          return {
+            ok: false,
+            role: "comments",
+            reason: "independent-comment-projection",
+          };
+        }
+        const visibleTotal = visibleCommentTotalEvidence(
+          projection.comments,
+          projection.commonRoot,
+          commentItems.concat(commentControls, commentIgnored),
+        );
+        if (
+          !visibleTotal.ok ||
+          (visibleTotal.count !== null && visibleTotal.count !== commentItems.length)
+        ) {
+          return {
+            ok: false,
+            role: "comments",
+            reason: "independent-comment-count",
+          };
+        }
+
+        const bodyConfiguredIgnored = ignoredRootsWithin(
+          projection.body,
+          bodyIgnoredSelectors,
+        );
+        if (rootsOverlap(bodyConfiguredIgnored)) {
+          return { ok: false, role: "body", reason: "ignored-overlap" };
+        }
+        const bodyAutonomousDiscovery = discoverAutonomousIgnoredRoots(
+          projection.body,
+          bodyConfiguredIgnored,
+        );
+        if (!bodyAutonomousDiscovery.ok) {
+          return { ok: false, role: "body", reason: "ignored-bound" };
+        }
+        const bodyAutonomousIgnored = Array.from(
+          bodyAutonomousDiscovery.roots,
+        );
+        const bodyIgnored = uniqueElements(
+          bodyConfiguredIgnored.concat(bodyAutonomousIgnored),
+        );
+        if (
+          !hasApprovedContentOutside(projection.body, bodyIgnored) ||
+          containsSemanticNoise(projection.body, new WeakMap(), bodyIgnored) ||
+          containsUnprovenShadowBoundary(projection.body, bodyIgnored) ||
+          containsPublisherPaintRisk(projection.body, bodyIgnored)
+        ) {
+          return {
+            ok: false,
+            role: "body",
+            reason: "independent-body-projection",
+          };
+        }
+
+        const productConfiguredIgnored = projection.product
+          ? ignoredRootsWithin(projection.product, productIgnoredSelectors)
+          : [];
+        if (rootsOverlap(productConfiguredIgnored)) {
+          return { ok: false, role: "product", reason: "ignored-overlap" };
+        }
+        const productAutonomousDiscovery = projection.product
+          ? discoverAutonomousIgnoredRoots(
+              projection.product,
+              productConfiguredIgnored,
+            )
+          : Object.freeze({ ok: true, roots: Object.freeze([]) });
+        if (!productAutonomousDiscovery.ok) {
+          return { ok: false, role: "product", reason: "ignored-bound" };
+        }
+        const productAutonomousIgnored = Array.from(
+          productAutonomousDiscovery.roots,
+        );
+        const productIgnored = uniqueElements(
+          productConfiguredIgnored.concat(productAutonomousIgnored),
+        );
+        if (projection.product && (
+          !hasApprovedContentOutside(projection.product, productIgnored) ||
+          containsSemanticNoise(projection.product, new WeakMap(), productIgnored) ||
+          containsUnprovenShadowBoundary(projection.product, productIgnored) ||
+          containsPublisherPaintRisk(projection.product, productIgnored)
+        )) {
+          return {
+            ok: false,
+            role: "product",
+            reason: "independent-product-projection",
+          };
+        }
+        const productSelectors = projection.product
+          ? exactObservedElementSelectors(
+              projection.commonRoot,
+              [projection.product],
+              semantic.policyProposal.product?.selectors || [],
+            )
+          : [];
+        if (projection.product && (!productSelectors || productSelectors.length !== 1)) {
+          return {
+            ok: false,
+            role: "product",
+            reason: "independent-product-selector",
+          };
+        }
+        const requiredRoles = ["title", "body", "comments"]
+          .concat(projection.product ? ["product"] : []);
+        const roles = {
+          title: projection.title,
+          body: projection.body,
+          comments: projection.comments,
+          product: projection.product,
+          commentItems,
+          commentControls,
+          commentDormantControls: commentControls.filter(
+            function dormantIndependentControl(control) {
+              return !isRendered(control);
+            },
+          ),
+          commentIgnored,
+          commentConfiguredIgnored,
+          commentAutonomousIgnored,
+          commentControlScope: projection.commonRoot,
+          commentCountBoundary: projection.commonRoot,
+          commentTotalEvidence: visibleTotal.elements || [],
+          bodyIgnored,
+          bodyConfiguredIgnored,
+          bodyAutonomousIgnored,
+          productIgnored,
+          productConfiguredIgnored,
+          productAutonomousIgnored,
+        };
+        const approvedRoot = validateRoleRelationship(
+          document,
+          roles,
+          requiredRoles,
+          projection.commonRoot,
+          allowEmptyComments && commentItems.length === 0,
+        );
+        if (!approvedRoot) {
+          return {
+            ok: false,
+            role: "relationship",
+            reason: "independent-approved-root",
+          };
+        }
+        const roleDiagnostics = Object.fromEntries(
+          Object.entries(semantic.roles).map(function safeRoleDiagnostics(entry) {
+            return [entry[0], Object.freeze({
+              count: entry[1].count,
+              score: entry[1].score,
+              signalCount: entry[1].signalCount,
+              margin: entry[1].margin,
+            })];
+          }),
+        );
+        return {
+          ok: true,
+          layoutId: "independent-semantic-v1",
+          layoutAliases: layouts.map(function semanticLayoutAlias(layout) {
+            return layout.id;
+          }).sort(),
+          semanticProjectionCount: 1,
+          roles,
+          requiredRoles,
+          commonRoot: approvedRoot,
+          commentItemSelectors: commentItemSelectors || [],
+          commentControlSelectors: commentControlHints,
+          commentIgnoredSelectors: commentIgnoredHints,
+          projectionPolicy: Object.freeze({
+            allowEmptyComments,
+            provenCommentCount: commentItems.length,
+            provenCommentCountSource: visibleTotal.count === null
+              ? "independent-exhaustive-dom"
+              : "visible-comment-total",
+            productCardinality: projection.product ? "required" : "zero",
+            productOrder: projection.product ? projection.productOrder : null,
+            productFallback: projection.product ? "separate" : "body",
+            productSelectors: productSelectors || [],
+            bodyIgnoredSelectors,
+            productIgnoredSelectors,
+          }),
+          seedConsistency: null,
+          roleDiagnostics: Object.freeze(roleDiagnostics),
+          resolvedTitle: projection.resolvedTitle,
+          authority: "independent-semantic-tuple",
+        };
+      },
+      function rejectUnsafeIndependentMeasurement() {
+        return {
+          ok: false,
+          role: "measurement",
+          reason: "unsafe-independent-measurement",
+        };
+      },
+    );
   }
 
   function matchesIncludingRoot(rootNode, selectors) {
@@ -6333,7 +7112,7 @@
         return lockClass && lockAttribute && readyClass && readyAttribute &&
           protocol === PROTOCOL_VERSION && state === "ready" && status === "ready";
       }
-      if (phase === "released") {
+      if (phase === "released" || phase === "frozen") {
         return !lockClass && !html.hasAttribute(ATTR.lock) && readyClass && readyAttribute &&
           protocol === PROTOCOL_VERSION && state === "ready" && status === "ready";
       }
@@ -6388,31 +7167,113 @@
       if (!node || node.nodeType !== 1) return true;
       return [node].concat(Array.from(node.querySelectorAll("*"))).every(elementShapeIntact);
     };
-    const guard = createNativeMutationObserver(browserRoot, function enforceBootstrapLock(mutations) {
-      if (terminallyBlocked) {
-        return;
+    const repairVerifiedProtocol = function repairVerifiedProtocol(mutations) {
+      const state = runtime.projectionState;
+      if (
+        (runtime.terminallyBlocked && runtime.releasePhase !== "frozen") || !runtime.authorizedReady ||
+        !["armed", "released", "frozen"].includes(runtime.releasePhase) || !state ||
+        runtime.activeNonce !== state.nonce
+      ) return;
+      // Restore only private presentation metadata from the accepted in-memory
+      // projection. Never infer ownership from publisher-supplied attributes.
+      const changedElements = new Set([html, styleElement]);
+      for (const mutation of mutations) {
+        const target = mutation.target?.nodeType === 1
+          ? mutation.target : mutation.target?.parentElement;
+        if (target) changedElements.add(target);
+        for (const node of mutation.addedNodes || []) {
+          if (node.nodeType !== 1) continue;
+          changedElements.add(node);
+          const descendants = node.querySelectorAll("*");
+          if (descendants.length > MAX_SEMANTIC_DESCENDANTS) return;
+          for (const descendant of descendants) changedElements.add(descendant);
+        }
+        if (changedElements.size > MAX_SEMANTIC_DESCENDANTS) return;
       }
-      const styleFailure = runtimeGateStyleFailure(styleElement, runtime);
-      const styleIntact = styleFailure === null;
-      const changedTreesIntact = mutations.every(function changedTreeIntact(mutation) {
-        if (!elementShapeIntact(mutation.target)) return false;
-        return Array.from(mutation.addedNodes || []).every(treeShapeIntact);
-      });
-      const rootIntact = rootShapeIntact();
-      const bootstrapInlineIntact =
-        runtime.releasePhase === "released" || runtime.bootstrapLock?.intact();
-      if (!styleIntact || !rootIntact || !changedTreesIntact || !bootstrapInlineIntact) {
+      const setExactAttribute = function setExactAttribute(element, name, value) {
+        if (value === null) {
+          if (element.hasAttribute(name)) element.removeAttribute(name);
+        } else if (element.getAttribute(name) !== value) {
+          element.setAttribute(name, value);
+        }
+      };
+      for (const element of changedElements) {
+        if (!element.isConnected && element !== styleElement) continue;
+        const expected = state.ownedElements.has(element)
+          ? state.expectedMarkerShapes.get(element) : null;
+        const allowed = new Set(expected ? [ATTR.keep, ATTR.shell, ATTR.deep, ATTR.role] : []);
+        if (element === html) {
+          [ATTR.ready, ATTR.protocol, ATTR.state, ATTR.status].forEach((name) => allowed.add(name));
+          if (runtime.releasePhase === "armed") allowed.add(ATTR.lock);
+        }
+        if (element === styleElement) allowed.add("data-hotdeal-focus-runtime-style");
+        for (const name of reservedAttributes(element)) {
+          if (!allowed.has(name)) element.removeAttribute(name);
+        }
+        if (expected && !markerShapeMatches(element, expected)) {
+          for (const key of ["keep", "shell", "deep", "role"]) {
+            setExactAttribute(element, ATTR[key], expected[key]);
+          }
+          const expectedClasses = new Set(expected.classes);
+          for (const name of projectionHdfClasses(element)) {
+            if (!expectedClasses.has(name)) element.classList.remove(name);
+          }
+          for (const name of expected.classes) {
+            if (!element.classList.contains(name)) element.classList.add(name);
+          }
+        } else if (!expected) {
+          for (const name of projectionHdfClasses(element)) element.classList.remove(name);
+        }
+      }
+      if (runtime.releasePhase === "armed") {
+        setExactAttribute(html, ATTR.lock, "1");
+        if (!html.classList.contains(CLASS.lock)) html.classList.add(CLASS.lock);
+        runtime.bootstrapLock?.repairInline?.();
+      } else if (html.classList.contains(CLASS.lock)) {
+        html.classList.remove(CLASS.lock);
+      }
+      if (!html.classList.contains(CLASS.ready)) html.classList.add(CLASS.ready);
+      setExactAttribute(html, ATTR.ready, "1");
+      setExactAttribute(html, ATTR.protocol, PROTOCOL_VERSION);
+      setExactAttribute(html, ATTR.state, "ready");
+      setExactAttribute(html, ATTR.status, "ready");
+      setExactAttribute(styleElement, "data-hotdeal-focus-runtime-style", PROTOCOL_VERSION);
+      if (styleElement.textContent !== runtime.expectedStyleText) {
+        styleElement.textContent = runtime.expectedStyleText;
+      }
+      if (!styleElement.isConnected) (document.head || html).appendChild(styleElement);
+    };
+    const guard = createNativeMutationObserver(browserRoot, function enforceBootstrapLock(mutations) {
+      try {
+        if (terminallyBlocked) {
+          return;
+        }
+        repairVerifiedProtocol(mutations);
+        const styleFailure = runtimeGateStyleFailure(styleElement, runtime);
+        const styleIntact = styleFailure === null;
+        const changedTreesIntact = mutations.every(function changedTreeIntact(mutation) {
+          if (!elementShapeIntact(mutation.target)) return false;
+          return Array.from(mutation.addedNodes || []).every(treeShapeIntact);
+        });
+        const rootIntact = rootShapeIntact();
+        const bootstrapInlineIntact =
+          ["released", "frozen"].includes(runtime.releasePhase) || runtime.bootstrapLock?.intact();
+        if (!styleIntact || !rootIntact || !changedTreesIntact || !bootstrapInlineIntact) {
+          terminallyBlocked = true;
+          const reason = !styleIntact
+            ? `runtime-style-tamper-bootstrap-${styleFailure || "unknown"}`
+            : !rootIntact
+              ? "protocol-root-tamper"
+              : !changedTreesIntact
+                ? "protocol-marker-tamper"
+                : `bootstrap-inline-lock-tamper-${
+                    runtime.bootstrapLock?.mismatchProperty?.() || "unknown"
+                  }`;
+          runtime.enterTerminal(reason);
+        }
+      } catch (_error) {
         terminallyBlocked = true;
-        const reason = !styleIntact
-          ? `runtime-style-tamper-bootstrap-${styleFailure || "unknown"}`
-          : !rootIntact
-            ? "protocol-root-tamper"
-            : !changedTreesIntact
-              ? "protocol-marker-tamper"
-              : `bootstrap-inline-lock-tamper-${
-                  runtime.bootstrapLock?.mismatchProperty?.() || "unknown"
-                }`;
-        runtime.enterTerminal(reason);
+        runtime.enterTerminal("bootstrap-guard-exception");
       }
     });
     guard.observe(document.documentElement, {
@@ -6422,137 +7283,6 @@
       attributes: true,
     });
     runtime.bootstrapGuard = guard;
-  }
-
-  function subscribeCssomMutations(browserRoot, listener) {
-    const prototype = browserRoot === RUNTIME_GLOBAL
-      ? NATIVE.cssStyleSheetPrototype
-      : browserRoot.CSSStyleSheet?.prototype;
-    if (!prototype) return function noopUnsubscribe() {};
-    let record = CSSOM_MUTATION_LISTENERS.get(prototype);
-    if (!record) {
-      const listeners = new Set();
-      record = { listeners };
-      ["insertRule", "deleteRule", "replace", "replaceSync"].forEach(
-        function sealCssomMutationMethod(methodName) {
-          const nativeMethod = browserRoot === RUNTIME_GLOBAL
-            ? NATIVE.cssStyleSheetMethods[methodName]
-            : prototype[methodName];
-          if (typeof nativeMethod !== "function") return;
-          try {
-            NATIVE.defineProperty(prototype, methodName, {
-              configurable: false,
-              enumerable: false,
-              writable: false,
-              value: function hotdealFocusObservedCssomMutation() {
-                const sheet = this;
-                const result = NATIVE.reflectApply(nativeMethod, sheet, arguments);
-                listeners.forEach(function reportCssomMutation(callback) {
-                  callback(sheet, methodName);
-                });
-                if (result && typeof result.then === "function") {
-                  result.then(() => listeners.forEach(function reportResolved(callback) {
-                    callback(sheet, methodName);
-                  })).catch(function ignoreRejectedReplacement() {});
-                }
-                return result;
-              },
-            });
-          } catch (_error) {
-            // The nonce-bound runtime stylesheet still has a per-frame cssRules check.
-          }
-        }
-      );
-      CSSOM_MUTATION_LISTENERS.set(prototype, record);
-    }
-    record.listeners.add(listener);
-    return function unsubscribeCssomMutations() {
-      record.listeners.delete(listener);
-    };
-  }
-
-  function subscribeAdoptedStyleSheetMutations(browserRoot, listener) {
-    const prototypes = [
-      browserRoot.Document?.prototype,
-      browserRoot.ShadowRoot?.prototype,
-    ].filter(function uniquePrototype(prototype, index, candidates) {
-      return prototype && candidates.indexOf(prototype) === index;
-    });
-    const records = [];
-    prototypes.forEach(function observeAdoptedStyleSheets(prototype) {
-      let record = ADOPTED_STYLE_SHEET_LISTENERS.get(prototype);
-      if (!record) {
-        const descriptor = Object.getOwnPropertyDescriptor(prototype, "adoptedStyleSheets");
-        if (
-          !descriptor ||
-          typeof descriptor.get !== "function" ||
-          typeof descriptor.set !== "function"
-        ) {
-          return;
-        }
-        const listeners = new Set();
-        try {
-          NATIVE.defineProperty(prototype, "adoptedStyleSheets", {
-            configurable: false,
-            enumerable: descriptor.enumerable === true,
-            get: descriptor.get,
-            set: function hotdealFocusObservedAdoptedStyleSheets() {
-              const result = NATIVE.reflectApply(descriptor.set, this, arguments);
-              listeners.forEach(function reportAdoptedStyleSheetMutation(callback) {
-                callback(this);
-              });
-              return result;
-            },
-          });
-        } catch (_error) {
-          return;
-        }
-        record = { listeners };
-        ADOPTED_STYLE_SHEET_LISTENERS.set(prototype, record);
-      }
-      record.listeners.add(listener);
-      records.push(record);
-    });
-    return function unsubscribeAdoptedStyleSheetMutations() {
-      records.forEach(function removeAdoptedStyleSheetListener(record) {
-        record.listeners.delete(listener);
-      });
-    };
-  }
-
-  function subscribeStyleSheetStateMutations(browserRoot, listener) {
-    const prototype = browserRoot.StyleSheet?.prototype;
-    const descriptor = prototype && Object.getOwnPropertyDescriptor(prototype, "disabled");
-    if (!prototype || !descriptor || typeof descriptor.get !== "function" ||
-        typeof descriptor.set !== "function") {
-      return function noopUnsubscribe() {};
-    }
-    let record = STYLE_SHEET_STATE_LISTENERS.get(prototype);
-    if (!record) {
-      const listeners = new Set();
-      try {
-        NATIVE.defineProperty(prototype, "disabled", {
-          configurable: false,
-          enumerable: descriptor.enumerable === true,
-          get: descriptor.get,
-          set: function hotdealFocusObservedStyleSheetState() {
-            const result = NATIVE.reflectApply(descriptor.set, this, arguments);
-            listeners.forEach(function reportStyleSheetStateMutation(callback) {
-              callback(this);
-            });
-            return result;
-          },
-        });
-      } catch (_error) {
-        return function noopUnsubscribe() {};
-      }
-      record = { listeners };
-      STYLE_SHEET_STATE_LISTENERS.set(prototype, record);
-    }
-    record.listeners.add(listener);
-    return function unsubscribeStyleSheetStateMutations() {
-      record.listeners.delete(listener);
-    };
   }
 
   function installCascadeGuard(browserRoot, runtime, styleElement) {
@@ -6568,7 +7298,7 @@
     };
     const queueElement = function queueCascadeElement(element) {
       if (!element || element.nodeType !== 1 || element === styleElement) return;
-      if (runtime.releasePhase !== "released") {
+      if (!["released", "frozen"].includes(runtime.releasePhase)) {
         pendingElements.clear();
         fullScanRequired = true;
         return;
@@ -6623,6 +7353,46 @@
       ) || Boolean(node.querySelector(
         "style, link[rel~='stylesheet' i], [style], dialog[open], [popover], iframe, object, embed",
       ));
+    };
+    const stylesheetIntroducesPublisherPaint = function stylesheetIntroducesPublisherPaint(node) {
+      if (node?.nodeType !== 1 || node.tagName !== "STYLE") return false;
+      const cssText = String(node.textContent || "").toLocaleLowerCase();
+      if (!cssText) return false;
+      const pseudoContent = /::?(?:before|after|backdrop)\s*\{[\s\S]{0,1024}?content\s*:/u;
+      const viewportOverlay = /position\s*:\s*(?:fixed|sticky)\b/u.test(cssText) &&
+        /(?:z-index|inset|(?:width|height)\s*:\s*100(?:vw|vh|%))/u.test(cssText);
+      const noisePseudoContent =
+        /content\s*:\s*["'][^"']*(?:advert|sponsor|promo|affiliate|recommend|related|popular|ranking|광고|추천|관련|인기)[^"']*["']/iu;
+      return viewportOverlay || (pseudoContent.test(cssText) && noisePseudoContent.test(cssText));
+    };
+    const quarantinePublisherPaintStylesheet =
+      function quarantinePublisherPaintStylesheet(node) {
+        const style = node?.nodeType === 1
+          ? (node.tagName === "STYLE" ? node : node.closest?.("style"))
+          : node?.parentElement?.closest?.("style");
+        if (
+          !style ||
+          style === styleElement ||
+          !stylesheetIntroducesPublisherPaint(style)
+        ) {
+          return true;
+        }
+        try {
+          style.remove();
+        } catch (_error) {
+          try {
+            style.parentNode?.removeChild(style);
+          } catch (_fallbackError) {
+            // The disabled/media fallback below is independently authoritative.
+          }
+        }
+        if (!style.isConnected) return true;
+        try { style.disabled = true; } catch (_error) {}
+        try {
+          if (style.sheet) style.sheet.disabled = true;
+        } catch (_error) {}
+        try { style.media = "not all"; } catch (_error) {}
+        return !style.isConnected || style.disabled === true || style.media === "not all";
     };
     const deferredAtomicProjectionMutation =
       function deferredAtomicProjectionMutation(mutation) {
@@ -6712,6 +7482,57 @@
           backdrop.visibility !== "hidden" && Number(backdrop.opacity) !== 0;
       });
     };
+    const quarantineUnownedCascadeLeaks = function quarantineUnownedCascadeLeaks(
+      elements,
+    ) {
+      const candidates = uniqueElements(
+        (elements || []).concat(
+          Array.from(document.querySelectorAll("dialog[open], [popover]")),
+          document.fullscreenElement ? [document.fullscreenElement] : [],
+        ),
+      );
+      candidates.forEach(function quarantineVisiblePublisherSurface(element) {
+        if (
+          element.getAttribute(ATTR.keep) === runtime.activeNonce ||
+          !visible(element)
+        ) {
+          return;
+        }
+        try {
+          if (element.matches("dialog[open]")) {
+            if (typeof element.close === "function") element.close();
+            if (element.hasAttribute("open")) element.removeAttribute("open");
+          }
+        } catch (_error) {
+          try { element.removeAttribute("open"); } catch (_fallbackError) {}
+        }
+        try {
+          if (activePopover(element) && typeof element.hidePopover === "function") {
+            element.hidePopover();
+          }
+        } catch (_error) {
+          // The inline quarantine below remains authoritative.
+        }
+        [
+          ["display", "none"],
+          ["visibility", "hidden"],
+          ["content-visibility", "hidden"],
+          ["opacity", "0"],
+          ["pointer-events", "none"],
+        ].forEach(function applyInlineQuarantine(entry) {
+          element.style.setProperty(entry[0], entry[1], "important");
+        });
+      });
+      return !exposesTopLayer() && !exposesUnowned(candidates);
+    };
+    const cascadeLeakRemains = function cascadeLeakRemains(elements) {
+      if (exposesRootPaint()) return true;
+      if (!exposesTopLayer() && !exposesUnowned(elements)) return false;
+      return !quarantineUnownedCascadeLeaks(elements) ||
+        exposesRootPaint() ||
+        exposesTopLayer() ||
+        exposesUnowned(elements);
+    };
     const collectBoundedFullScan = function collectBoundedCascadeFullScan() {
       const candidates = Array.from(document.body.querySelectorAll("*"));
       if (candidates.length > MAX_BOUNDED_ELEMENTS) {
@@ -6759,11 +7580,7 @@
         runtime.enterTerminal("runtime-style-tamper-release");
         return false;
       }
-      if (runtime.projectionState && projectionHasPublisherPaintRisk(document, runtime.projectionState)) {
-        runtime.enterTerminal("projection-publisher-invariant");
-        return false;
-      }
-      if (exposesRootPaint() || exposesTopLayer() || exposesUnowned(releaseCandidates)) {
+      if (cascadeLeakRemains(releaseCandidates)) {
         runtime.enterTerminal("cascade-visible-leak");
         return false;
       }
@@ -6787,28 +7604,29 @@
         runtime.enterTerminal("runtime-style-tamper-unlock");
         return false;
       }
-      if (runtime.projectionState && projectionHasPublisherPaintRisk(document, runtime.projectionState)) {
-        runtime.enterTerminal("projection-publisher-invariant");
-        return false;
-      }
-      if (exposesRootPaint() || exposesTopLayer() || exposesUnowned(releaseCandidates)) {
+      if (cascadeLeakRemains(releaseCandidates)) {
         runtime.enterTerminal("cascade-visible-leak");
         return false;
       }
       return true;
     };
     const verifyCascade = function verifyCascade() {
-      if (runtime.terminallyBlocked) return false;
+      if (runtime.terminallyBlocked && runtime.releasePhase !== "frozen") return false;
       if (!runtimeGateStyleIntact(styleElement, runtime)) {
         runtime.enterTerminal("runtime-style-tamper-sentinel");
         return false;
+      }
+      if (!["released", "frozen"].includes(runtime.releasePhase)) {
+        // Before unlock, prepareCascadeRelease/verifyCascadeRelease own the
+        // authoritative full snapshot. A competing per-frame full scan here
+        // can starve the two-frame proof on publisher-heavy documents.
+        return true;
       }
       if (!runtime.authorizedReady || !document.body) {
         pendingElements.clear();
         fullScanRequired = true;
         return true;
       }
-      const projectionCascadeChanged = fullScanRequired || pendingElements.size > 0;
       let candidates = [];
       if (fullScanRequired) {
         candidates = collectBoundedFullScan();
@@ -6826,79 +7644,100 @@
         runtime.enterTerminal("cascade-scan-budget");
         return false;
       }
-      if (
-        projectionCascadeChanged &&
-        runtime.projectionState &&
-        projectionHasPublisherPaintRisk(document, runtime.projectionState)
-      ) {
-        runtime.enterTerminal("projection-publisher-invariant");
-        return false;
-      }
-      if (exposesRootPaint() || exposesTopLayer() || exposesUnowned(candidates)) {
+      if (cascadeLeakRemains(candidates)) {
         runtime.enterTerminal("cascade-visible-leak");
         return false;
       }
       return true;
     };
     const observer = createNativeMutationObserver(browserRoot, function keepGateStyleLast(mutations) {
-      const containsMeasurementMutation = mutations.some(authorizedMeasurementMutation);
-      if (
-        mutations.length > 0 &&
-        mutations.every(function authorizedInternalMutation(mutation) {
-          return authorizedProjectedMarkerClassMutation(mutation) ||
-            authorizedCommentControlStateMutation(mutation) ||
-            deferredAtomicProjectionMutation(mutation) ||
-            deferredCommentProjectionMutation(mutation) ||
-            authorizedMeasurementMutation(mutation);
-        })
-      ) {
-        if (containsMeasurementMutation) {
-          MEASUREMENT_HTML_RESTORES.delete(document.documentElement);
-        }
-        return;
-      }
-      let stylesheetChanged = false;
-      mutations.forEach(function recordCascadeMutation(mutation) {
-        if (mutation.type === "attributes") {
-          if (mutation.target === styleElement) return;
-          if (mutation.target.tagName === "STYLE" || mutation.target.tagName === "LINK") {
-            stylesheetChanged = true;
-            fullScanRequired = true;
-          } else {
-            queueElement(mutation.target);
+      try {
+        const containsMeasurementMutation = mutations.some(authorizedMeasurementMutation);
+        if (
+          mutations.length > 0 &&
+          mutations.every(function authorizedInternalMutation(mutation) {
+            return authorizedProjectedMarkerClassMutation(mutation) ||
+              authorizedCommentControlStateMutation(mutation) ||
+              deferredAtomicProjectionMutation(mutation) ||
+              deferredCommentProjectionMutation(mutation) ||
+              authorizedMeasurementMutation(mutation);
+          })
+        ) {
+          if (containsMeasurementMutation) {
+            MEASUREMENT_HTML_RESTORES.delete(document.documentElement);
           }
           return;
         }
-        if (
-          mutation.type === "characterData" &&
-          mutation.target.parentElement?.closest("style")
-        ) {
-          stylesheetChanged = true;
-          fullScanRequired = true;
-        }
-        Array.from(mutation.addedNodes).forEach(function addedCascadeNode(node) {
-          if (node === styleElement || node.nodeType !== 1) return;
+        let stylesheetChanged = false;
+        const publisherPaintStylesheets = new Set();
+        mutations.forEach(function recordCascadeMutation(mutation) {
+          if (mutation.type === "attributes") {
+            if (mutation.target === styleElement) return;
+            if (mutation.target.tagName === "STYLE" || mutation.target.tagName === "LINK") {
+              stylesheetChanged = true;
+              fullScanRequired = true;
+              if (stylesheetIntroducesPublisherPaint(mutation.target)) {
+                publisherPaintStylesheets.add(mutation.target);
+              }
+            } else {
+              queueElement(mutation.target);
+            }
+            return;
+          }
           if (
-            node.tagName === "STYLE" ||
-            (node.tagName === "LINK" && /stylesheet/i.test(node.getAttribute("rel") || "")) ||
-            node.querySelector("style, link[rel~='stylesheet' i]")
+            mutation.type === "characterData" &&
+            mutation.target.parentElement?.closest("style")
           ) {
             stylesheetChanged = true;
             fullScanRequired = true;
+            const style = mutation.target.parentElement?.closest("style");
+            if (stylesheetIntroducesPublisherPaint(style)) {
+              publisherPaintStylesheets.add(style);
+            }
           }
-          queueElement(node);
+          Array.from(mutation.addedNodes).forEach(function addedCascadeNode(node) {
+            if (node === styleElement || node.nodeType !== 1) return;
+            if (
+              node.tagName === "STYLE" ||
+              (node.tagName === "LINK" && /stylesheet/i.test(node.getAttribute("rel") || "")) ||
+              node.querySelector("style, link[rel~='stylesheet' i]")
+            ) {
+              stylesheetChanged = true;
+              fullScanRequired = true;
+              if (stylesheetIntroducesPublisherPaint(node)) {
+                publisherPaintStylesheets.add(node);
+              }
+              Array.from(node.querySelectorAll?.("style") || [])
+                .filter(stylesheetIntroducesPublisherPaint)
+                .forEach(function rememberPublisherPaintStyle(style) {
+                  publisherPaintStylesheets.add(style);
+                });
+            }
+            queueElement(node);
+          });
         });
-      });
-      if (stylesheetChanged) {
-        if (!runtimeGateStyleIntact(styleElement, runtime)) {
-          runtime.enterTerminal("runtime-style-tamper-cascade-pre");
-          return;
+        if (stylesheetChanged) {
+          if (
+            Array.from(publisherPaintStylesheets).some(
+              function quarantineFailed(style) {
+                return !quarantinePublisherPaintStylesheet(style);
+              },
+            )
+          ) {
+            runtime.enterTerminal("projection-publisher-invariant-uncontained");
+            return;
+          }
+          if (!runtimeGateStyleIntact(styleElement, runtime)) {
+            runtime.enterTerminal("runtime-style-tamper-cascade-pre");
+            return;
+          }
+          (document.head || document.documentElement).appendChild(styleElement);
+          if (!runtimeGateStyleIntact(styleElement, runtime)) {
+            runtime.enterTerminal("runtime-style-tamper-cascade-post");
+          }
         }
-        (document.head || document.documentElement).appendChild(styleElement);
-        runtime.expectedStyleRules = canonicalRuntimeCssRules(styleElement);
-        if (!runtimeGateStyleIntact(styleElement, runtime)) {
-          runtime.enterTerminal("runtime-style-tamper-cascade-post");
-        }
+      } catch (_error) {
+        runtime.enterTerminal("cascade-observer-exception");
       }
     });
     observer.observe(document.documentElement, {
@@ -6916,50 +7755,21 @@
       pendingElements.clear();
       fullScanRequired = false;
     };
-    runtime.unsubscribeCssom = subscribeCssomMutations(
-      browserRoot,
-      function cssomMutationObserved(sheet) {
-        if (runtime.terminallyBlocked) return;
-        if (sheet === styleElement.sheet) {
-          runtime.enterTerminal("runtime-style-tamper-cssom");
-          return;
-        }
-        fullScanRequired = true;
-      },
-    );
-    runtime.unsubscribeAdoptedStyleSheets = subscribeAdoptedStyleSheetMutations(
-      browserRoot,
-      function adoptedStyleSheetsObserved() {
-        if (runtime.terminallyBlocked) return;
-        fullScanRequired = true;
-      },
-    );
-    runtime.unsubscribeStyleSheetState = subscribeStyleSheetStateMutations(
-      browserRoot,
-      function styleSheetStateObserved(sheet) {
-        if (runtime.terminallyBlocked) return;
-        if (measurementStyleSheetMutationDepth > 0) {
-          fullScanRequired = true;
-          return;
-        }
-        if (sheet === styleElement.sheet) {
-          if (document.documentElement.hasAttribute(ATTR.measure)) {
-            fullScanRequired = true;
-            return;
-          }
-          runtime.enterTerminal("runtime-style-tamper-sheet-state");
-          return;
-        }
-        fullScanRequired = true;
-      },
-    );
     const sentinelFrame = function cascadeSentinelFrame() {
-      verifyCascade();
-      if (!runtime.terminallyBlocked) {
-        runtime.cascadeFrameId = nativeAnimationFrame(browserRoot, sentinelFrame);
+      try {
+        verifyCascade();
+        if (!runtime.terminallyBlocked || runtime.releasePhase === "frozen") {
+          runtime.cascadeFrameId = nativeAnimationFrame(browserRoot, sentinelFrame);
+        }
+      } catch (_error) {
+        runtime.enterTerminal("cascade-sentinel-exception");
       }
     };
-    runtime.cascadeFrameId = nativeAnimationFrame(browserRoot, sentinelFrame);
+    try {
+      runtime.cascadeFrameId = nativeAnimationFrame(browserRoot, sentinelFrame);
+    } catch (_error) {
+      runtime.enterTerminal("cascade-sentinel-exception");
+    }
   }
 
   function proveStandaloneCascadeRelease(
@@ -6970,27 +7780,30 @@
     release
   ) {
     const document = browserRoot.document;
-    if (!document.body || runtime.terminallyBlocked || runtime.releasePending) return false;
-    runtime.releasePending = true;
-    const probe = document.createElement("div");
-    const proofNonce = runtime.activeNonce;
-    if (!proofNonce) {
-      runtime.releasePending = false;
-      runtime.enterTerminal("standalone-cascade-proof-nonce");
+    runtime.releaseProofStage = "entered";
+    if (!document.body) {
+      runtime.releaseProofStage = "precondition-no-body";
       return false;
     }
-    probe.setAttribute("data-hdf-v2-release-probe", proofNonce);
-    probe.textContent = "hotdeal-focus-release-probe";
-    const armProbe = function armStandaloneCascadeProbe() {
-      probe.style.setProperty("display", "block");
-      probe.style.setProperty("visibility", "visible");
-      probe.style.setProperty("opacity", "1");
-      probe.style.setProperty("position", "fixed");
-      probe.style.setProperty("inset", "0");
-      probe.style.setProperty("z-index", "2147483647");
-    };
+    if (runtime.terminallyBlocked) {
+      runtime.releaseProofStage = "precondition-terminal";
+      return false;
+    }
+    if (runtime.releasePending) {
+      runtime.releaseProofStage = "precondition-pending";
+      return false;
+    }
+    runtime.releasePending = true;
+    runtime.releaseProofStage = "pending";
+    let probe = null;
     const discardProbe = function discardReleaseProbe() {
-      if (probe.isConnected) probe.remove();
+      if (probe?.isConnected) {
+        try {
+          probe.remove();
+        } catch (_error) {
+          try { probe.parentNode?.removeChild(probe); } catch (_fallbackError) {}
+        }
+      }
       if (runtime.releaseProbe === probe) runtime.releaseProbe = null;
       runtime.releasePending = false;
       runtime.releaseProofFrameId = 0;
@@ -6999,63 +7812,96 @@
       discardProbe();
       runtime.enterTerminal(reason);
     };
-    armProbe();
-    document.body.appendChild(probe);
-    runtime.releaseProbe = probe;
-    let provedFrames = 0;
-    const sample = function sampleStandaloneCascade() {
-      runtime.releaseProofFrameId = 0;
-      if (runtime.terminallyBlocked) {
-        discardProbe();
-        return;
+    try {
+      probe = document.createElement("div");
+      const proofNonce = runtime.activeNonce;
+      if (!proofNonce) {
+        reject("standalone-cascade-proof-nonce");
+        return false;
       }
-      const computed = nativeComputedStyle(browserRoot, probe);
-      const inlineStateIntact = probe.style.getPropertyValue("display") === "block" &&
-        probe.style.getPropertyPriority("display") === "" &&
-        probe.style.getPropertyValue("visibility") === "visible" &&
-        probe.style.getPropertyPriority("visibility") === "" &&
-        probe.style.getPropertyValue("opacity") === "1" &&
-        probe.style.getPropertyPriority("opacity") === "";
-      const nonceBoundRuleApplied = Boolean(computed) &&
-        computed.getPropertyValue("--hdf-v2-cascade-proof").trim() === proofNonce;
-      const hidden = Boolean(computed) &&
-        computed.display === "none" &&
-        computed.visibility === "hidden" &&
-        Number(computed.opacity) === 0 &&
-        probe.getClientRects().length === 0;
-      if (
-        !inlineStateIntact ||
-        !nonceBoundRuleApplied ||
-        !hidden ||
-        !runtimeGateStyleIntact(styleElement, runtime)
-      ) {
-        reject("standalone-cascade-release-proof");
-        return;
-      }
-      provedFrames += 1;
-      if (provedFrames < CASCADE_PROOF_FRAMES) {
-        armProbe();
-        runtime.releaseProofFrameId = nativeAnimationFrame(browserRoot, sample);
-        return;
-      }
-      runtime.standaloneCascadeProof = Object.freeze({
-        authority: "userscript-runtime-style",
-        frameCount: provedFrames,
-        nonceBound: true,
-        unownedHidden: true,
-      });
-      discardProbe();
-      if (
-        !runtimeGateStyleIntact(styleElement, runtime) ||
-        !runtime.verifyCascadeRelease(cascadeSnapshot)
-      ) {
-        if (!runtime.terminallyBlocked) runtime.enterTerminal("cascade-release-proof");
-        return;
-      }
-      release();
-    };
-    runtime.releaseProofFrameId = nativeAnimationFrame(browserRoot, sample);
-    return true;
+      probe.setAttribute("data-hdf-v2-release-probe", proofNonce);
+      probe.textContent = "hotdeal-focus-release-probe";
+      const armProbe = function armStandaloneCascadeProbe() {
+        probe.style.setProperty("display", "block");
+        probe.style.setProperty("visibility", "visible");
+        probe.style.setProperty("opacity", "1");
+        probe.style.setProperty("position", "fixed");
+        probe.style.setProperty("inset", "0");
+        probe.style.setProperty("z-index", "2147483647");
+      };
+      armProbe();
+      document.body.appendChild(probe);
+      runtime.releaseProbe = probe;
+      runtime.releaseProofStage = "probe-appended";
+      let provedFrames = 0;
+      const sample = function sampleStandaloneCascade() {
+        runtime.releaseProofFrameId = 0;
+        runtime.releaseProofSampleCount += 1;
+        runtime.releaseProofStage = "sample-started";
+        try {
+          if (runtime.terminallyBlocked) {
+            discardProbe();
+            return;
+          }
+          const computed = nativeComputedStyle(browserRoot, probe);
+          const inlineStateIntact = probe.style.getPropertyValue("display") === "block" &&
+            probe.style.getPropertyPriority("display") === "" &&
+            probe.style.getPropertyValue("visibility") === "visible" &&
+            probe.style.getPropertyPriority("visibility") === "" &&
+            probe.style.getPropertyValue("opacity") === "1" &&
+            probe.style.getPropertyPriority("opacity") === "";
+          const nonceBoundRuleApplied = Boolean(computed) &&
+            computed.getPropertyValue("--hdf-v2-cascade-proof").trim() === proofNonce;
+          const hidden = Boolean(computed) &&
+            computed.display === "none" &&
+            computed.visibility === "hidden" &&
+            Number(computed.opacity) === 0 &&
+            probe.getClientRects().length === 0;
+          if (
+            !inlineStateIntact ||
+            !nonceBoundRuleApplied ||
+            !hidden ||
+            !runtimeGateStyleIntact(styleElement, runtime)
+          ) {
+            reject("standalone-cascade-release-proof");
+            return;
+          }
+          provedFrames += 1;
+          runtime.releaseProofStage = "sample-proved";
+          if (provedFrames < CASCADE_PROOF_FRAMES) {
+            armProbe();
+            runtime.releaseProofStage = "frame-rescheduled";
+            runtime.releaseProofFrameId = nativeAnimationFrame(browserRoot, sample);
+            return;
+          }
+          runtime.standaloneCascadeProof = Object.freeze({
+            authority: "userscript-runtime-style",
+            frameCount: provedFrames,
+            nonceBound: true,
+            unownedHidden: true,
+          });
+          discardProbe();
+          runtime.releaseProofStage = "cascade-verifying";
+          if (
+            !runtimeGateStyleIntact(styleElement, runtime) ||
+            !runtime.verifyCascadeRelease(cascadeSnapshot)
+          ) {
+            if (!runtime.terminallyBlocked) runtime.enterTerminal("cascade-release-proof");
+            return;
+          }
+          runtime.releaseProofStage = "releasing";
+          release();
+        } catch (_error) {
+          reject("standalone-cascade-release-exception");
+        }
+      };
+      runtime.releaseProofStage = "frame-scheduled";
+      runtime.releaseProofFrameId = nativeAnimationFrame(browserRoot, sample);
+      return true;
+    } catch (_error) {
+      reject("standalone-cascade-release-exception");
+      return false;
+    }
   }
 
   function installIntegrityObserver(browserRoot, runtime, state, styleElement) {
@@ -7222,6 +8068,12 @@
           element.getAttribute(ATTR.state) === "ready" &&
           element.getAttribute(ATTR.status) === "ready";
       }
+      if (!state.ownedElements.has(element)) {
+        return hdfClasses(element).length === 0 &&
+          !Array.from(element.attributes || []).some(function reservedMarker(attribute) {
+            return attribute.name.startsWith(HDF_ATTRIBUTE_PREFIX);
+          });
+      }
       if (![ATTR.keep, ATTR.deep, ATTR.shell, ATTR.role].includes(name)) {
         return false;
       }
@@ -7232,36 +8084,246 @@
       observer.disconnect();
       runtime.enterTerminal(`role-projection-${reason}`);
     };
+    const exactMeasurementMutation = function exactMeasurementMutation(mutation) {
+      const html = document.documentElement;
+      const restore = MEASUREMENT_HTML_RESTORES.get(html);
+      if (!restore || mutation?.type !== "attributes" || mutation.target !== html) {
+        return false;
+      }
+      if (mutation.attributeName === ATTR.measure) {
+        return !html.hasAttribute(ATTR.measure);
+      }
+      return mutation.attributeName === "style" &&
+        restore.properties.every(function propertyWasRestored(snapshot) {
+          return html.style.getPropertyValue(snapshot.property) === snapshot.value &&
+            html.style.getPropertyPriority(snapshot.property) === snapshot.priority;
+        });
+    };
     const consumeAuthorizedMarkerMutations = function consumeAuthorizedMarkerMutations(
       authorizedTargets,
     ) {
       return observer.takeRecords().every(function exactInternalMarkerMutation(mutation) {
+        if (exactMeasurementMutation(mutation)) return true;
         if (
           mutation.type !== "attributes" ||
-          !authorizedTargets.has(mutation.target)
+          (
+            !authorizedTargets.has(mutation.target) &&
+            !state.ownedElements.has(mutation.target)
+          )
         ) {
           return false;
         }
         if (mutation.attributeName === "class") {
-          return state.ownedElements.has(mutation.target) &&
-            markerShapeMatches(
-              mutation.target,
-              state.expectedMarkerShapes.get(mutation.target),
-            );
+          return state.ownedElements.has(mutation.target)
+            ? markerShapeMatches(
+                mutation.target,
+                state.expectedMarkerShapes.get(mutation.target),
+              )
+            : hdfClasses(mutation.target).length === 0 &&
+                !Array.from(mutation.target.attributes || []).some(
+                  function noReservedAttribute(attribute) {
+                    return attribute.name.startsWith(HDF_ATTRIBUTE_PREFIX);
+                  },
+                );
         }
         return protocolAttributes.has(mutation.attributeName) &&
-          exactProtocolAttribute(mutation.target, mutation.attributeName);
+          (
+            state.ownedElements.has(mutation.target)
+              ? exactProtocolAttribute(mutation.target, mutation.attributeName)
+              : !mutation.target.hasAttribute(mutation.attributeName) &&
+                  hdfClasses(mutation.target).length === 0 &&
+                  !Array.from(mutation.target.attributes || []).some(
+                    function noReservedAttribute(attribute) {
+                      return attribute.name.startsWith(HDF_ATTRIBUTE_PREFIX);
+                    },
+                  )
+          );
       });
     };
     const classifyNewCommentRoot = function classifyNewCommentRoot(node) {
       const matchesItem = elementMatchesAny(node, state.commentItemSelectors);
       const matchesControl = elementMatchesAny(node, state.commentControlSelectors);
-      const matchesIgnored = elementMatchesAny(node, state.commentIgnoredSelectors);
-      if (Number(matchesItem) + Number(matchesControl) + Number(matchesIgnored) !== 1) {
+      const matchesConfiguredIgnored = elementMatchesAny(
+        node,
+        state.commentIgnoredSelectors,
+      );
+      if (matchesItem) {
+        return Number(matchesControl) + Number(matchesConfiguredIgnored) === 0
+          ? "item"
+          : null;
+      }
+      if (isAutonomousProjectionNoiseRoot(node)) {
+        return "autonomous-ignored";
+      }
+      if (Number(matchesControl) + Number(matchesConfiguredIgnored) !== 1) {
         return null;
       }
-      return matchesItem ? "item" : matchesControl ? "control" : "ignored";
+      return matchesControl ? "control" : "configured-ignored";
     };
+    const explicitlyHiddenByPublisher = function explicitlyHiddenByPublisher(element) {
+      const visibility = String(element.style?.getPropertyValue("visibility") || "")
+        .trim().toLocaleLowerCase();
+      const display = String(element.style?.getPropertyValue("display") || "")
+        .trim().toLocaleLowerCase();
+      const contentVisibility = String(
+        element.style?.getPropertyValue("content-visibility") || "",
+      ).trim().toLocaleLowerCase();
+      const opacityValue = String(element.style?.getPropertyValue("opacity") || "").trim();
+      const opacity = Number(opacityValue);
+      return element.hidden || element.getAttribute("aria-hidden") === "true" ||
+        display === "none" || /^(?:hidden|collapse)$/u.test(visibility) ||
+        contentVisibility === "hidden" ||
+        (opacityValue !== "" && Number.isFinite(opacity) && opacity === 0);
+    };
+    const replaceRootSet = function replaceRootSet(rootSet, roots) {
+      rootSet.clear();
+      roots.forEach(function rememberRoot(root) { rootSet.add(root); });
+    };
+    const forgetOwnedProjectionTree = function forgetOwnedProjectionTree(root) {
+      if (!root || root.nodeType !== 1) return;
+      [root].concat(Array.from(root.querySelectorAll("*"))).forEach(
+        function forgetProjectedElement(element) {
+          state.ownedElementSet.delete(element);
+          state.expectedMarkerShapes.delete(element);
+          state.ownedElements.delete(element);
+          state.shellElements.delete(element);
+        },
+      );
+    };
+    const atomicRoleFields = function atomicRoleFields(role) {
+      return role === "body"
+        ? {
+            ignoredRoots: state.bodyIgnoredRoots,
+            configuredRoots: state.bodyConfiguredIgnoredRoots,
+            autonomousRoots: state.bodyAutonomousIgnoredRoots,
+            safetyRoots: state.bodySafetyIgnoredRoots,
+            configuredSelectors: state.projectionPolicy.bodyIgnoredSelectors,
+            roleConfigured: "bodyConfiguredIgnored",
+            roleAutonomous: "bodyAutonomousIgnored",
+            roleIgnored: "bodyIgnored",
+          }
+        : {
+            ignoredRoots: state.productIgnoredRoots,
+            configuredRoots: state.productConfiguredIgnoredRoots,
+            autonomousRoots: state.productAutonomousIgnoredRoots,
+            safetyRoots: state.productSafetyIgnoredRoots,
+            configuredSelectors: state.projectionPolicy.productIgnoredSelectors,
+            roleConfigured: "productConfiguredIgnored",
+            roleAutonomous: "productAutonomousIgnored",
+            roleIgnored: "productIgnored",
+          };
+    };
+    const reconcileAtomicRole = function reconcileAtomicRole(role) {
+      const rejectReconciliation = function rejectReconciliation(reason) {
+        runtime.lastReconciliationFailure = Object.freeze({ role, reason });
+        return false;
+      };
+      const roleRoot = state.roles[role];
+      if (!roleRoot?.isConnected) return rejectReconciliation("role-root");
+      const descendants = [roleRoot].concat(Array.from(roleRoot.querySelectorAll("*")));
+      if (descendants.length > MAX_SEMANTIC_DESCENDANTS) {
+        return rejectReconciliation("descendant-bound");
+      }
+      const fields = atomicRoleFields(role);
+      const configured = ignoredRootsWithin(
+        roleRoot,
+        fields.configuredSelectors,
+      );
+      if (rootsOverlap(configured)) return rejectReconciliation("configured-overlap");
+      const safety = trackedRoots(fields.safetyRoots)
+        .filter(function connectedSafetyRoot(root) {
+          return root?.isConnected && root !== roleRoot && roleRoot.contains(root);
+        })
+        .filter(function outermostSafetyRoot(root, _index, roots) {
+          return !roots.some(function otherSafetyRoot(other) {
+            return other !== root && other.contains(root);
+          });
+        });
+      const autonomousDiscovery = discoverAutonomousIgnoredRoots(
+        roleRoot,
+        configured.concat(safety),
+      );
+      if (!autonomousDiscovery.ok) {
+        return rejectReconciliation("autonomous-bound");
+      }
+      const autonomous = Array.from(autonomousDiscovery.roots);
+      const ignored = uniqueElements(configured.concat(safety, autonomous));
+      const safeProjection = withPublisherVisibilityMeasurement(
+        document,
+        function inspectReconciledAtomicRole() {
+          return hasApprovedContentOutside(roleRoot, ignored) &&
+            !containsSemanticNoise(roleRoot, new WeakMap(), ignored) &&
+            !containsUnprovenShadowBoundary(roleRoot, ignored) &&
+            !containsPublisherPaintRisk(roleRoot, ignored);
+        },
+        function rejectUnsafeAtomicMeasurement() { return false; },
+      );
+      if (!safeProjection) return rejectReconciliation("unsafe-projection");
+      const authorizedTargets = new Set(descendants);
+      for (
+        let ancestor = roleRoot.parentElement;
+        ancestor;
+        ancestor = ancestor.parentElement
+      ) {
+        authorizedTargets.add(ancestor);
+      }
+      ignored.forEach(function demoteIgnoredRoot(ignoredRoot) {
+        forgetOwnedProjectionTree(ignoredRoot);
+        stripOwnedAttributes(ignoredRoot);
+      });
+      const promotionRoots = [];
+      const stack = [roleRoot];
+      while (stack.length) {
+        const current = stack.pop();
+        if (current !== roleRoot && insideAnyRoot(current, ignored)) continue;
+        if (!state.ownedElements.has(current)) {
+          promotionRoots.push(current);
+          continue;
+        }
+        Array.from(current.children).reverse().forEach(
+          function inspectUnownedChild(child) { stack.push(child); },
+        );
+      }
+      promotionRoots.forEach(function promoteVerifiedContent(root) {
+        const nestedIgnored = ignored.filter(function ignoredInsidePromotion(candidate) {
+          return root === candidate || root.contains(candidate);
+        });
+        markDeepSubtree(
+          root,
+          role,
+          state.ownedElements,
+          state.nonce,
+          nestedIgnored,
+        );
+        rememberAuthorizedMarkerTree(root, state);
+      });
+      replaceRootSet(fields.configuredRoots, configured);
+      replaceRootSet(fields.autonomousRoots, autonomous);
+      replaceRootSet(fields.safetyRoots, safety);
+      replaceRootSet(fields.ignoredRoots, ignored);
+      state.roles[fields.roleConfigured] = configured;
+      state.roles[fields.roleAutonomous] = autonomous;
+      state.roles[fields.roleIgnored] = ignored;
+      if (!consumeAuthorizedMarkerMutations(authorizedTargets)) {
+        return rejectReconciliation("marker-record");
+      }
+      runtime.lastReconciliationFailure = null;
+      return true;
+    };
+    const quarantineAtomicProjectionRoot =
+      function quarantineAtomicProjectionRoot(root) {
+        if (!root || root.nodeType !== 1) return false;
+        const role = ["body", "product"].find(function containingAtomicRole(name) {
+          const roleRoot = state.roles[name];
+          return roleRoot && roleRoot !== root && roleRoot.contains(root);
+        });
+        if (!role) return false;
+        const fields = atomicRoleFields(role);
+        fields.safetyRoots.add(root);
+        if (!reconcileAtomicRole(role)) return false;
+        state.projectionEpoch += 1;
+        return runtime.publishReadyProjectionDiagnostics();
+      };
     const removeTrackedCommentTree = function removeTrackedCommentTree(node) {
       if (node.nodeType !== 1) return null;
       const removedItems = trackedRoots(state.commentItemRoots).filter(
@@ -7275,7 +8337,13 @@
         function removedIgnoredCommentRoot(root) { return root === node || node.contains(root); }
       );
       if (removedControls.length === 0 && removedIgnored.length === 0) return null;
-      [state.commentControlRoots, state.commentIgnoredRoots]
+      [
+        state.commentControlRoots,
+        state.commentIgnoredRoots,
+        state.commentConfiguredIgnoredRoots,
+        state.commentAutonomousIgnoredRoots,
+        state.commentSafetyIgnoredRoots,
+      ]
         .forEach(function removeContainedRoots(rootSet) {
           trackedRoots(rootSet).forEach(function removeContained(root) {
             if (root === node || node.contains(root)) rootSet.delete(root);
@@ -7290,19 +8358,92 @@
       forgetRemovedTree(node, state);
       return "non-item";
     };
+    const reconcileDynamicCommentControl =
+      function reconcileDynamicCommentControl(control) {
+        if (
+          !control ||
+          !control.isConnected ||
+          !state.commentControlRoots.has(control) ||
+          !state.commentControlScope.contains(control) ||
+          !elementMatchesAny(control, state.commentControlSelectors)
+        ) {
+          return false;
+        }
+        const elements = [control, ...control.querySelectorAll("*")];
+        if (elements.length > MAX_SEMANTIC_DESCENDANTS) return false;
+        const overlapsAnotherProjectionRoot = [
+          ...trackedRoots(state.commentItemRoots),
+          ...trackedRoots(state.commentIgnoredRoots),
+          ...trackedRoots(state.commentControlRoots).filter(
+            function anotherControl(candidate) { return candidate !== control; },
+          ),
+        ].some(function nestedProjectionRoot(candidate) {
+          return control.contains(candidate);
+        });
+        if (overlapsAnotherProjectionRoot) return false;
+        elements
+          .filter(function newlyIntroducedElement(element) {
+            return !state.ownedElements.has(element) &&
+              (!element.parentElement || state.ownedElements.has(element.parentElement));
+          })
+          .forEach(function clearPublisherMarkerSpoof(root) {
+            stripOwnedAttributes(root);
+          });
+        const authorizedTargets = new Set(elements);
+        for (
+          let ancestor = control.parentElement;
+          ancestor;
+          ancestor = ancestor.parentElement
+        ) {
+          authorizedTargets.add(ancestor);
+        }
+        markDeepSubtree(
+          control,
+          "comment-control",
+          state.ownedElements,
+          state.nonce,
+          [],
+        );
+        markAncestorChain(
+          control,
+          state.ownedElements,
+          state.nonce,
+          state.shellElements,
+        );
+        rememberAuthorizedMarkerTree(control, state);
+        if (!consumeAuthorizedMarkerMutations(authorizedTargets)) return false;
+        return withPublisherVisibilityMeasurement(
+          document,
+          function verifyReconciledCommentControl() {
+            if (
+              containsSemanticNoise(control, new WeakMap(), []) ||
+              containsUnprovenShadowBoundary(control, [])
+            ) {
+              return false;
+            }
+            return isRendered(control)
+              ? !containsPublisherPaintRisk(control, [])
+              : approvedDormantCommentControl(control, state);
+          },
+          function rejectUnsafeCommentControlMeasurement() { return false; },
+        );
+      };
     const observer = createNativeMutationObserver(browserRoot, function sealProjection(mutations) {
-      if (runtime.releasePhase !== "released" || !runtime.authorizedReady) {
-        return;
-      }
-      if (runtime.terminallyBlocked) {
-        return;
-      }
-      let failureReason = null;
-      let projectionTouched = false;
-      let commentProjectionChanged = false;
-      let addedCommentItemCount = 0;
-      let commentCountEvidenceChanged = false;
-      for (const mutation of mutations) {
+      try {
+        if (runtime.releasePhase !== "released" || !runtime.authorizedReady) {
+          return;
+        }
+        if (runtime.terminallyBlocked) {
+          return;
+        }
+        let failureReason = null;
+        let projectionTouched = false;
+        let commentProjectionChanged = false;
+        let addedCommentItemCount = 0;
+        let commentCountEvidenceChanged = false;
+        const atomicRolesChanged = new Set();
+        const dynamicCommentControlsChanged = new Set();
+        for (const mutation of mutations) {
         if (failureReason) break;
         if (mutationTouchesCommentTotalEvidence(mutation)) {
           projectionTouched = true;
@@ -7320,6 +8461,19 @@
             if (!exactClassShape) {
               projectionTouched = true;
               failureReason = "marker-class-mutation";
+              continue;
+            }
+            const publisherClasses = function publisherClasses(value) {
+              return String(value || "").split(/\s+/).filter(Boolean)
+                .filter(function nonProtocolClass(className) {
+                  return !className.startsWith(HDF_CLASS_PREFIX);
+                })
+                .sort();
+            };
+            if (
+              JSON.stringify(publisherClasses(mutation.oldValue)) ===
+              JSON.stringify(publisherClasses(target.getAttribute("class")))
+            ) {
               continue;
             }
           }
@@ -7343,6 +8497,13 @@
             insideAnyRoot(target, trackedRoots(state.productIgnoredRoots)) ||
             insideAnyRoot(target, trackedRoots(state.commentIgnoredRoots))
           ) {
+            if (inBody) atomicRolesChanged.add("body");
+            if (inProduct) atomicRolesChanged.add("product");
+            continue;
+          }
+          if (inBody || inProduct) {
+            if (inBody) atomicRolesChanged.add("body");
+            if (inProduct) atomicRolesChanged.add("product");
             continue;
           }
           const controlRoot = closestTrackedRoot(target, state.commentControlRoots);
@@ -7351,7 +8512,14 @@
             COMMENT_CONTROL_STATE_ATTRIBUTES.has(name) &&
             elementMatchesAny(controlRoot, state.commentControlSelectors)
           ) {
-            commentProjectionChanged = true;
+            if (!isRendered(controlRoot)) {
+              state.toggleableCommentControls.add(controlRoot);
+            } else if (containsPublisherPaintRisk(controlRoot, [])) {
+              failureReason = "projection-mismatch";
+            }
+            if (!failureReason) {
+              commentProjectionChanged = true;
+            }
             continue;
           }
           if (
@@ -7365,6 +8533,9 @@
             target.matches("details") &&
             name === "open"
           ) {
+            continue;
+          }
+          if (inTitle || inComments) {
             continue;
           }
           failureReason = "attribute-mutation";
@@ -7385,7 +8556,13 @@
           insideAnyRoot(mutationParent, trackedRoots(state.commentIgnoredRoots))
         );
         if (mutation.type === "characterData") {
-          if (!inIgnoredProjection && (inBody || inProduct || inTitle || inComments)) {
+          if (inBody || inProduct) {
+            projectionTouched = true;
+            if (inBody) atomicRolesChanged.add("body");
+            if (inProduct) atomicRolesChanged.add("product");
+          } else if (!inIgnoredProjection && inComments) {
+            projectionTouched = true;
+          } else if (!inIgnoredProjection && inTitle) {
             projectionTouched = true;
             failureReason = "text-mutation";
           } else if (
@@ -7397,10 +8574,51 @@
           continue;
         }
         if (inIgnoredProjection) {
+          if (inBody) atomicRolesChanged.add("body");
+          if (inProduct) atomicRolesChanged.add("product");
+          if (inBody || inProduct) projectionTouched = true;
           continue;
         }
         if (inBody || inProduct || inTitle || inComments) {
           projectionTouched = true;
+        }
+        const dynamicCommentControl = mutation.type === "childList"
+          ? closestTrackedRoot(mutationParent, state.commentControlRoots)
+          : null;
+        if (dynamicCommentControl) {
+          const nestedTrackedRootChanged = [
+            ...mutation.removedNodes,
+            ...mutation.addedNodes,
+          ].some(function overlapsTrackedCommentRoot(node) {
+            if (node.nodeType !== 1) return false;
+            return trackedRoots(state.commentItemRoots).some(
+              function overlapsItem(item) {
+                return item === node || node.contains(item);
+              },
+            ) || trackedRoots(state.commentIgnoredRoots).some(
+              function overlapsIgnored(ignored) {
+                return ignored === node || node.contains(ignored);
+              },
+            ) || trackedRoots(state.commentControlRoots).some(
+              function overlapsOtherControl(control) {
+                return control !== dynamicCommentControl &&
+                  (control === node || node.contains(control));
+              },
+            );
+          });
+          if (nestedTrackedRootChanged) {
+            failureReason = "comment-control-root-mutation";
+            continue;
+          }
+          for (const removed of mutation.removedNodes) {
+            if (removed.nodeType === 1) forgetRemovedTree(removed, state);
+          }
+          for (const added of mutation.addedNodes) {
+            if (added.nodeType === 1) stripOwnedAttributes(added);
+          }
+          commentProjectionChanged = true;
+          dynamicCommentControlsChanged.add(dynamicCommentControl);
+          continue;
         }
         for (const removed of mutation.removedNodes) {
           if (failureReason) break;
@@ -7414,42 +8632,106 @@
           );
           if (removesCore) {
             failureReason = "core-removal";
-          } else if (inBody || inProduct || inTitle) {
+          } else if (inBody || inProduct) {
+            // Mutation records also report publisher moves of the same object.
+            // Retain identity only when it remains in its original atomic role.
+            const movedWithinRole = removed.nodeType === 1 && removed.isConnected && (
+              (inBody && state.roles.body.contains(removed)) ||
+              (inProduct && state.roles.product.contains(removed))
+            );
+            if (removed.nodeType === 1 && !movedWithinRole) forgetRemovedTree(removed, state);
+            if (inBody) atomicRolesChanged.add("body");
+            if (inProduct) atomicRolesChanged.add("product");
+          } else if (inTitle) {
             failureReason = "atomic-removal";
           } else if (inComments) {
-            const removalKind = removeTrackedCommentTree(removed);
-            if (removalKind === "item") {
-              failureReason = "comment-removal";
-            } else if (removalKind === null) {
-              failureReason = "unclassified-comment-removal";
+            if (removed.nodeType === 3) {
+              if (normalizeText(removed.data)) {
+                failureReason = "comment-text-removal";
+              }
+            } else if (removed.nodeType === 8) {
+              // Publisher comment nodes carry no reader-visible content.
+            } else if (
+              removed.nodeType === 1 &&
+              removed.matches("script, style, template, noscript")
+            ) {
+              // Inert publisher implementation nodes are deliberately not
+              // part of the visible comment projection.
             } else {
-              commentProjectionChanged = true;
+              const removalKind = removeTrackedCommentTree(removed);
+              if (removalKind === "item") {
+                failureReason = "comment-removal";
+              } else if (removalKind === null) {
+                const removedOwnedProjection = removed.nodeType === 1 && [
+                  removed,
+                  ...removed.querySelectorAll("*"),
+                ].some(function removedOwnedElement(element) {
+                  return state.ownedElements.has(element);
+                });
+                if (removedOwnedProjection) {
+                  failureReason = "unclassified-comment-element-removal";
+                } else {
+                  forgetRemovedTree(removed, state);
+                  commentProjectionChanged = true;
+                }
+              } else {
+                commentProjectionChanged = true;
+              }
             }
           } else if (removed.nodeType === 1) {
             forgetRemovedTree(removed, state);
-          } else if (inComments && normalizeText(removed.data)) {
-            failureReason = "comment-text-removal";
           }
         }
         for (const added of mutation.addedNodes) {
           if (failureReason) break;
           if (added === styleElement) continue;
-          if (inBody || inProduct || inTitle) {
+          if (inBody || inProduct) {
+            const reservedMarkerSelector =
+              `[${ATTR.keep}], [${ATTR.deep}], [${ATTR.shell}], [${ATTR.role}], ` +
+              `.${CLASS.keep}, .${CLASS.shell}, .${CLASS.deep}, ` +
+              `[class*="${CLASS.rolePrefix}"]`;
+            if (
+              added.nodeType === 1 &&
+              [added, ...added.querySelectorAll(reservedMarkerSelector)].some(
+                function unownedReservedMarker(element) {
+                  return element.matches(reservedMarkerSelector) &&
+                    !state.ownedElements.has(element);
+                },
+              )
+            ) {
+              failureReason = "inside-marker-spoof";
+              break;
+            }
+            if (inBody) atomicRolesChanged.add("body");
+            if (inProduct) atomicRolesChanged.add("product");
+            continue;
+          }
+          if (inTitle) {
             failureReason = "atomic-addition";
             break;
           }
           if (!inComments) {
             if (added.nodeType === 1) {
-              if (added.matches(
+              const reservedMarkerSelector =
                 `[${ATTR.keep}], [${ATTR.deep}], [${ATTR.shell}], [${ATTR.role}], ` +
                 `.${CLASS.keep}, .${CLASS.shell}, .${CLASS.deep}, ` +
-                `[class*="${CLASS.rolePrefix}"]`
-              ) || added.querySelector(
-                `[${ATTR.keep}], [${ATTR.deep}], [${ATTR.shell}], [${ATTR.role}], ` +
-                `.${CLASS.keep}, .${CLASS.shell}, .${CLASS.deep}, ` +
-                `[class*="${CLASS.rolePrefix}"]`
-              )) {
-                failureReason = "outside-marker-spoof";
+                `[class*="${CLASS.rolePrefix}"]`;
+              const markedElements = [added, ...added.querySelectorAll(reservedMarkerSelector)]
+                .filter(function reservedMarker(element) { return element.matches(reservedMarkerSelector); });
+              if (markedElements.some(function unownedMarker(element) {
+                return !state.ownedElements.has(element);
+              })) {
+                // Publisher widgets may clone marked markup outside the
+                // article. Remove copied authority before paint, without
+                // blanking the intact original article and comments.
+                const clearedTargets = new Set([added, ...added.querySelectorAll('*')]);
+                stripOwnedAttributes(added, state.ownedElements);
+                if (!consumeAuthorizedMarkerMutations(clearedTargets)) {
+                  failureReason = "outside-marker-cleanup";
+                }
+                projectionTouched = true;
+              } else if (markedElements.length) {
+                projectionTouched = true;
               } else {
                 stripOwnedAttributes(added);
               }
@@ -7464,12 +8746,33 @@
           }
           const classification = classifyNewCommentRoot(added);
           if (!classification) {
-            failureReason = "unclassified-comment-addition";
-            break;
-          }
-          stripOwnedAttributes(added);
-          if (classification === "ignored") {
+            const overlapsAcceptedRoot = [...state.commentItemRoots, ...state.commentControlRoots]
+              .some(function containsAcceptedRoot(root) { return nodesOverlap(added, root); });
+            if (overlapsAcceptedRoot || state.commentSafetyIgnoredRoots.size >= MAX_COMMENT_EVIDENCE) {
+              failureReason = "unclassified-comment-addition";
+              break;
+            }
+            // An unknown sibling has no authority to hide accepted comments or
+            // stop their observer. Keep that exact unowned subtree outside the
+            // projection while normal comment/control updates continue.
+            stripOwnedAttributes(added);
+            state.commentSafetyIgnoredRoots.add(added);
             state.commentIgnoredRoots.add(added);
+            commentProjectionChanged = true;
+            continue;
+          }
+          const publisherHiddenBeforeProjection = explicitlyHiddenByPublisher(added);
+          stripOwnedAttributes(added);
+          if (
+            classification === "configured-ignored" ||
+            classification === "autonomous-ignored"
+          ) {
+            state.commentIgnoredRoots.add(added);
+            (
+              classification === "configured-ignored"
+                ? state.commentConfiguredIgnoredRoots
+                : state.commentAutonomousIgnoredRoots
+            ).add(added);
             commentProjectionChanged = true;
             continue;
           }
@@ -7493,50 +8796,74 @@
             addedCommentItemCount += 1;
           } else {
             state.commentControlRoots.add(added);
+            if (!isRendered(added)) state.toggleableCommentControls.add(added);
           }
           commentProjectionChanged = true;
-          const additionFailure = withPublisherVisibilityMeasurement(
-            document,
-            function validateProjectedCommentAddition() {
-              if (!isRendered(added)) return "hidden-comment-addition";
-              if (containsUnprovenShadowBoundary(added, [])) {
-                return "shadow-comment-addition";
-              }
-              if (containsPublisherPaintRisk(added, [])) {
-                return "publisher-paint-comment-addition";
-              }
-              return null;
-            },
-            function rejectUnsafeCommentMeasurement() {
-              return "comment-measurement";
-            },
-          );
+          // Empty comment anchors and hidden load-more controls are valid
+          // dormant controls, just as at initial resolution. Reject hidden
+          // comment content, not the zero-area anchor preceding that content.
+          const renderedAddition = isRendered(added);
+          const dormantControl = classification === "control" &&
+            !renderedAddition && approvedDormantCommentControl(added, state);
+          const additionFailure = !dormantControl &&
+            (publisherHiddenBeforeProjection || !renderedAddition)
+            ? "hidden-comment-addition"
+            : containsUnprovenShadowBoundary(added, [])
+              ? "shadow-comment-addition"
+              : renderedAddition && containsPublisherPaintRisk(added, [])
+                ? "publisher-paint-comment-addition"
+                : null;
           if (additionFailure) {
             failureReason = additionFailure;
             break;
           }
         }
       }
-      if (
-        !failureReason &&
-        (commentProjectionChanged || commentCountEvidenceChanged) &&
-        !commitAuthorizedCommentCountIncrease(state, addedCommentItemCount)
-      ) {
-        failureReason = "comment-count";
-      }
-      if (!failureReason && projectionTouched) {
-        if (!verifyOwnedState(document, state)) {
-          failureReason = "projection-mismatch";
+        if (!failureReason) {
+          for (const control of dynamicCommentControlsChanged) {
+            if (!reconcileDynamicCommentControl(control)) {
+              failureReason = "comment-control-reconciliation";
+              break;
+            }
+          }
         }
-      }
-      if (!failureReason && commentProjectionChanged) {
-        state.projectionEpoch += 1;
-        if (!runtime.publishReadyProjectionDiagnostics()) {
-          failureReason = "comment-control-projection";
+        if (!failureReason) {
+          for (const role of atomicRolesChanged) {
+            if (!reconcileAtomicRole(role)) {
+              failureReason = `${role}-reconciliation`;
+              break;
+            }
+          }
         }
-      }
-      if (failureReason) {
-        terminalBlock(failureReason);
+        if (
+          !failureReason &&
+          (commentProjectionChanged || commentCountEvidenceChanged) &&
+          !commitAuthorizedCommentCountIncrease(state, addedCommentItemCount)
+        ) {
+          failureReason = "comment-count";
+        }
+        if (!failureReason && projectionTouched) {
+          if (
+            !verifyOwnedMarkerState(document, state) ||
+            !verifyOwnedState(document, state)
+          ) {
+            failureReason = "projection-mismatch";
+          }
+        }
+        if (
+          !failureReason &&
+          (commentProjectionChanged || atomicRolesChanged.size > 0)
+        ) {
+          state.projectionEpoch += 1;
+          if (!runtime.publishReadyProjectionDiagnostics()) {
+            failureReason = "comment-control-projection";
+          }
+        }
+        if (failureReason) {
+          terminalBlock(failureReason);
+        }
+      } catch (_error) {
+        terminalBlock("observer-exception");
       }
     });
     observer.observe(document.documentElement, {
@@ -7565,7 +8892,20 @@
         "height",
         "data-src",
         "data-srcset",
+        "data-title",
+        "data-component",
+        "data-role",
+        "data-testid",
+        "id",
         "class",
+        "role",
+        "itemprop",
+        "itemtype",
+        "aria-label",
+        "title",
+        "name",
+        "href",
+        "rel",
         "style",
         "hidden",
         "aria-expanded",
@@ -7575,7 +8915,7 @@
         "open",
       ],
     });
-    if (SHADOW_TRACKER) {
+    if (runtime.shadowTracker) {
       const rejectProjectedShadow = function rejectProjectedShadow(host) {
         if (insideOwnedTitleSurface(host)) {
           terminalBlock("shadow-boundary");
@@ -7588,19 +8928,21 @@
           }
         );
         if (inAtomicProjection) {
-          terminalBlock("shadow-boundary");
+          if (!quarantineAtomicProjectionRoot(host)) {
+            terminalBlock("shadow-boundary");
+          }
           return;
         }
         if (
           state.roles.comments.contains(host) &&
-          !verifyOwnedState(document, state)
+          !verifyOwnedMarkerState(document, state)
         ) {
           terminalBlock("shadow-boundary");
         }
       };
-      SHADOW_TRACKER.listeners.add(rejectProjectedShadow);
+      runtime.shadowTracker.listeners.add(rejectProjectedShadow);
       runtime.unsubscribeShadow = function unsubscribeShadowTracking() {
-        SHADOW_TRACKER.listeners.delete(rejectProjectedShadow);
+        runtime.shadowTracker?.listeners.delete(rejectProjectedShadow);
         runtime.unsubscribeShadow = null;
       };
     }
@@ -7610,23 +8952,58 @@
         NATIVE.reflectApply(NATIVE.addEventListener, target, [type, listener, true]);
         subscriptions.push([target, type, listener]);
       };
-      const rejectOpeningPopover = function rejectOpeningPopover(event) {
+      const closeTopLayerSurface = function closeTopLayerSurface(target) {
+        try {
+          if (target?.matches?.("dialog[open]") && typeof target.close === "function") {
+            target.close();
+          }
+        } catch (_error) {
+          try { target?.removeAttribute?.("open"); } catch (_fallbackError) {}
+        }
+        try {
+          if (activePopover(target) && typeof target.hidePopover === "function") {
+            target.hidePopover();
+          }
+        } catch (_error) {
+          // Projection demotion remains authoritative even if the page blocks the API.
+        }
+        return !activePopover(target) && !target?.matches?.("dialog[open]");
+      };
+      const containOpeningPopover = function containOpeningPopover(event) {
         const target = event.target;
         if (
           target?.matches?.("[popover], dialog") &&
           (event.newState === "open" || activePopover(target) || target.open === true)
         ) {
-          runtime.enterTerminal("role-projection-top-layer-activation");
+          try {
+            if (event.cancelable) event.preventDefault();
+          } catch (_error) {}
+          closeTopLayerSurface(target);
+          if (!quarantineAtomicProjectionRoot(target)) {
+            const ownedCommentSurface =
+              state.roles.comments.contains(target) &&
+              state.ownedElements.has(target);
+            if (ownedCommentSurface || activePopover(target) || target.open === true) {
+              runtime.enterTerminal("role-projection-top-layer-activation");
+            }
+          }
         }
       };
-      const rejectProjectedFullscreen = function rejectProjectedFullscreen() {
-        if (document.fullscreenElement) {
-          runtime.enterTerminal("role-projection-top-layer-activation");
+      const containProjectedFullscreen = function containProjectedFullscreen() {
+        const target = document.fullscreenElement;
+        if (target) {
+          try {
+            const exit = document.exitFullscreen?.();
+            if (exit && typeof exit.catch === "function") exit.catch(function ignoreExit() {});
+          } catch (_error) {}
+          if (!quarantineAtomicProjectionRoot(target)) {
+            runtime.enterTerminal("role-projection-top-layer-activation");
+          }
         }
       };
-      subscribe(document, "beforetoggle", rejectOpeningPopover);
-      subscribe(document, "toggle", rejectOpeningPopover);
-      subscribe(document, "fullscreenchange", rejectProjectedFullscreen);
+      subscribe(document, "beforetoggle", containOpeningPopover);
+      subscribe(document, "toggle", containOpeningPopover);
+      subscribe(document, "fullscreenchange", containProjectedFullscreen);
       runtime.unsubscribeProjectionEvents = function unsubscribeProjectionEvents() {
         subscriptions.forEach(function removeSubscription(subscription) {
           NATIVE.reflectApply(NATIVE.removeEventListener, subscription[0], [
@@ -7642,14 +9019,15 @@
   }
 
   function createReaderRuntime(
-      browserRoot,
-      contract,
-      layouts,
-    seedCandidates,
+    browserRoot,
+    contract,
+    layouts,
     styleElement,
     bootstrapLock,
     targetReason,
-    onReady
+    verifiedTargetProof,
+    shadowTracker,
+    onResolved
   ) {
     const document = browserRoot.document;
     const runtime = {
@@ -7658,24 +9036,22 @@
       bootstrapGuard: null,
       cascadeGuard: null,
       cascadeFrameId: 0,
-      unsubscribeCssom: null,
-      unsubscribeAdoptedStyleSheets: null,
-      unsubscribeStyleSheetState: null,
       unsubscribeShadow: null,
       unsubscribeProjectionEvents: null,
       projectionState: null,
-      terminalGuardian: null,
       bootstrapLock,
       activeNonce: null,
       authorizedReady: false,
       releasePhase: "discovering",
       releasePending: false,
       releaseProofFrameId: 0,
+      releaseProofSampleCount: 0,
+      releaseProofStage: "not-entered",
       releaseProbe: null,
+      lockedActivationTimeoutId: 0,
       expectedStyleText: styleElement.textContent,
-      expectedStyleRules: canonicalRuntimeCssRules(styleElement),
       terminallyBlocked: false,
-      attemptScheduled: false,
+      rollbackComplete: false,
       beginDiscovery: null,
       stop: null,
       enterTerminal: null,
@@ -7685,8 +9061,38 @@
       verifyUnlockedCascadeRelease: null,
       readyDiagnostics: null,
       standaloneCascadeProof: null,
+      lastReconciliationFailure: null,
+      projectionArticleIdentity: referrerScopedArticleIdentity(browserRoot.location, contract.id),
+      recoveringProjection: false,
+      verifiedTargetProof,
+      shadowTracker,
       publishReadyProjectionDiagnostics: null,
     };
+
+    function armLockedActivationDeadline() {
+      if (runtime.lockedActivationTimeoutId) {
+        nativeClearTimeout(browserRoot, runtime.lockedActivationTimeoutId);
+        runtime.lockedActivationTimeoutId = 0;
+      }
+      runtime.lockedActivationTimeoutId = nativeTimeout(
+        browserRoot,
+        function abandonStalledLockedActivation() {
+          runtime.lockedActivationTimeoutId = 0;
+          if (runtime.releasePhase !== "released" && !runtime.terminallyBlocked) {
+            const probeState = runtime.releaseProbe?.isConnected
+              ? "probe-connected"
+              : "probe-absent";
+            const pendingState = runtime.releasePending ? "pending" : "idle";
+            runtime.enterTerminal(
+              `locked-activation-timeout-${runtime.releasePhase}-` +
+              `${runtime.releaseProofStage}-${pendingState}-${probeState}-` +
+              `samples-${runtime.releaseProofSampleCount}`,
+            );
+          }
+        },
+        LOCKED_ACTIVATION_TIMEOUT_MS,
+      );
+    }
 
     runtime.publishReadyProjectionDiagnostics = function publishReadyProjectionDiagnostics() {
       if (
@@ -7696,36 +9102,161 @@
       ) {
         return false;
       }
-      const commentControlProjection = withPublisherVisibilityMeasurement(
-        document,
-        function measureCommentControlProjection() {
-          return currentCommentControlProjection(runtime.projectionState);
-        },
-        function rejectCommentControlMeasurement() { return null; },
-      );
-      if (!commentControlProjection?.currentProjectionValid) {
+      try {
+        const commentControlProjection = currentCommentControlProjection(
+          runtime.projectionState,
+        );
+        if (!commentControlProjection?.currentProjectionValid) {
+          runtime.enterTerminal("comment-control-projection");
+          return false;
+        }
+        const visibleLeakCount = currentVisibleProjectionLeakCount(
+          document,
+          runtime.projectionState,
+        );
+        if (visibleLeakCount !== 0) {
+          runtime.enterTerminal("visible-projection-leak");
+          return false;
+        }
+        publishDiagnostics(browserRoot, {
+          ...runtime.readyDiagnostics,
+          standaloneCascadeProof: runtime.standaloneCascadeProof,
+          commentControlProjection,
+          visibleLeakCount,
+        });
+        return true;
+      } catch (_error) {
         runtime.enterTerminal("comment-control-projection");
         return false;
       }
-      publishDiagnostics(browserRoot, {
-        ...runtime.readyDiagnostics,
-        standaloneCascadeProof: runtime.standaloneCascadeProof,
-        commentControlProjection,
-      });
-      return true;
     };
 
+    function resumeVerifiedProjection(reason, allowFrozen = false) {
+      const state = runtime.projectionState;
+      const resumingFrozen = allowFrozen && runtime.releasePhase === "frozen";
+      if (
+        runtime.recoveringProjection || (runtime.terminallyBlocked && !resumingFrozen) ||
+        !String(reason || "").startsWith("role-projection-") ||
+        (runtime.releasePhase !== "released" && !resumingFrozen) || !runtime.authorizedReady ||
+        !runtime.standaloneCascadeProof || !state ||
+        runtime.projectionArticleIdentity !== referrerScopedArticleIdentity(browserRoot.location, contract.id)
+      ) return false;
+      runtime.recoveringProjection = true;
+      try {
+        if (
+          !verifyOwnedMarkerState(document, state) ||
+          !runtimeGateStyleIntact(styleElement, runtime) ||
+          !verifyOwnedState(document, state) ||
+          currentVisibleProjectionLeakCount(document, state) !== 0
+        ) return false;
+        // The accepted nodes, content boundary and article identity remain
+        // exact. Replace a disconnected/erroring observer, not the publisher
+        // DOM, and retain the already-proven two-frame cascade authority.
+        [runtime.discoveryObserver, runtime.integrityObserver, runtime.bootstrapGuard, runtime.cascadeGuard]
+          .forEach(function disconnectStaleObserver(observer) { observer?.disconnect(); });
+        if (runtime.cascadeFrameId) {
+          nativeCancelAnimationFrame(browserRoot, runtime.cascadeFrameId);
+          runtime.cascadeFrameId = 0;
+        }
+        runtime.unsubscribeShadow?.();
+        runtime.unsubscribeProjectionEvents?.();
+        runtime.terminallyBlocked = false;
+        runtime.rollbackComplete = false;
+        runtime.releasePhase = "released";
+        runtime.discoveryObserver = null;
+        installBootstrapGuard(browserRoot, runtime, styleElement);
+        installCascadeGuard(browserRoot, runtime, styleElement);
+        installIntegrityObserver(browserRoot, runtime, state, styleElement);
+        return runtime.publishReadyProjectionDiagnostics();
+      } catch (_error) {
+        return false;
+      } finally {
+        runtime.recoveringProjection = false;
+      }
+    }
+
+    runtime.resumeFrozenProjection = function resumeFrozenProjection() {
+      return resumeVerifiedProjection("role-projection-frozen-retry", true);
+    };
+
+    function freezeVerifiedProjection(reason) {
+      const resolution = runtime.verifiedTargetProof?.resolution;
+      let state = runtime.projectionState;
+      let nonce = runtime.activeNonce;
+      try {
+        if (!state) {
+          if (!resolution?.ok) return false;
+          nonce = createRunNonce(browserRoot);
+          if (!nonce) return false;
+          state = applyRoleMarkers(
+            document,
+            resolution.roles,
+            resolution.commonRoot,
+            resolution.resolvedTitle,
+            resolution.requiredRoles,
+            resolution.commentItemSelectors,
+            resolution.commentControlSelectors,
+            resolution.commentIgnoredSelectors,
+            resolution.projectionPolicy,
+            nonce,
+          );
+          runtime.activeNonce = nonce;
+          runtime.projectionState = state;
+          writeRuntimeGateStyle(styleElement, nonce, runtime);
+        }
+        if (
+          !nonce ||
+          !verifyOwnedMarkerState(document, state) ||
+          !runtimeGateStyleIntact(styleElement, runtime)
+        ) {
+          return false;
+        }
+        runtime.bootstrapLock?.restorePublisherInline?.();
+        const html = document.documentElement;
+        html.setAttribute(ATTR.protocol, PROTOCOL_VERSION);
+        html.setAttribute(ATTR.state, "ready");
+        html.setAttribute(ATTR.status, "ready");
+        html.setAttribute(ATTR.ready, "1");
+        html.classList.add(CLASS.ready);
+        html.removeAttribute(ATTR.lock);
+        html.classList.remove(CLASS.lock);
+        runtime.authorizedReady = true;
+        runtime.releasePhase = "frozen";
+        runtime.readyDiagnostics = runtime.readyDiagnostics || Object.freeze({
+          state: "ready",
+          targetReason,
+          roles: resolution?.roleDiagnostics || {},
+          layoutAliases: resolution?.layoutAliases || [],
+          semanticProjectionCount: resolution?.semanticProjectionCount || 1,
+        });
+        publishDiagnostics(browserRoot, {
+          ...runtime.readyDiagnostics,
+          targetReason: `frozen-${reason || "terminal"}`,
+          reconciliationFailure: runtime.lastReconciliationFailure,
+          standaloneCascadeProof: runtime.standaloneCascadeProof,
+          commentControlProjection: currentCommentControlProjection(state),
+          visibleLeakCount: currentVisibleProjectionLeakCount(document, state),
+        });
+        return true;
+      } catch (_error) {
+        return false;
+      }
+    }
+
     runtime.enterTerminal = function enterTerminal(reason) {
-      if (runtime.terminallyBlocked) return;
-      const terminalStatus = `terminal-${reason || "blocked"}`.slice(0, 96);
+      if (runtime.terminallyBlocked && runtime.rollbackComplete) return;
+      if (resumeVerifiedProjection(reason)) return;
+      const projectionFrozen = freezeVerifiedProjection(reason);
       runtime.terminallyBlocked = true;
-      runtime.authorizedReady = false;
-      runtime.releasePhase = "terminal";
       runtime.releasePending = false;
-      runtime.activeNonce = null;
-      runtime.standaloneCascadeProof = null;
-      runtime.projectionState = null;
-      runtime.readyDiagnostics = null;
+      if (!projectionFrozen) runtime.standaloneCascadeProof = null;
+      if (!projectionFrozen) {
+        runtime.authorizedReady = false;
+        runtime.releasePhase = "terminal";
+        runtime.activeNonce = null;
+        runtime.projectionState = null;
+        runtime.readyDiagnostics = null;
+      }
       [
         runtime.discoveryObserver,
         runtime.integrityObserver,
@@ -7733,7 +9264,11 @@
         runtime.cascadeGuard,
       ].forEach(
         function disconnectForTerminal(observer) {
-          if (observer) observer.disconnect();
+          try {
+            if (observer) observer.disconnect();
+          } catch (_error) {
+            // Recovery must continue even if a page wrapper rejects cleanup.
+          }
         }
       );
       runtime.discoveryObserver = null;
@@ -7741,84 +9276,86 @@
       runtime.bootstrapGuard = null;
       runtime.cascadeGuard = null;
       if (runtime.cascadeFrameId) {
-        nativeCancelAnimationFrame(browserRoot, runtime.cascadeFrameId);
+        try { nativeCancelAnimationFrame(browserRoot, runtime.cascadeFrameId); } catch (_error) {}
         runtime.cascadeFrameId = 0;
       }
       if (runtime.releaseProofFrameId) {
-        nativeCancelAnimationFrame(browserRoot, runtime.releaseProofFrameId);
+        try { nativeCancelAnimationFrame(browserRoot, runtime.releaseProofFrameId); } catch (_error) {}
         runtime.releaseProofFrameId = 0;
       }
-      if (runtime.releaseProbe?.isConnected) runtime.releaseProbe.remove();
+      if (runtime.releaseProbe?.isConnected) {
+        try {
+          runtime.releaseProbe.remove();
+        } catch (_error) {
+          try { runtime.releaseProbe.parentNode?.removeChild(runtime.releaseProbe); } catch (_fallbackError) {}
+        }
+      }
       runtime.releaseProbe = null;
       runtime.releasePending = false;
-      if (runtime.unsubscribeCssom) {
-        runtime.unsubscribeCssom();
-        runtime.unsubscribeCssom = null;
+      if (runtime.lockedActivationTimeoutId) {
+        try { nativeClearTimeout(browserRoot, runtime.lockedActivationTimeoutId); } catch (_error) {}
+        runtime.lockedActivationTimeoutId = 0;
       }
-      if (runtime.unsubscribeAdoptedStyleSheets) {
-        runtime.unsubscribeAdoptedStyleSheets();
-        runtime.unsubscribeAdoptedStyleSheets = null;
+      try { runtime.unsubscribeShadow?.(); } catch (_error) {}
+      try { runtime.unsubscribeProjectionEvents?.(); } catch (_error) {}
+      if (projectionFrozen) {
+        runtime.rollbackComplete = true;
+        // A different article is not adopted, but the accepted projection
+        // still needs continuous marker/style/cascade containment. A return
+        // to the exact original article can then resume its normal observer.
+        installBootstrapGuard(browserRoot, runtime, styleElement);
+        installCascadeGuard(browserRoot, runtime, styleElement);
+        return;
       }
-      if (runtime.unsubscribeStyleSheetState) {
-        runtime.unsubscribeStyleSheetState();
-        runtime.unsubscribeStyleSheetState = null;
+      try { runtime.shadowTracker?.uninstall?.(); } catch (_error) {}
+      try {
+        const html = document.documentElement;
+        html.setAttribute(ATTR.lock, "1");
+        html.setAttribute(ATTR.state, "locked");
+        html.setAttribute(ATTR.status, `locked-${reason || "terminal"}`);
+        html.removeAttribute(ATTR.ready);
+        html.classList.remove(CLASS.ready);
+        html.classList.add(CLASS.lock);
+        runtime.expectedStyleText = gateStyleText(null);
+        if (styleElement?.isConnected) {
+          styleElement.textContent = runtime.expectedStyleText;
+        }
+      } catch (_error) {
+        // The bootstrap inline lock remains the last fail-closed authority.
+      } finally {
+        runtime.rollbackComplete = true;
+        try {
+          publishDiagnostics(browserRoot, {
+            state: "locked",
+            targetReason: `contained-${reason || "terminal"}`,
+          });
+        } catch (_error) {
+          // Diagnostics are optional; publisher content remains contained.
+        }
       }
-      if (runtime.unsubscribeShadow) runtime.unsubscribeShadow();
-      if (runtime.unsubscribeProjectionEvents) runtime.unsubscribeProjectionEvents();
-      document.documentElement.classList.add(CLASS.lock);
-      document.documentElement.setAttribute(ATTR.lock, "1");
-      writeRuntimeGateStyle(styleElement, null, runtime);
-      clearProtocolState(document);
-      if (runtime.terminalGuardian) {
-        runtime.terminalGuardian.update(terminalStatus);
-      } else {
-        runtime.terminalGuardian = installPersistentTerminalGuardian(
-          browserRoot,
-          styleElement,
-          terminalStatus,
-        );
-      }
-      publishDiagnostics(browserRoot, {
-        state: "blocked",
-        targetReason: reason || "terminal",
-      });
     };
 
     function attemptResolution() {
-      runtime.attemptScheduled = false;
       if (runtime.releasePending || runtime.authorizedReady || runtime.terminallyBlocked) {
         return false;
       }
       if (!document.body) {
+        runtime.enterTerminal("semantic-race-body-unavailable");
         return false;
       }
-        const candidateResolution = resolveDocumentFromSeedCandidates(
-          document,
-          layouts,
-          seedCandidates,
-        );
-        if (candidateResolution.reason === "ambiguous-seed-candidate") {
-          runtime.enterTerminal("ambiguous-algumon-seed");
-          return false;
-        }
-        const resolution = candidateResolution.resolution;
-      if (!resolution.ok) {
-        document.documentElement.setAttribute(ATTR.state, "blocked");
-        document.documentElement.setAttribute(
-          ATTR.status,
-          `blocked-${resolution.role}-${resolution.reason}`.slice(0, 96)
-        );
-        publishDiagnostics(browserRoot, {
-          state: "blocked",
-          targetReason,
-          semanticProjectionCount: resolution.semanticProjectionCount || 0,
-        });
+      // The semantic tuple was proven while the publisher page was visible.
+      // Do not run the resolver a second time after the presentation lock: an
+      // AdGuard-injected stylesheet may not expose CSSOM synchronously there,
+      // and that race used to turn a valid handoff into a rollback.
+      const candidateResolution = runtime.verifiedTargetProof;
+      if (!candidateResolution?.ok || !candidateResolution.resolution?.ok) {
+        runtime.enterTerminal("semantic-proof-unavailable");
         return false;
       }
+      const resolution = candidateResolution.resolution;
       const nonce = createRunNonce(browserRoot);
       if (!nonce) {
-        document.documentElement.setAttribute(ATTR.state, "blocked");
-        document.documentElement.setAttribute(ATTR.status, "blocked-secure-nonce");
+        runtime.enterTerminal("secure-nonce");
         return false;
       }
       const state = applyRoleMarkers(
@@ -7836,25 +9373,12 @@
       runtime.activeNonce = nonce;
       runtime.projectionState = state;
       writeRuntimeGateStyle(styleElement, nonce, runtime);
-      if (!verifyOwnedState(document, state)) {
-        runtime.activeNonce = null;
-        runtime.projectionState = null;
-        writeRuntimeGateStyle(styleElement, null, runtime);
-        clearProtocolState(document);
-        document.documentElement.setAttribute(ATTR.status, "blocked-ownership-verification");
-        document.documentElement.setAttribute(ATTR.state, "blocked");
-        publishDiagnostics(browserRoot, {
-          state: "blocked",
-          targetReason,
-        });
+      if (!verifyOwnedMarkerState(document, state)) {
+        runtime.enterTerminal("ownership-verification");
         return false;
       }
       if (!runtimeGateStyleIntact(styleElement, runtime)) {
-        clearProtocolState(document);
-        runtime.activeNonce = null;
-        runtime.projectionState = null;
-        document.documentElement.setAttribute(ATTR.status, "blocked-runtime-style");
-        document.documentElement.setAttribute(ATTR.state, "blocked");
+        runtime.enterTerminal("runtime-style");
         return false;
       }
       if (runtime.discoveryObserver) {
@@ -7879,13 +9403,24 @@
         layoutAliases: resolution.layoutAliases,
         semanticProjectionCount: resolution.semanticProjectionCount,
       });
+      // Synchronous ownership and full-DOM cascade verification can consume
+      // most of the discovery deadline on publisher-heavy pages. Give the
+      // already-armed two-frame release proof its own complete bounded window.
+      armLockedActivationDeadline();
       return proveStandaloneCascadeRelease(
         browserRoot,
         runtime,
         styleElement,
         cascadeSnapshot,
         function releaseProvedProjection() {
-          if (!runtime.publishReadyProjectionDiagnostics()) return;
+          if (!runtime.bootstrapLock?.intact()) {
+            runtime.enterTerminal(
+              `bootstrap-inline-lock-tamper-${
+                runtime.bootstrapLock?.mismatchProperty?.() || "unknown"
+              }`,
+            );
+            return;
+          }
           runtime.releasePhase = "released";
           if (!runtime.bootstrapLock?.restoreInline()) {
             runtime.enterTerminal(
@@ -7899,38 +9434,38 @@
           document.documentElement.classList.remove(CLASS.lock);
           if (!runtime.verifyUnlockedCascadeRelease()) return;
           installIntegrityObserver(browserRoot, runtime, state, styleElement);
+          if (!runtime.publishReadyProjectionDiagnostics()) return;
+          if (typeof onResolved === "function" &&
+              onResolved(resolution) !== true) {
+            runtime.enterTerminal("algumon-referrer-invalidated");
+            return;
+          }
+          runtime.verifiedTargetProof = null;
           runtime.discardCascadeRecords?.();
-          if (typeof onReady === "function") onReady(resolution, candidateResolution.seed);
+          if (runtime.lockedActivationTimeoutId) {
+            nativeClearTimeout(browserRoot, runtime.lockedActivationTimeoutId);
+            runtime.lockedActivationTimeoutId = 0;
+          }
         },
       );
     }
 
-    function scheduleAttempt() {
-      if (runtime.attemptScheduled || runtime.releasePending ||
-          runtime.authorizedReady || runtime.terminallyBlocked) {
-        return;
-      }
-      runtime.attemptScheduled = true;
-      const schedule = browserRoot === RUNTIME_GLOBAL
-        ? NATIVE.setTimeout
-        : browserRoot.setTimeout.bind(browserRoot);
-      schedule(attemptResolution, 0);
-    }
-
     runtime.beginDiscovery = function beginDiscovery() {
-      if (runtime.discoveryObserver) {
+      if (runtime.releasePending || runtime.authorizedReady || runtime.terminallyBlocked) {
         return;
       }
-      runtime.discoveryObserver = createNativeMutationObserver(browserRoot, scheduleAttempt);
-      runtime.discoveryObserver.observe(document, {
-        subtree: true,
-        childList: true,
-        characterData: true,
-        attributes: true,
-      });
-      scheduleAttempt();
+      try {
+        armLockedActivationDeadline();
+        attemptResolution();
+      } catch (_error) {
+        runtime.enterTerminal("projection-activation-exception");
+      }
     };
     runtime.stop = function stopRuntime() {
+      if (runtime.releasePhase !== "released") {
+        runtime.enterTerminal("runtime-stop-before-release");
+        return;
+      }
       [
         runtime.discoveryObserver,
         runtime.integrityObserver,
@@ -7954,26 +9489,30 @@
         nativeCancelAnimationFrame(browserRoot, runtime.releaseProofFrameId);
         runtime.releaseProofFrameId = 0;
       }
-      if (runtime.releaseProbe?.isConnected) runtime.releaseProbe.remove();
+      if (runtime.releaseProbe?.isConnected) {
+        try {
+          runtime.releaseProbe.remove();
+        } catch (_error) {
+          try { runtime.releaseProbe.parentNode?.removeChild(runtime.releaseProbe); } catch (_fallbackError) {}
+        }
+      }
       runtime.releaseProbe = null;
       runtime.releasePending = false;
-      if (runtime.unsubscribeCssom) {
-        runtime.unsubscribeCssom();
-        runtime.unsubscribeCssom = null;
-      }
-      if (runtime.unsubscribeAdoptedStyleSheets) {
-        runtime.unsubscribeAdoptedStyleSheets();
-        runtime.unsubscribeAdoptedStyleSheets = null;
-      }
-      if (runtime.unsubscribeStyleSheetState) {
-        runtime.unsubscribeStyleSheetState();
-        runtime.unsubscribeStyleSheetState = null;
+      if (runtime.lockedActivationTimeoutId) {
+        nativeClearTimeout(browserRoot, runtime.lockedActivationTimeoutId);
+        runtime.lockedActivationTimeoutId = 0;
       }
       if (runtime.unsubscribeShadow) runtime.unsubscribeShadow();
       if (runtime.unsubscribeProjectionEvents) runtime.unsubscribeProjectionEvents();
+      if (runtime.shadowTracker) runtime.shadowTracker.uninstall();
     };
-    installBootstrapGuard(browserRoot, runtime, styleElement);
-    installCascadeGuard(browserRoot, runtime, styleElement);
+    try {
+      if (runtime.verifiedTargetProof?.resolution?.ok) runtime.bootstrapLock?.repairInline?.();
+      installBootstrapGuard(browserRoot, runtime, styleElement);
+      installCascadeGuard(browserRoot, runtime, styleElement);
+    } catch (_error) {
+      runtime.enterTerminal("runtime-setup-exception");
+    }
     return runtime;
   }
 
@@ -7995,89 +9534,277 @@
   }
 
   function installNavigationRevalidation(browserRoot, revalidate) {
-    const history = browserRoot.history;
-    ["pushState", "replaceState"].forEach(function wrapHistoryMethod(methodName) {
-      const original = browserRoot === RUNTIME_GLOBAL
-        ? methodName === "pushState"
-          ? NATIVE.historyPushState
-          : NATIVE.historyReplaceState
-        : history[methodName];
-      if (typeof original !== "function") {
+    if (!browserRoot) return null;
+    let stopped = false;
+    let pollTimeoutId = 0;
+    let observedHref = String(browserRoot.location?.href || "");
+    const subscriptions = [];
+    const stop = function stopNavigationRevalidation() {
+      if (stopped) return;
+      stopped = true;
+      if (pollTimeoutId) nativeClearTimeout(browserRoot, pollTimeoutId);
+      pollTimeoutId = 0;
+      subscriptions.forEach(function removeNavigationSubscription(subscription) {
+        try {
+          subscription[0].removeEventListener(
+            subscription[1],
+            subscription[2],
+            true,
+          );
+        } catch (_error) {
+          // Navigation cleanup must not leave a reader projection locked.
+        }
+      });
+      subscriptions.length = 0;
+    };
+    const revalidateSafely = function revalidateSafely() {
+      if (stopped) return;
+      try {
+        revalidate();
+      } catch (_error) {
+        stop();
+      }
+    };
+    const scheduleUrlPoll = function scheduleUrlPoll() {
+      if (stopped) return;
+      const protocolState = browserRoot.document?.documentElement?.getAttribute(ATTR.state);
+      if (protocolState !== "locked" && protocolState !== "ready") {
+        stop();
         return;
       }
-      const wrapper = function hotdealFocusHistoryWrapper() {
-        const result = NATIVE.reflectApply(original, history, arguments);
-        revalidate();
-        return result;
-      };
+      const currentHref = String(browserRoot.location?.href || "");
+      if (currentHref !== observedHref) {
+        observedHref = currentHref;
+        revalidateSafely();
+      }
       try {
-        NATIVE.defineProperty(history, methodName, {
-          configurable: false,
-          enumerable: false,
-          writable: false,
-          value: wrapper,
-        });
+        pollTimeoutId = nativeTimeout(browserRoot, scheduleUrlPoll, 500);
       } catch (_error) {
-        // The userscript-manager urlchange event remains the authoritative SPA trigger.
+        stop();
       }
-    });
-    const addEventListener = browserRoot === RUNTIME_GLOBAL
-      ? NATIVE.addEventListener
-      : browserRoot.EventTarget?.prototype?.addEventListener;
-    if (typeof addEventListener !== "function") return false;
-    NATIVE.reflectApply(addEventListener, browserRoot, ["urlchange", revalidate, true]);
-    NATIVE.reflectApply(addEventListener, browserRoot, ["hashchange", revalidate, true]);
-    NATIVE.reflectApply(addEventListener, browserRoot, ["popstate", revalidate, true]);
-    NATIVE.reflectApply(addEventListener, browserRoot, ["pageshow", function revalidateRestoredPage(event) {
-      if (event.persisted === true) {
-        revalidate();
+    };
+    const subscribe = function subscribeNavigation(type, listener) {
+      if (typeof browserRoot.addEventListener !== "function") return false;
+      try {
+        browserRoot.addEventListener(type, listener, true);
+        subscriptions.push([browserRoot, type, listener]);
+        return true;
+      } catch (_error) {
+        return false;
       }
-    }, true]);
-    return true;
+    };
+    try {
+      subscribe("urlchange", revalidateSafely);
+      subscribe("hashchange", revalidateSafely);
+      subscribe("popstate", revalidateSafely);
+      subscribe("pageshow", function revalidateRestoredPage(event) {
+        if (event.persisted === true) {
+          revalidateSafely();
+        }
+      });
+      scheduleUrlPoll();
+      return Object.freeze({ stop });
+    } catch (_error) {
+      stop();
+      return null;
+    }
+  }
+
+  function waitForAlgumonReferrer(browserRoot, activate) {
+    const document = browserRoot?.document;
+    let pollTimeoutId = 0;
+    let deadlineTimeoutId = 0;
+    let stopped = false;
+    const stop = function stopReferrerWait() {
+      if (stopped) return;
+      stopped = true;
+      if (pollTimeoutId) nativeClearTimeout(browserRoot, pollTimeoutId);
+      if (deadlineTimeoutId) nativeClearTimeout(browserRoot, deadlineTimeoutId);
+      pollTimeoutId = 0;
+      deadlineTimeoutId = 0;
+    };
+    const poll = function pollReferrer() {
+      if (stopped) return;
+      // At document-start Chromium can expose an empty referrer for the first
+      // task even though the navigation did originate at Algumon. Wait inside
+      // the existing bounded handoff window instead of permanently classifying
+      // that target as unverified before the document metadata is ready.
+      const referrer = String(document?.referrer || "");
+      if (canonicalAlgumonReferrerOrigin(referrer)) {
+        stop();
+        activate();
+        return;
+      }
+      if (referrer) {
+        stop();
+        return;
+      }
+      pollTimeoutId = nativeTimeout(
+        browserRoot,
+        poll,
+        ALGUMON_HANDOFF_POLL_INTERVAL_MS,
+      );
+    };
+    try {
+      deadlineTimeoutId = nativeTimeout(
+        browserRoot,
+        stop,
+        ALGUMON_HANDOFF_SETTLE_TIMEOUT_MS,
+      );
+      poll();
+    } catch (_error) {
+      stop();
+      return null;
+    }
+    return Object.freeze({ stop });
+  }
+
+  function waitForVerifiedTargetSemanticProof(browserRoot, contract, activate) {
+    const document = browserRoot.document;
+    let observer = null;
+    let timeoutId = 0;
+    let attemptScheduled = false;
+    let stopped = false;
+    const stop = function stopSemanticPreflight() {
+      if (stopped) return;
+      stopped = true;
+      if (observer) observer.disconnect();
+      observer = null;
+      if (timeoutId) nativeClearTimeout(browserRoot, timeoutId);
+      timeoutId = 0;
+      document.removeEventListener?.("DOMContentLoaded", scheduleAttempt);
+    };
+    const attempt = function attemptSemanticPreflight() {
+      attemptScheduled = false;
+      try {
+        if (stopped || !document.documentElement || !document.body) return false;
+        // Never mark a partial parser tree. Publisher DOMContentLoaded
+        // handlers must see their original markup, before our scheduled proof.
+        if (document.readyState === "loading") return false;
+        // Preflight runs outside the synchronous publisher measurement. A
+        // page-supplied copy of our private measurement flag is not proof of
+        // an active measurement and must not poison all later attempts.
+        if (document.documentElement.hasAttribute(ATTR.measure)) {
+          document.documentElement.removeAttribute(ATTR.measure);
+        }
+        const pathAndQuery = `${browserRoot.location.pathname}${browserRoot.location.search}`;
+        const routeLayouts = matchingLayouts(contract, pathAndQuery);
+        const layouts = routeLayouts.length ? routeLayouts : contract.layouts;
+        const currentArticleIdentity = referrerScopedArticleIdentity(
+          browserRoot.location,
+          contract.id,
+        );
+        if (!currentArticleIdentity) {
+          stop();
+          return false;
+        }
+        const approvedResolution = resolveDocument(document, layouts, null);
+        const resolution = approvedResolution.ok
+          ? approvedResolution
+          : resolveIndependentSemanticDocument(document, layouts);
+        if (!resolution.ok) return false;
+        const entryAuthority = readerEntryAuthority(browserRoot.location, document.referrer);
+        if (!entryAuthority) return false;
+        const candidateResolution = Object.freeze({
+          ok: true,
+          authority: approvedResolution.ok
+            ? `${entryAuthority}-approved-layout`
+            : `${entryAuthority}-independent-semantic-tuple`,
+          resolution,
+        });
+        stop();
+        activate(candidateResolution);
+        return true;
+      } catch (_error) {
+        // The presentation remains sealed; later DOM mutations may still
+        // supply a complete exact or independently proven projection.
+        return false;
+      }
+    };
+    const scheduleAttempt = function scheduleSemanticPreflight() {
+      if (stopped || attemptScheduled) return;
+      attemptScheduled = true;
+      nativeTimeout(browserRoot, attempt, 0);
+    };
+    const retryUnresolvedSemanticPreflight =
+      function retryUnresolvedSemanticPreflight() {
+        timeoutId = 0;
+        if (stopped) return;
+        publishDiagnostics(browserRoot, {
+          state: "locked",
+          targetReason: "awaiting-complete-semantic-projection",
+        });
+        scheduleAttempt();
+        timeoutId = nativeTimeout(
+          browserRoot,
+          retryUnresolvedSemanticPreflight,
+          SEMANTIC_PREFLIGHT_TIMEOUT_MS,
+        );
+      };
+    try {
+      document.addEventListener?.("DOMContentLoaded", scheduleAttempt, { once: true });
+      observer = createNativeMutationObserver(browserRoot, scheduleAttempt);
+      observer.observe(document, {
+        subtree: true,
+        childList: true,
+        characterData: true,
+        attributes: true,
+      });
+      timeoutId = nativeTimeout(
+        browserRoot,
+        retryUnresolvedSemanticPreflight,
+        SEMANTIC_PREFLIGHT_TIMEOUT_MS,
+      );
+      scheduleAttempt();
+    } catch (_error) {
+      stop();
+    }
+    return Object.freeze({ stop });
   }
 
   function start(browserRoot) {
     if (!browserRoot || !browserRoot.document || !browserRoot.location) {
       return { mode: "library" };
     }
-    if (isAlgumonHostname(browserRoot.location.hostname)) {
-      return {
-        mode: "algumon-seed-capture",
-        installed: installAlgumonSeedCapture(browserRoot),
-      };
-    }
     const contract = findSiteContract(browserRoot.location.hostname);
     if (!contract) {
       return { mode: "out-of-scope" };
     }
     const document = browserRoot.document;
-    lockWhenHtmlExists(document, function configureTarget(html, initialBootstrapLock) {
+    const beginVerifiedReaderGate = function beginVerifiedReaderGate() {
+      if (!referrerScopedArticleIdentity(browserRoot.location, contract.id)) {
+        publishDiagnostics(browserRoot, {
+          state: "inactive",
+          targetReason: "article-identity-required",
+        });
+        return false;
+      }
+      lockWhenHtmlExists(document, function configureTarget(html, initialBootstrapLock) {
       if (!initialBootstrapLock) {
-        html.classList.add(CLASS.lock);
-        html.setAttribute(ATTR.lock, "1");
-        html.setAttribute(ATTR.state, "blocked");
-        html.setAttribute(ATTR.status, "terminal-bootstrap-lock-unavailable");
-        html.style.setProperty("display", "none", "important");
+        restorePublisherPage(document, null, initialBootstrapLock);
         return;
       }
-      function configureTargetWithNavigationSeed(navigationSeed) {
-      const canonicalSeeds = navigationSeed ? Object.freeze([navigationSeed]) : Object.freeze([]);
-      const initialSeedCandidates = Object.freeze(canonicalSeeds.filter(function matchesTargetSite(seed) {
-        return seed.siteType === contract.id;
-      }));
-      let authorizedSeed = null;
-      let authorizedArticleIdentity = null;
-      let pendingArticleIdentity =
-        initialSeedCandidates.length > 0
-          ? articleIdentity(browserRoot.location, contract.id)
-          : null;
-      let activeRuntime = null;
-      let activeStyle = null;
-      let activeBootstrapLock = initialBootstrapLock;
-      let navigationTerminalGuardian = null;
-      let initialActivation = true;
-      let navigationTerminallyBlocked = false;
-      let navigationTerminalReason = null;
+      waitForVerifiedTargetSemanticProof(
+        browserRoot,
+        contract,
+        function beginVerifiedTargetActivation(verifiedTargetProof) {
+      function configureTargetWithReferrerProof(initialVerifiedProof) {
+        let authorizedArticleIdentity = null;
+        let pendingArticleIdentity = referrerScopedArticleIdentity(
+          browserRoot.location,
+          contract.id,
+        );
+        let activeRuntime = null;
+        let activeStyle = null;
+        let activeShadowTracker = null;
+        let activeBootstrapLock = initialBootstrapLock;
+        let verifiedProof = initialVerifiedProof;
+        let initialActivation = true;
+        let navigationTerminallyBlocked = false;
+        let navigationTerminalReason = null;
+        let navigationRevalidation = null;
+
+      try {
 
       function terminalNavigationBlock(reason) {
         if (navigationTerminallyBlocked) {
@@ -8085,35 +9812,21 @@
         }
         navigationTerminallyBlocked = true;
         navigationTerminalReason = reason || "blocked";
-        authorizedSeed = null;
         authorizedArticleIdentity = null;
         pendingArticleIdentity = null;
+        if (navigationRevalidation && !activeRuntime) {
+          navigationRevalidation.stop();
+          navigationRevalidation = null;
+        }
         if (activeRuntime) {
           activeRuntime.enterTerminal(navigationTerminalReason);
           return true;
         }
-        if (activeStyle) activeStyle.textContent = gateStyleText(null);
-        html.classList.add(CLASS.lock);
-        html.setAttribute(ATTR.lock, "1");
-        clearProtocolState(document);
-        html.classList.remove(CLASS.ready);
-        html.removeAttribute(ATTR.ready);
-        html.removeAttribute(ATTR.protocol);
-        html.setAttribute(ATTR.state, "blocked");
-        html.setAttribute(ATTR.status, `terminal-${navigationTerminalReason}`.slice(0, 96));
-        if (navigationTerminalGuardian) {
-          navigationTerminalGuardian.update(
-            `terminal-${navigationTerminalReason}`.slice(0, 96),
-          );
-        } else {
-          navigationTerminalGuardian = installPersistentTerminalGuardian(
-            browserRoot,
-            activeStyle,
-            `terminal-${navigationTerminalReason}`.slice(0, 96),
-          );
-        }
+        try { activeShadowTracker?.uninstall?.(); } catch (_error) {}
+        activeShadowTracker = null;
+        restorePublisherPage(document, activeStyle, activeBootstrapLock);
         publishDiagnostics(browserRoot, {
-          state: "blocked",
+          state: "inactive",
           targetReason: navigationTerminalReason,
         });
         return true;
@@ -8121,22 +9834,19 @@
 
       function activateCurrentLocation() {
         if (navigationTerminallyBlocked) {
-          return;
+          if (!activeRuntime?.resumeFrozenProjection?.()) return;
+          navigationTerminallyBlocked = false;
+          navigationTerminalReason = null;
+          authorizedArticleIdentity = activeRuntime.projectionArticleIdentity;
         }
         if (activeRuntime && activeRuntime.terminallyBlocked) {
-          html.classList.add(CLASS.lock);
-          html.setAttribute(ATTR.lock, "1");
-          html.classList.remove(CLASS.ready);
-          html.removeAttribute(ATTR.ready);
-          html.removeAttribute(ATTR.protocol);
-          html.setAttribute(ATTR.state, "blocked");
-          html.setAttribute(ATTR.status, "terminal-tamper");
           return;
         }
         const isInitialActivation = initialActivation;
         const pathAndQuery = `${browserRoot.location.pathname}${browserRoot.location.search}`;
-        const layouts = matchingLayouts(contract, pathAndQuery);
-        const currentArticleIdentity = articleIdentity(
+        const routeLayouts = matchingLayouts(contract, pathAndQuery);
+        const layouts = routeLayouts.length ? routeLayouts : contract.layouts;
+        const currentArticleIdentity = referrerScopedArticleIdentity(
           browserRoot.location,
           contract.id,
         );
@@ -8155,6 +9865,7 @@
           activeRuntime.stop();
           activeRuntime = null;
         }
+        activeShadowTracker = null;
         if (activeStyle) {
           activeStyle.remove();
           activeStyle = null;
@@ -8174,33 +9885,20 @@
           }
         }
 
-        const seedCandidates = isInitialActivation
-          ? initialSeedCandidates
-          : authorizedArticleIdentity &&
-              currentArticleIdentity === authorizedArticleIdentity
-            ? [authorizedSeed]
-            : pendingArticleIdentity &&
-                currentArticleIdentity === pendingArticleIdentity
-              ? [authorizedSeed]
-              : [];
-        if (seedCandidates.length === 0 || !currentArticleIdentity) {
+        if (verifiedProof?.ok !== true || !currentArticleIdentity) {
           initialActivation = false;
           terminalNavigationBlock(
-            canonicalSeeds.length > 0 && initialSeedCandidates.length === 0
-              ? "algumon-site-mismatch"
-              : seedCandidates.length === 0
-                ? "algumon-seed-required"
-                : "article-identity-required"
+            verifiedProof?.ok !== true
+              ? "algumon-referrer-proof-required"
+              : "article-identity-required"
           );
           return;
         }
-        if (layouts.length === 0) {
-          initialActivation = false;
-          terminalNavigationBlock("route-unapproved");
-          return;
-        }
         const evaluationLayouts = layouts;
-        const targetReason = "algumon-navigation-seed-known-route";
+        const entryAuthority = readerEntryAuthority(browserRoot.location, document.referrer);
+        const targetReason = routeLayouts.length
+          ? `${entryAuthority}-known-route`
+          : `${entryAuthority}-independent-route`;
         initialActivation = false;
         try {
           activeStyle = installRuntimeGateStyle(document);
@@ -8209,6 +9907,7 @@
           terminalNavigationBlock("gm-runtime-style-unavailable");
           return;
         }
+        activeShadowTracker = initializeShadowTracker(browserRoot);
         html.setAttribute(ATTR.status, `locked-${targetReason}`);
         publishDiagnostics(browserRoot, {
           state: "locked",
@@ -8218,29 +9917,75 @@
           browserRoot,
           contract,
           evaluationLayouts,
-          seedCandidates,
           activeStyle,
           activeBootstrapLock,
           targetReason,
-          function authorizeResolvedArticle(_resolution, resolvedSeed) {
-            authorizedSeed = resolvedSeed;
+          verifiedProof,
+          activeShadowTracker,
+          function authorizeResolvedArticle() {
+            if (!readerEntryAuthority(browserRoot.location, document.referrer)) {
+              return false;
+            }
             authorizedArticleIdentity = currentArticleIdentity;
             pendingArticleIdentity = null;
+            return true;
           }
         );
         activeRuntime.beginDiscovery();
+        verifiedProof = null;
       }
 
       activateCurrentLocation();
-      if (!installNavigationRevalidation(browserRoot, activateCurrentLocation)) {
-        terminalNavigationBlock("navigation-guard-unavailable");
+      navigationRevalidation = installNavigationRevalidation(
+        browserRoot,
+        activateCurrentLocation,
+      );
+      if (!navigationRevalidation && !activeRuntime?.terminallyBlocked) {
+        publishDiagnostics(browserRoot, {
+          state: activeRuntime?.authorizedReady ? "ready" : "locked",
+          targetReason: "navigation-poll-unavailable",
+        });
+      }
+      } catch (_error) {
+        if (activeRuntime) {
+          activeRuntime.enterTerminal("activation-exception");
+        } else {
+          try { activeShadowTracker?.uninstall?.(); } catch (_cleanupError) {}
+          activeShadowTracker = null;
+          restorePublisherPage(document, activeStyle, activeBootstrapLock);
+          publishDiagnostics(browserRoot, {
+            state: "inactive",
+            targetReason: "activation-exception",
+          });
+        }
       }
       }
-      configureTargetWithNavigationSeed(
-        consumeAlgumonNavigationSeed(browserRoot),
+      configureTargetWithReferrerProof(verifiedTargetProof);
+        },
       );
     });
-    return { mode: "reader-gate", site: contract.id };
+      return true;
+    };
+    const initialReferrer = String(document.referrer || "");
+    if (readerEntryAuthority(browserRoot.location, initialReferrer)) {
+      return {
+        mode: beginVerifiedReaderGate()
+          ? "reader-gate"
+          : "reader-gate-inactive",
+        site: contract.id,
+      };
+    }
+    if (initialReferrer) {
+      return {
+        mode: "reader-gate-inactive",
+        site: contract.id,
+      };
+    }
+    const referrerWait = waitForAlgumonReferrer(browserRoot, beginVerifiedReaderGate);
+    return {
+      mode: referrerWait ? "reader-gate-awaiting-referrer" : "reader-gate-inactive",
+      site: contract.id,
+    };
   }
 
   return Object.freeze({
@@ -8256,9 +10001,9 @@
     collectArticleTitleMetadata,
     pathPatternMatches,
     articleIdentity,
+    readerEntryAuthority,
     sameArticleNavigation,
-    captureAlgumonNavigationSeed,
-    consumeAlgumonNavigationSeed,
+    waitForAlgumonReferrer,
     scoreBodyFeatures,
     scoreCommentFeatures,
     decideCandidate,

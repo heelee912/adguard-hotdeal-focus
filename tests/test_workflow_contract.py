@@ -4,6 +4,7 @@ import json
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,6 +27,67 @@ CANDIDATE_QUEUE_HELPER = (
 GITIGNORE_LINES = set(
     (PROJECT_ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
 )
+
+
+class ProjectionVocabularyContractTests(unittest.TestCase):
+    def test_title_projection_is_metadata_derived_under_the_current_config_contract(
+        self,
+    ) -> None:
+        config_path = PROJECT_ROOT / "config" / "sites.json"
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        self.assertEqual(1, config["schema_version"])
+        self.assertRegex(config["metadata"]["version"], r"^\d+\.\d+\.\d+$")
+
+        title_modes = [
+            layout["role_projection"]["title"]["mode"]
+            for site in config["sites"]
+            for layout in site["layouts"]
+        ]
+        self.assertGreater(len(title_modes), 0)
+        self.assertEqual({"metadata-shallow"}, set(title_modes))
+
+        accepted = subprocess.run(
+            [
+                sys.executable,
+                str(PROJECT_ROOT / "scripts" / "build_filter.py"),
+                "--config",
+                str(config_path),
+                "--stdout",
+            ],
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(0, accepted.returncode, accepted.stdout + accepted.stderr)
+
+        legacy = json.loads(json.dumps(config))
+        legacy["sites"][0]["layouts"][0]["role_projection"]["title"]["mode"] = (
+            "seeded-shallow"
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            legacy_path = Path(temporary_directory) / "legacy-sites.json"
+            legacy_path.write_text(
+                json.dumps(legacy, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            rejected = subprocess.run(
+                [
+                    sys.executable,
+                    str(PROJECT_ROOT / "scripts" / "build_filter.py"),
+                    "--config",
+                    str(legacy_path),
+                    "--stdout",
+                ],
+                cwd=PROJECT_ROOT,
+                text=True,
+                capture_output=True,
+                timeout=30,
+                check=False,
+            )
+        self.assertNotEqual(0, rejected.returncode)
+        self.assertIn("must use metadata-shallow mode", rejected.stderr)
 
 
 class PublicRepositoryHygieneTests(unittest.TestCase):
@@ -352,7 +414,7 @@ const config = {
       applicable_profiles: ["desktop"],
       required_roles: ["title", "body", "comments"],
       role_projection: {
-        title: { mode: "seeded-shallow" },
+        title: { mode: "metadata-shallow" },
         body: { mode: "atomic-boundary", ignored: [] },
         product: {
           mode: "absent",
@@ -595,7 +657,7 @@ if (matchingApprovedPaths(
         self.assertIn("distinctCandidateProofs.size < 3", AUDIT_SCRIPT)
         self.assertIn('"currently-passing"', AUDIT_SCRIPT)
         self.assertIn('reason === "already-failed"', AUDIT_SCRIPT)
-        self.assertIn("resultIsSafelyReadableOrClosed", AUDIT_SCRIPT)
+        self.assertIn("resultIsSafelyReadableOrPublisherVisible", AUDIT_SCRIPT)
 
     def test_algumon_source_audit_is_weekly_bounded_and_never_self_dispatched(self) -> None:
         self.assertIn('- cron: "17 18 * * 0"', WATCH_WORKFLOW)
@@ -641,7 +703,7 @@ if (matchingApprovedPaths(
                     "visibleWithoutKeepCount",
                     "directVisibleTextLeakCount",
                     "coveredKeptCount",
-                    "flashFrameCount",
+                    "unsafeGateFrameCount",
                 )
             )
             return zero_leak and (
@@ -656,7 +718,7 @@ if (matchingApprovedPaths(
             "visibleWithoutKeepCount": 0,
             "directVisibleTextLeakCount": 0,
             "coveredKeptCount": 0,
-            "flashFrameCount": 0,
+            "unsafeGateFrameCount": 0,
         }
         newly_opened_with_noise = {
             **safely_closed,
@@ -838,6 +900,11 @@ if (runtimeExpectationForTarget({
   url: "https://example.com/deal/1",
 }) !== "direct-negative") throw new Error("sample was not direct-negative");
 if (runtimeExpectationForTarget({
+  source: "sample", readerRouteRegistered: true,
+  runtimeExpectation: "registered-positive",
+  url: "https://m.clien.net/service/board/jirum/19272662",
+}) !== "registered-positive") throw new Error("registered article was not positive");
+if (runtimeExpectationForTarget({
   source: "algumon-latest",
   runtimeExpectation: "relay-positive",
   algumon: { dealId: "1" },
@@ -852,33 +919,32 @@ try {
 } catch { mismatchedExpectationRejected = true; }
 if (!mismatchedExpectationRejected) throw new Error("expectation mismatch was accepted");
 
-const safeBlockedGate = {
+const safeInactivePublisherGate = {
   ready: false,
-  state: "blocked",
-  status: "terminal-algumon-seed-required",
-  blockedStateSafety: {
-    globalPaintLockIntact: true,
-    zeroVisibleContent: true,
+  state: null,
+  status: null,
+  inactivePublisherSafety: {
     passed: true,
+    diagnosticsInactiveOrAbsent: true,
   },
   paintProbe: {
-    sampleCount: 1,
-    flashFrameCount: 0,
+    sampleCount: 2,
+    unsafeGateFrameCount: 0,
     firstReadyFrame: null,
-    samples: [{ bodyElementCount: 3, ready: false, paintLockIntact: true }],
+    samples: [{ bodyElementCount: 3, ready: false, readerGateActive: false, paintLockIntact: false }],
   },
-  visibleWithoutKeepCount: 0,
-  directVisibleTextLeakCount: 0,
-  uncoveredUnmarkedCount: 999,
+  runtimeStyleCount: 0,
+  hotdealMarkerCount: 0,
+  publisherProtocolCleared: true,
 };
-if (blockedUserscriptGateFailures(safeBlockedGate).length !== 0) {
-  throw new Error("safe global-lock blocked state depended on ready marker coverage");
+if (blockedUserscriptGateFailures(safeInactivePublisherGate).length !== 0) {
+  throw new Error("safe publisher-visible inactive state was rejected");
 }
-const unsafeBlockedGate = structuredClone(safeBlockedGate);
-unsafeBlockedGate.blockedStateSafety.globalPaintLockIntact = false;
-if (!blockedUserscriptGateFailures(unsafeBlockedGate).some((failure) =>
-  failure.includes("global paint lock"))) {
-  throw new Error("missing blocked global paint lock was accepted");
+const unsafeInactivePublisherGate = structuredClone(safeInactivePublisherGate);
+unsafeInactivePublisherGate.paintProbe.samples[0].readerGateActive = true;
+if (!blockedUserscriptGateFailures(unsafeInactivePublisherGate).some((failure) =>
+  failure.includes("installed reader-gate"))) {
+  throw new Error("direct navigation reader-gate activation was accepted");
 }
 
 const site = {
@@ -1055,7 +1121,7 @@ for (const incomplete of [
         self.assertIn("justInTimeSignedRelayFetchesPerTarget: 1", AUDIT_SCRIPT)
         self.assertIn("profile?.allObservedRoutesCovered !== true", AUDIT_SCRIPT)
         self.assertIn("attempt.configuredPathMatchCount !== 1", AUDIT_SCRIPT)
-        self.assertIn('runtimeExpectation: "direct-negative"', AUDIT_SCRIPT)
+        self.assertIn('runtimeExpectation: "registered-positive"', AUDIT_SCRIPT)
         self.assertIn('runtimeExpectation: "relay-positive"', AUDIT_SCRIPT)
 
     def test_destination_network_response_and_access_lease_are_fail_closed(self) -> None:
@@ -1158,6 +1224,7 @@ if (waf.kind !== "source-or-infrastructure-failure" || waf.candidateEligible !==
 }
 if (
   candidateGenerationAllowed("direct-negative", article, 0) ||
+  candidateGenerationAllowed("registered-positive", article, 0) ||
   candidateGenerationAllowed("relay-positive", waf, 0) ||
   candidateGenerationAllowed("relay-positive", article, 1) ||
   !candidateGenerationAllowed("relay-positive", article, 0)
@@ -1322,11 +1389,11 @@ try {
   }
   await page.setContent(`<!doctype html><body><main style="height:2000px">article</main>
     <script>
-      addEventListener("scroll", () => {
+      window.setInterval(() => {
         const growth = document.createElement("div");
         growth.style.height = "1000px";
         document.body.append(growth);
-      });
+      }, 20);
       window.__hdfInfiniteScrollFixtureReady = true;
     </script></body>`);
   await page.waitForFunction(() => window.__hdfInfiniteScrollFixtureReady === true);
@@ -1384,6 +1451,55 @@ try {
 
 
 class BehaviorAuditContractTests(unittest.TestCase):
+    def test_regression_fixture_coverage_is_profile_and_vintage_complete(self) -> None:
+        audit_uri = (PROJECT_ROOT / "scripts" / "audit_pages.mjs").as_uri()
+        script = r"""
+import { fixtureCoverageFailures } from %s;
+
+const config = {
+  sites: [{
+    id: "example",
+    layouts: [{
+      id: "deal",
+      applicable_profiles: ["desktop", "mobile"],
+    }],
+  }],
+};
+const desktopOnly = [
+  { id: "desktop-june", site_id: "example", layout_id: "deal", profile: "desktop", vintage: "june" },
+  { id: "desktop-july", site_id: "example", layout_id: "deal", profile: "desktop", vintage: "july" },
+];
+const missingMobile = fixtureCoverageFailures(desktopOnly, config);
+if (!missingMobile.includes("example/deal/mobile: missing june regression fixture") ||
+    !missingMobile.includes("example/deal/mobile: missing july regression fixture")) {
+  throw new Error(`mobile profile coverage was not required: ${JSON.stringify(missingMobile)}`);
+}
+const complete = desktopOnly.concat([
+  { id: "mobile-june", site_id: "example", layout_id: "deal", profile: "mobile", vintage: "june" },
+  { id: "mobile-july", site_id: "example", layout_id: "deal", profile: "mobile", vintage: "july" },
+]);
+if (fixtureCoverageFailures(complete, config).length !== 0) {
+  throw new Error("complete desktop and mobile fixture coverage was rejected");
+}
+const incompatible = complete.concat([
+  { id: "tablet-june", site_id: "example", layout_id: "deal", profile: "tablet", vintage: "june" },
+]);
+if (!fixtureCoverageFailures(incompatible, config).includes(
+  "example/deal/tablet: fixture profile is not applicable",
+)) {
+  throw new Error("inapplicable fixture profile was accepted");
+}
+""" % json.dumps(audit_uri)
+        completed = subprocess.run(
+            ["node", "--input-type=module", "--eval", script],
+            cwd=PROJECT_ROOT,
+            text=True,
+            capture_output=True,
+            timeout=30,
+            check=False,
+        )
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+
     def test_gate_snapshot_waits_for_the_atomic_released_protocol_state(self) -> None:
         gate = AUDIT_SCRIPT[
             AUDIT_SCRIPT.index("async function auditUserscriptGate"):
@@ -1404,21 +1520,34 @@ class BehaviorAuditContractTests(unittest.TestCase):
         self.assertIn(".length === 1", gate)
         self.assertNotIn("hotdeal-audit-marker-projection", gate)
 
-    def test_edge_gate_uses_complete_css_and_terminal_reason_prefixes(self) -> None:
+    def test_edge_gate_requires_exact_reader_recovery_and_inactive_direct_visits(self) -> None:
         edge = AUDIT_SCRIPT[
             AUDIT_SCRIPT.index("async function auditSyntheticEdgeFixtures"):
             AUDIT_SCRIPT.index("function fixtureCoverageFailures")
         ]
         self.assertIn('id: "late-outside-inline-important-ad-is-terminal"', edge)
-        self.assertIn('expectedStatusPrefix: "terminal-cascade-visible-leak"', edge)
-        self.assertIn('dialogDisplay: dialogStyle?.display ?? null', edge)
-        self.assertIn("fixtureResult.lockedPaint.blankPixelMatch", edge)
-        self.assertIn('lockedState.rootVisibility !== "hidden"', edge)
-        self.assertIn('lockedState.runtimeLock !== "1"', edge)
+        # Full publisher rollback exposes advertisements/navigation and is not
+        # the reader-only product contract. Recovery must preserve accepted
+        # nodes and text, retain cascade proof, and contain noise continuously.
+        self.assertIn("expectProjectionRecovery: true", edge)
+        self.assertIn("original.bodyTextNodes.every", edge)
+        self.assertIn("original.body === document.querySelector", edge)
+        self.assertIn("commentsPreserved:", edge)
+        self.assertIn("edgeState.visibleNoiseCount !== 0", edge)
+        self.assertIn("edgeState.unsafeGateFrameCount !== 0", edge)
+        self.assertIn("expectReaderProjection: true", edge)
+        self.assertIn("state.originalContentPreserved", edge)
+        self.assertIn("state.visibleUnkeptCount !== 0", edge)
+        self.assertIn('expectedProjectionReason: "frozen-navigation-identity"', edge)
+        self.assertIn("fixture.expectNavigationReturn", edge)
+        self.assertIn("unsafeGateFrameCount", edge)
+        self.assertNotIn("lockedPixelProbe", edge)
         self.assertIn(
-            '!String(edgeState.status ?? "").startsWith(fixture.expectedStatusPrefix)',
+            "edgeState.publisherRollback",
             edge,
         )
+        self.assertIn("rollbackDiagnostics?.targetReason", edge)
+        self.assertIn("runtimeStyleCount === 0", edge)
 
 
 class ReleaseManifestCanonicalHashTests(unittest.TestCase):

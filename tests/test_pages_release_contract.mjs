@@ -35,11 +35,15 @@ function userscript(version = "1.2.3") {
 // @version      ${version}
 // @downloadURL  ${installUrl}
 // @updateURL    ${installUrl}
+// @match        https://*.clien.net/*
+// @match        https://*.ppomppu.co.kr/*
+// @match        https://*.ruliweb.com/*
+// @match        https://*.quasarzone.com/*
+// @match        https://*.eomisae.co.kr/*
+// @match        https://*.zod.kr/*
+// @match        https://*.arca.live/*
 // @run-at       document-start
 // @grant        GM_addElement
-// @grant        GM_getValue
-// @grant        GM_setValue
-// @grant        GM_deleteValue
 // @grant        window.onurlchange
 // ==/UserScript==
 (() => {})();

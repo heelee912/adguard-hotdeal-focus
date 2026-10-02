@@ -102,7 +102,7 @@ function baseConfig(productCardinality) {
           requiredProduct ? ["product"] : [],
         ),
         role_projection: {
-          title: { mode: "seeded-shallow" },
+          title: { mode: "metadata-shallow" },
           body: { mode: "atomic-boundary", ignored: [] },
           product: requiredProduct
             ? {

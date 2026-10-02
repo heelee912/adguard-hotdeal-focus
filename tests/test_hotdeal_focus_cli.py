@@ -44,7 +44,6 @@ def release_bundle():
     userscript = b"""// ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @version      1.2.3
-// @match        https://www.algumon.com/*
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
 // @match        https://*.ruliweb.com/*
@@ -54,9 +53,6 @@ def release_bundle():
 // @match        https://*.arca.live/*
 // @run-at       document-start
 // @grant        GM_addElement
-// @grant        GM_getValue
-// @grant        GM_setValue
-// @grant        GM_deleteValue
 // @grant        window.onurlchange
 // @downloadURL  https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 // @updateURL    https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
@@ -327,6 +323,40 @@ class ReleaseIntegrityTests(unittest.TestCase):
         self.assertEqual([item["path"] for item in records], [
             "hotdeal-focus.user.js", "release-manifest.json"
         ])
+
+    def test_reader_gate_rejects_source_scope_and_legacy_storage_privileges(self):
+        _, _, artifacts = release_bundle()
+        source = artifacts["hotdeal-focus.user.js"]
+        invalid_sources = {
+            "algumon match": source.replace(
+                b"// @match        https://*.clien.net/*",
+                b"// @match        https://www.algumon.com/*\n"
+                b"// @match        https://*.clien.net/*",
+            ),
+            "algumon include": source.replace(
+                b"// @match        https://*.clien.net/*",
+                b"// @include      https://www.algumon.com/*\n"
+                b"// @match        https://*.clien.net/*",
+            ),
+            "legacy get grant": source.replace(
+                b"// @grant        window.onurlchange",
+                b"// @grant        GM_getValue\n"
+                b"// @grant        window.onurlchange",
+            ),
+            "legacy set grant": source.replace(
+                b"// @grant        window.onurlchange",
+                b"// @grant        GM_setValue\n"
+                b"// @grant        window.onurlchange",
+            ),
+            "legacy delete grant": source.replace(
+                b"// @grant        window.onurlchange",
+                b"// @grant        GM_deleteValue\n"
+                b"// @grant        window.onurlchange",
+            ),
+        }
+        for label, invalid in invalid_sources.items():
+            with self.subTest(label=label), self.assertRaises(cli.IntegrityFailure):
+                cli._reader_gate_v2_contract(invalid)
 
     def test_release_bundle_rejects_raw_hash_mismatch(self):
         _, manifest_bytes, artifacts = release_bundle()
@@ -1097,6 +1127,9 @@ class CloudContractTests(unittest.TestCase):
         )
         self.assertTrue(
             pull_request["parameters"]["required_review_thread_resolution"]
+        )
+        self.assertTrue(
+            pull_request["parameters"]["require_extra_approval_for_unattributed_changes"]
         )
         self.assertEqual(
             pull_request["parameters"]["allowed_merge_methods"],

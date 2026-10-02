@@ -49,6 +49,19 @@ RELEASE_USERSCRIPT_NAME = "AdGuard Hotdeal Focus Reader Gate"
 RELEASE_USERSCRIPT_NAMESPACE = (
     "https://github.com/heelee912/adguard-hotdeal-focus"
 )
+RELEASE_USERSCRIPT_MATCHES = (
+    "https://*.clien.net/*",
+    "https://*.ppomppu.co.kr/*",
+    "https://*.ruliweb.com/*",
+    "https://*.quasarzone.com/*",
+    "https://*.eomisae.co.kr/*",
+    "https://*.zod.kr/*",
+    "https://*.arca.live/*",
+)
+RELEASE_USERSCRIPT_GRANTS = (
+    "GM_addElement",
+    "window.onurlchange",
+)
 
 
 def sha256_bytes(content: bytes) -> str:
@@ -290,14 +303,34 @@ def validate_userscript_release_metadata(content: bytes) -> None:
         values = re.findall(rf"^//\s*@{re.escape(key)}\s+(.+?)\s*$", source, re.MULTILINE)
         if values != [expected]:
             raise ConfigError(f"userscript @{key} must be exactly {expected}")
-    grants = re.findall(r"^//\s*@grant\s+(.+?)\s*$", source, re.MULTILINE)
-    if grants != [
-        "GM_addElement",
-        "GM_getValue",
-        "GM_setValue",
-        "GM_deleteValue",
-        "window.onurlchange",
-    ]:
+    match_directives = re.findall(
+        r"^//[ \t]+@match\b[^\r\n]*$", source, re.MULTILINE
+    )
+    matches = re.findall(
+        r"^//[ \t]+@match[ \t]+(\S+)[ \t]*$", source, re.MULTILINE
+    )
+    if (
+        len(match_directives) != len(matches)
+        or matches != list(RELEASE_USERSCRIPT_MATCHES)
+    ):
+        raise ConfigError(
+            "userscript matches must be exactly the seven target-domain scopes"
+        )
+    includes = re.findall(
+        r"^//[ \t]+@include\b[^\r\n]*$", source, re.MULTILINE
+    )
+    if includes:
+        raise ConfigError("userscript @include is forbidden in the standalone release")
+    grant_directives = re.findall(
+        r"^//[ \t]+@grant\b[^\r\n]*$", source, re.MULTILINE
+    )
+    grants = re.findall(
+        r"^//[ \t]+@grant[ \t]+(\S+)[ \t]*$", source, re.MULTILINE
+    )
+    if (
+        len(grant_directives) != len(grants)
+        or grants != list(RELEASE_USERSCRIPT_GRANTS)
+    ):
         raise ConfigError("userscript grants must be the exact standalone contract")
     for forbidden_key in ("connect", "require", "resource"):
         if re.search(rf"^//\s*@{forbidden_key}\s+", source, re.MULTILINE):
