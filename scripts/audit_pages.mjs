@@ -60,6 +60,13 @@ const DESTINATION_CHALLENGE_SETTLE_MAX_MS = 12_000;
 const NETWORK_POLICY_MAX_REMOTE_HOSTS = 128;
 const NETWORK_POLICY_MAX_REMOTE_REQUESTS = 4_096;
 const NETWORK_POLICY_MAX_REDIRECT_ANCESTORS = 32;
+// Dedicated noise origins observed in cloud audit 37075520049, with the Google
+// ad origins also identified by the existing AdGuard delivery policy. General
+// Google origins and publisher paths named "analytics" are not evidence of noise.
+const OBSERVED_DEDICATED_NOISE_HOSTS = new Set([
+  "analytics.google.com", "sync.adkernel.com",
+  "pagead2.googlesyndication.com", "securepubads.g.doubleclick.net",
+]);
 const PINNED_PROXY_MAX_CONNECT_REQUESTS = 1_024;
 const PINNED_PROXY_MAX_ACTIVE_TUNNELS = 256;
 const PINNED_PROXY_MAX_TRANSFER_BYTES = 512 * 1024 * 1024;
@@ -1449,22 +1456,31 @@ function networkFidelityFailures(
   const isRequiredRequest = (entry) => entry.isMainNavigation === true ||
     (entry.urlSha256 && requiredResourceDigests.has(entry.urlSha256)) ||
     (entry.redirectAncestorUrlSha256s ?? []).some((digest) => requiredResourceDigests.has(digest));
+  const hasIndependentNoiseEvidence = (entry) =>
+    /^[a-f0-9]{64}$/u.test(entry.urlSha256 ?? "") &&
+    OBSERVED_DEDICATED_NOISE_HOSTS.has(normalizedHostname(entry.hostname)) &&
+    entry.redirectAncestryStatus === "complete" &&
+    Array.isArray(entry.redirectAncestorUrlSha256s) && entry.redirectAncestorUrlSha256s.length === 0;
+  const isDataRequestType = (type) => type === "fetch" || type === "xhr";
   const hasRequiredFailure = (requestKey, hostKey) => {
     const requests = networkPolicyEvidence?.[requestKey];
     if (Array.isArray(requests)) {
       return requests.some((entry) => isRequiredRequest(entry) ||
+        (isDataRequestType(entry.requestType) && !hasIndependentNoiseEvidence(entry)) ||
         // Older callers without exact URL evidence keep the conservative host check.
         (!entry.urlSha256 && isRequiredHost(entry.hostname)));
     }
     return (networkPolicyEvidence?.[hostKey] ?? []).some((entry) =>
-      entry.mainNavigationCount > 0 || isRequiredHost(entry.hostname));
+      entry.mainNavigationCount > 0 || isRequiredHost(entry.hostname) ||
+      (entry.requestTypes ?? []).some(isDataRequestType));
   };
   const lifecycleContainsRequiredRequest = (key, expectedCount) => {
     const entries = networkPolicyEvidence?.[key];
     // Legacy/missing identities cannot prove an unfinished request optional.
     return !Number.isSafeInteger(expectedCount) || expectedCount < 0 ||
       !Array.isArray(entries) || entries.length !== expectedCount || entries.some((entry) => !entry.urlSha256 ||
-      (entry.redirectAncestryStatus && entry.redirectAncestryStatus !== "complete") || isRequiredRequest(entry));
+      (entry.redirectAncestryStatus && entry.redirectAncestryStatus !== "complete") ||
+      isRequiredRequest(entry) || !hasIndependentNoiseEvidence(entry));
   };
   if (
     networkPolicyEvidence?.mode === "bounded-public-https-fidelity" &&

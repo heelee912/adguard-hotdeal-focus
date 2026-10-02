@@ -373,8 +373,8 @@ function testOptionalFailuresStayObservedWhileArticleResourcesRemainRequired() {
     false,
     "https://ads.example/collect/private-token?secret=value",
   );
-  recorder.recordAllowedResponseFailure("api.example", "fetch", 503, false,
-    "https://api.example/analytics?secret=value");
+  recorder.recordAllowedResponseFailure("analytics.google.com", "fetch", 503, false,
+    "https://analytics.google.com/fixture?secret=value", { status: "complete", ancestorUrlSha256s: [] });
 
   const evidence = recorder.snapshot();
   assert.deepEqual(evidence.failedAllowedRequestHosts, [{
@@ -385,7 +385,7 @@ function testOptionalFailuresStayObservedWhileArticleResourcesRemainRequired() {
     reasons: ["net::ERR_CONNECTION_RESET"],
   }]);
   assert.deepEqual(evidence.failedAllowedResponseHosts, [{
-    hostname: "api.example",
+    hostname: "analytics.google.com",
     count: 1,
     mainNavigationCount: 0,
     requestTypes: ["fetch"],
@@ -395,10 +395,10 @@ function testOptionalFailuresStayObservedWhileArticleResourcesRemainRequired() {
   assert.equal(JSON.stringify(evidence).includes("private-token"), false);
   assert.equal(JSON.stringify(evidence).includes("secret=value"), false);
   const failures = networkFidelityFailures(evidence, [], {
-    hosts: ["ads.example", "api.example"],
+    hosts: ["ads.example", "analytics.google.com"],
     urlSha256s: [
       networkResourceUrlSha256("https://ads.example/collect/private-token?secret=value"),
-      networkResourceUrlSha256("https://api.example/analytics?secret=value"),
+      networkResourceUrlSha256("https://analytics.google.com/fixture?secret=value"),
     ],
   });
   assert.ok(failures.includes("an allowed remote request failed before a complete response"));
@@ -558,8 +558,9 @@ async function testStylesheetDependenciesPreserveImportedCssAndFonts() {
     const failed = createNetworkPolicyEvidenceRecorder();
     failed.recordAllowedResponseFailure(new URL(url).hostname, type.toLowerCase(), 503, false, url);
     assert.deepEqual(networkFidelityFailures({ ...failed.snapshot(),
-      stylesheetDependencies: dependencies.snapshot() }, [], roleEvidence), [],
-    "unrelated same-host, other-frame, and non-CSS/font resources stay optional");
+      stylesheetDependencies: dependencies.snapshot() }, [], roleEvidence),
+    type === "XHR" ? ["an allowed remote response returned HTTP 4xx or 5xx"] : [],
+    "unrelated presentation resources stay optional, but unknown data API failures require independent noise proof");
   }
   const serialized = JSON.stringify(dependencies.snapshot());
   for (const token of ["private=", "root-token", "redirect-token", "theme-token", "font-token", ".css", ".woff2"]) {
@@ -839,9 +840,11 @@ async function testOptionalLifecycleActivityStaysObservedWithoutFailingArticle()
   const requiredImage = "https://article.example/product.webp";
   const roleEvidence = { hosts: ["article.example"], urlSha256s: [networkResourceUrlSha256(requiredImage)] };
   const recorder = createNetworkPolicyEvidenceRecorder();
-  const pending = Array.from({ length: 3 }, (_, index) => recorder.reserveRemoteRequest("article.example", {
+  const directRequest = { status: "complete", ancestorUrlSha256s: [] };
+  const pending = Array.from({ length: 3 }, (_, index) => recorder.reserveRemoteRequest("analytics.google.com", {
     requestType: "fetch", isMainNavigation: false,
-    urlText: `https://article.example/analytics-${index}?private=pending-token`,
+    urlText: `https://analytics.google.com/fixture-${index}?private=pending-token`,
+    redirectEvidence: directRequest,
   }));
   const sealed = await recorder.sealAndDrain({ quietWindowMs: 1, timeoutMs: 0 });
   assert.equal(sealed.activeRemoteRequestCount, 3);
@@ -851,15 +854,15 @@ async function testOptionalLifecycleActivityStaysObservedWithoutFailingArticle()
   assert.equal(sealed.drainTimeoutCount, 1);
   assert.deepEqual(networkFidelityFailures(sealed, ["article.example"], roleEvidence), [],
     "three unrelated active analytics requests do not invalidate a complete article");
-  const late = recorder.reserveRemoteRequest("article.example", { requestType: "fetch", isMainNavigation: false,
-    urlText: "https://article.example/analytics-late?private=late-token" });
+  const late = recorder.reserveRemoteRequest("sync.adkernel.com", { requestType: "image", isMainNavigation: false,
+    urlText: "https://sync.adkernel.com/fixture?private=late-token", redirectEvidence: directRequest });
   assert.equal(late.allowed, false, "the sealed network boundary still denies the late request");
-  recorder.recordBlocked("article.example", "fetch", late.reason, false);
+  recorder.recordBlocked("sync.adkernel.com", "image", late.reason, false);
   const observed = recorder.snapshot();
   assert.equal(observed.lateRequestCount, 1);
   assert.equal(observed.lateRequests.length, 1);
   assert.deepEqual(networkFidelityFailures(observed, ["article.example"], roleEvidence), [],
-    "same-host late analytics use exact resource identity, not the old host-only failure path");
+    "independently observed dedicated noise origins stay optional while sealed requests stay blocked");
   for (const token of ["analytics-", "pending-token", "late-token"]) {
     assert.equal(JSON.stringify(observed).includes(token), false);
   }
@@ -878,7 +881,8 @@ async function testOptionalLifecycleActivityStaysObservedWithoutFailingArticle()
     [{ requestType: "image", urlText: "https://cdn.example/final.webp", redirectEvidence: {
       ancestorUrlSha256s: [networkResourceUrlSha256(requiredImage)], status: "complete",
     } }, true],
-    [{ requestType: "image", urlText: "https://cdn.example/ad.webp" }, false],
+    [{ requestType: "image", urlText: "https://cdn.example/ad.webp" }, true],
+    [{ requestType: "fetch", urlText: "https://analytics.google.com/fixture", redirectEvidence: directRequest }, false],
   ]) {
     const scoped = createNetworkPolicyEvidenceRecorder();
     const reservation = scoped.reserveRemoteRequest(new URL(resource.urlText).hostname, resource);
@@ -923,9 +927,91 @@ async function testFailedNavigationRetainsNetworkEvidenceWithoutRetry() {
   assert.equal(JSON.stringify(failedCapture).includes("secret-query"), false);
 }
 
+async function testPendingArticleApisRequireIndependentNoiseProof() {
+  const articleUrl = "https://article.example/deal/7";
+  const direct = { status: "complete", ancestorUrlSha256s: [] };
+  for (const [url, requestType, optional] of [
+    ["https://article.example/api/comments", "xhr", false],
+    ["https://article.example/api/article", "fetch", false],
+    ["https://article.example/analytics", "fetch", false],
+    ["https://cdn.example/unknown-content.webp", "image", false],
+    ["https://www.google.com/fixture", "fetch", false],
+    ["https://analytics.google.com.evil.example/fixture", "fetch", false],
+    ["https://analytics.google.com/fixture", "fetch", true],
+    ["https://sync.adkernel.com/fixture", "image", true],
+    ["https://pagead2.googlesyndication.com/fixture", "fetch", true],
+    ["https://securepubads.g.doubleclick.net/fixture", "fetch", true],
+  ]) {
+    const recorder = createNetworkPolicyEvidenceRecorder();
+    const resource = { urlText: url, requestType, redirectEvidence: direct };
+    const active = recorder.reserveRemoteRequest(new URL(url).hostname, resource);
+    const sealed = await recorder.sealAndDrain({ quietWindowMs: 1, timeoutMs: 0 });
+    const roles = { hosts: ["article.example"], urlSha256s: [networkResourceUrlSha256(articleUrl)] };
+    const failures = networkFidelityFailures(sealed, ["article.example"], roles);
+    assert.equal(failures.includes("network evidence sealed with active remote requests"), !optional, url);
+    assert.equal(failures.includes("remote requests did not drain inside the fail-closed deadline"), !optional, url);
+    finishReservation(active);
+    recorder.reserveRemoteRequest(new URL(url).hostname, resource);
+    assert.equal(networkFidelityFailures(recorder.snapshot(), ["article.example"], roles)
+      .includes("remote requests appeared after the network evidence seal"), !optional, url);
+    if (optional) {
+      assert.ok(networkFidelityFailures(sealed, [], { urlSha256s: [networkResourceUrlSha256(url)] })
+        .includes("network evidence sealed with active remote requests"),
+      "an exact retained resource outranks noise-origin evidence");
+    }
+  }
+  for (const ancestorUrl of ["https://article.example/api/comments", articleUrl]) {
+    const recorder = createNetworkPolicyEvidenceRecorder();
+    recorder.reserveRemoteRequest("analytics.google.com", { requestType: "fetch",
+      urlText: "https://analytics.google.com/fixture", redirectEvidence: {
+        status: "complete", ancestorUrlSha256s: [networkResourceUrlSha256(ancestorUrl)],
+      } });
+    const sealed = await recorder.sealAndDrain({ quietWindowMs: 1, timeoutMs: 0 });
+    assert.ok(networkFidelityFailures(sealed, [], { urlSha256s: [networkResourceUrlSha256(articleUrl)] })
+      .includes("network evidence sealed with active remote requests"),
+    "a final noise host alone cannot prove a redirected publisher API optional");
+  }
+}
+
+function testFailedArticleApisRequireIndependentNoiseProof() {
+  const direct = { status: "complete", ancestorUrlSha256s: [] };
+  for (const [url, requestType, optional] of [
+    ["https://article.example/api/comments", "xhr", false],
+    ["https://article.example/api/article", "fetch", false],
+    ["https://api.example/comments", "fetch", false],
+    ["https://article.example/analytics", "xhr", false],
+    ["https://analytics.google.com/fixture", "fetch", true],
+    ["https://securepubads.g.doubleclick.net/fixture", "xhr", true],
+    ["https://cdn.example/unreferenced.webp", "image", true],
+    ["https://cdn.example/unreferenced.css", "stylesheet", true],
+    ["https://cdn.example/unreferenced.js", "script", true],
+  ]) {
+    const recorder = createNetworkPolicyEvidenceRecorder();
+    recorder.recordAllowedRequestFailure(new URL(url).hostname, requestType, "net::ERR_FAILED", false, url, direct);
+    recorder.recordAllowedResponseFailure(new URL(url).hostname, requestType, 500, false, url, direct);
+    const failures = networkFidelityFailures(recorder.snapshot(), ["article.example"], {
+      hosts: ["article.example"], urlSha256s: [],
+    });
+    assert.equal(failures.includes("an allowed remote request failed before a complete response"), !optional, url);
+    assert.equal(failures.includes("an allowed remote response returned HTTP 4xx or 5xx"), !optional, url);
+  }
+  const redirectedApi = createNetworkPolicyEvidenceRecorder();
+  redirectedApi.recordAllowedResponseFailure("analytics.google.com", "xhr", 500, false,
+    "https://analytics.google.com/fixture", { status: "complete",
+      ancestorUrlSha256s: [networkResourceUrlSha256("https://article.example/api/comments")],
+    });
+  assert.ok(networkFidelityFailures(redirectedApi.snapshot()).includes(
+    "an allowed remote response returned HTTP 4xx or 5xx"), "publisher API redirects do not become noise by their final host");
+  assert.ok(networkFidelityFailures({ failedAllowedResponseHosts: [
+    { hostname: "api.example", mainNavigationCount: 0, requestTypes: ["xhr"] },
+  ] }).includes("an allowed remote response returned HTTP 4xx or 5xx"),
+  "legacy host-only evidence cannot independently classify an API failure as noise");
+}
+
 async function testLifecycleIdentityCardinalityFailsClosed() {
-  const optional = { hostname: "ads.example", requestType: "fetch", isMainNavigation: false,
-    urlSha256: networkResourceUrlSha256("https://ads.example/analytics") };
+  const optional = { hostname: "analytics.google.com", requestType: "fetch", isMainNavigation: false,
+    urlSha256: networkResourceUrlSha256("https://analytics.google.com/fixture"),
+    redirectAncestryStatus: "complete", redirectAncestorUrlSha256s: [] };
   for (const [counter, entries, failure] of [
     ["activeRemoteRequestCount", "activeRemoteRequests", "network evidence sealed with active remote requests"],
     ["lateRequestCount", "lateRequests", "remote requests appeared after the network evidence seal"],
@@ -1139,6 +1225,8 @@ async function main() {
   await testSealDrainTimeoutFailsClosed();
   await testOptionalLifecycleActivityStaysObservedWithoutFailingArticle();
   await testFailedNavigationRetainsNetworkEvidenceWithoutRetry();
+  await testPendingArticleApisRequireIndependentNoiseProof();
+  testFailedArticleApisRequireIndependentNoiseProof();
   await testLifecycleIdentityCardinalityFailsClosed();
   testSpecialIpRanges();
   testConnectAuthorityParser();
