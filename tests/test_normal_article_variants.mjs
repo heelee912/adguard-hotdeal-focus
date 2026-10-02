@@ -118,7 +118,8 @@ try {
   const contracts = JSON.parse(fs.readFileSync(
     new URL("../config/sites.json", import.meta.url), "utf8",
   )).sites;
-  for (const id of ["clien-jirum-july", "ppomppu-mobile-july", "ruliweb-hotdeal-july", "eomisae-hotdeal-july"]) {
+  for (const id of ["clien-jirum-july", "ppomppu-mobile-july", "ruliweb-hotdeal-july", "eomisae-hotdeal-july",
+    "quasarzone-market-july", "quasarzone-market-mobile-july"]) {
     const sample = regressions.find(item => item.id === id);
     const layout = contracts.find(site => site.id === sample.site_id).layouts
       .find(item => item.id === sample.layout_id);
@@ -159,6 +160,17 @@ try {
       assert.equal(evidence.policyProposal, null);
       assert.equal(evidence.algumon, null);
       assert.equal(await page.locator("body").innerHTML(), before, `${id}: source DOM must stay untouched`);
+      if (sample.site_id === "quasarzone") {
+        const siblingId = sample.layout_id === "market" ? "market-mobile" : "market";
+        const siblingOracle = await semanticOracle(page, source, sample.site_id, siblingId,
+          layout.required_roles, target);
+        const siblingEvidence = semanticOracleEvidence(siblingOracle, target);
+        assert.deepEqual(siblingOracle.approvedProjection.aliases, [sample.layout_id],
+          `${id}: only the actual sibling layout resolves this original DOM`);
+        assert.equal(siblingOracle.reason, "expected-layout-not-approved");
+        assert.ok(semanticOracleContractFailures(siblingEvidence).length > 0,
+          `${id}: a successful same-route sibling cannot hide failure of the audited layout`);
+      }
       const invalidPromotionEvidence = semanticOracleEvidence(oracle, { ...target, source: "algumon-latest" });
       assert.ok(semanticOracleContractFailures(invalidPromotionEvidence).length > 0,
         "registered proof must not be relabeled as independent discovery evidence");
@@ -308,7 +320,7 @@ try {
       }
     }
   }
-  console.log(`Registered sample oracle: four site layouts and ${completed} desktop/mobile normal variants passed before runtime; original article, purchase link, comments and controls preserved while ads and sidebars stay hidden.`);
+  console.log(`Registered sample oracle: six site layouts, same-route sibling rejection, and ${completed} desktop/mobile normal variants passed before runtime; original article, purchase link, comments and controls preserved while ads and sidebars stay hidden.`);
 } finally {
   await browser.close();
 }

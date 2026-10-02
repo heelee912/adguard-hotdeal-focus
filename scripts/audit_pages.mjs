@@ -4037,6 +4037,8 @@ async function semanticOracle(
         const projection = api.resolveProjectionClasses(document, matchingLayouts, null);
         const projectionClass = projection.projectionClasses.length === 1
           ? projection.projectionClasses[0] : [];
+        const expectedLayoutApproved = projectionClass.some((item) =>
+          item.layoutId === expectedLayoutId);
         const resolution = projectionClass[0] ?? null;
         const resolvedLayout = matchingLayouts.find((layout) =>
           layout.id === resolution?.layoutId);
@@ -4086,7 +4088,7 @@ async function semanticOracle(
         const itemContainment = Boolean(commentMount) && itemRoots.every((node) =>
           node !== commentMount && commentMount.contains(node));
         const exact = siteMatches && registeredRoute && projection.projectionClasses.length === 1 &&
-          resolution?.ok === true && containment && itemContainment &&
+          expectedLayoutApproved && resolution?.ok === true && containment && itemContainment &&
           rolesRequired.every((role) => Boolean(roles[role])) &&
           Object.values(cardinality).every((count) => count === 1);
         return {
@@ -4094,6 +4096,7 @@ async function semanticOracle(
           verificationMode: "registered-sample",
           candidateEligible: false,
           reason: exact ? "exact-approved-registered-projection" :
+            projectionClass.length && !expectedLayoutApproved ? "expected-layout-not-approved" :
             projection.resolutions.find((item) => !item.ok)?.reason ?? "no-unique-approved-projection",
           pageRoot: exactSelector(pageRoot, [resolvedLayout?.pageRoot].filter(Boolean)),
           pageRootCount: pageRoot ? 1 : 0,
