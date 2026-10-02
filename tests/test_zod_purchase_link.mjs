@@ -14,16 +14,21 @@ try {
     const context = await browser.newContext({viewport:{width,height:844},isMobile:width===390});
     try {
       const page = await context.newPage();
-      const imageCompleteHtml = html.replace('<p>풀배열',`<p><img src="${image}" alt="상품 사진 2"></p><p>&nbsp;</p><p>풀배열`);
+      const imageCompleteHtml = html.replace('<head>','<head><style>.iconoir-info-circle::before{content:"ⓘ"}</style>').replace('<p>풀배열',`<p><img src="${image}" alt="상품 사진 2"></p><p>&nbsp;</p><p>풀배열`);
       const projectedHtml = drift ? imageCompleteHtml.replace('<main class="app-clearfix">','<section class="publisher-root">').replace('</main>','</section>') : imageCompleteHtml;
       const fixture = purchase ? projectedHtml : projectedHtml.replace(purchaseHref,'https://zod.kr/deal/99000002');
       await page.route('**/*',route=>route.fulfill({status:200,contentType:'text/html; charset=utf-8',body:fixture}));
       await page.addInitScript(({source,control})=>{(0,eval)(control);(0,eval)(source);},{source,control:PREAUTHORIZED_ADGUARD_CONTROL_SOURCE});
       await page.goto('https://zod.kr/deal/99000001');
-      await page.waitForFunction(()=>document.documentElement.getAttribute('data-hotdeal-focus-state')==='ready'&&!document.documentElement.hasAttribute('data-hotdeal-focus-lock'),null,{timeout:5000});
+      await page.waitForFunction(()=>{
+        const root=document.documentElement;
+        const painted=getComputedStyle(root);
+        return root.getAttribute('data-hotdeal-focus-state')==='ready'&&!root.hasAttribute('data-hotdeal-focus-lock')&&painted.visibility==='visible'&&painted.contentVisibility!=='hidden'&&Number(painted.opacity)>0;
+      },null,{timeout:5000});
       assert.equal(await page.locator('[data-hotdeal-focus-role="product"]').count(),purchase?1:0,`Native purchase relays, not ordinary article navigation, must be projected at ${width}px`);
       assert.equal(await page.locator('table a').getAttribute('href'),purchase?purchaseHref:'https://zod.kr/deal/99000002');
       assert.equal(await page.locator('table a').isVisible(),purchase);
+      assert.equal(await page.locator('table th .iconoir-info-circle').isVisible(),false,'Native affiliate-info decoration must not survive inside the purchase table');
       assert.equal(await page.locator('[data-hotdeal-focus-role="body"] img').first().isVisible(),true);
       assert.equal(await page.locator('aside').isVisible(),false);
     } finally { await context.close(); }

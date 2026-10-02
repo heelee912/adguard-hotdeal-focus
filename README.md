@@ -16,6 +16,8 @@ https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 
 일반 설치는 이 독립형 Userscript 하나로 끝납니다. 별도의 규칙이나 필터 목록은 필요하지 않습니다.
 
+이전 핫딜 전용 필터 목록을 사용 중이면 해당 목록을 제거하고 이 스크립트만 사용하십시오.
+
 ### 사용
 
 알구몬의 핫딜 링크를 평소처럼 여십시오. 등록된 핫딜 글은 PC·모바일 전환 뒤에도 읽기 화면이 적용됩니다. 같은 핫딜 주소를 직접 열어도 적용되며, 일반 게시판·목록에는 적용하지 않습니다.
@@ -41,6 +43,8 @@ https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ```
 
 This standalone Userscript is the complete normal installation. No separate rule or filter list is required.
+
+If an older hot-deal filter list is installed, remove that list and use this Userscript instead.
 
 ### Use
 
@@ -68,6 +72,8 @@ https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 
 通常のインストールは、この単体 Userscript だけで完了します。別のルールやフィルタリストは不要です。
 
+以前のホットディール専用フィルタリストを使用している場合は、そのリストを削除し、この Userscript に置き換えてください。
+
 ### 使い方
 
 Algumon のホットディールリンクを通常どおり開いてください。登録済みのホットディール記事は PC/モバイル転送後や直接アクセスでも読書表示になります。通常の掲示板や一覧には適用しません。
@@ -93,6 +99,8 @@ https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ```
 
 独立 Userscript 就是完整的常规安装；无需另加规则或过滤列表。
+
+如果已安装旧版优惠专用过滤列表，请移除该列表，改用这个 Userscript。
 
 ### 使用
 

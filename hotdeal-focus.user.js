@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.75
+// @version      0.6.76
 // @description  Fail-closed semantic reader gate for Algumon hot-deal destinations.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
@@ -381,7 +381,7 @@
             "pageRoot": ".left-con-wrap",
             "allowEmptyComments": true,
             "requiredRoles": ["title", "product", "body", "comments"],
-            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".market-info-view-table"],"ignored":[".market-info-view-table th .tooltip",".market-info-view-table th .common-tooltip",".market-info-view-table th img[alt='info']"]},"comments":{"mode":"classified-children"}},
+            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".market-info-view-table"],"ignored":[".market-info-view-table th .tooltip",".market-info-view-table th .common-tooltip",".market-info-view-table th img[alt='info']",".market-info-view-table td img.brand-logo"]},"comments":{"mode":"classified-children"}},
             "hints": {
               "title": ["h1.title", "h1.v2-view-head__title"],
               "product": [".market-info-view-table"],
@@ -399,7 +399,7 @@
             "pageRoot": "#con-body",
             "allowEmptyComments": true,
             "requiredRoles": ["title", "product", "body", "comments"],
-            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".market-info-view-table"],"ignored":[".market-info-view-table th .tooltip",".market-info-view-table th .common-tooltip",".market-info-view-table th img[alt='info']"]},"comments":{"mode":"classified-children"}},
+            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".market-info-view-table"],"ignored":[".market-info-view-table th .tooltip",".market-info-view-table th .common-tooltip",".market-info-view-table th img[alt='info']",".market-info-view-table td img.brand-logo"]},"comments":{"mode":"classified-children"}},
             "hints": {
               "title": [".content.market-info-view-wrap .view-style01 .tit .ment > h1", "h1.v2-view-head__title"],
               "product": [".market-info-view-table"],
@@ -447,7 +447,7 @@
             "pageRoot": "main",
             "allowEmptyComments": true,
             "requiredRoles": ["title", "product", "body", "comments"],
-            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".app-article-container > .app-board-extra-value"],"ignored":[]},"comments":{"mode":"classified-children"}},
+            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".app-article-container > .app-board-extra-value"],"ignored":[".app-board-extra-value th .iconoir-info-circle"]},"comments":{"mode":"classified-children"}},
             "hints": {
               "title": [".app-board-article-head h1"],
               "product": [".app-article-container > .app-board-extra-value"],

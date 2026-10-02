@@ -22,9 +22,9 @@ const html = `<!doctype html><html><head>
 <h1 class="v2-view-head__title"><span class="label">진행중</span> ${title}</h1>
 <table class="market-info-view-table"><tbody>
 <tr><th>링크 <img alt="info" src="${image}"><div class="tooltip active">구매링크는 제휴 링크로 전환될 수 있습니다.</div><div class="common-tooltip active">제휴 링크 안내</div></th><td><a href="javascript:goToLink('${Buffer.from(destination).toString("base64")}');">${destination}</a></td></tr>
-<tr><th>판매처</th><td>스팀</td></tr><tr><th>가격</th><td>￦ 11,550 (KRW)</td></tr>
+<tr><th>판매처</th><td><img class="brand-logo" src="${image}" alt="판매처 로고">스팀</td></tr><tr><th>가격</th><td>￦ 11,550 (KRW)</td></tr>
 <tr><th>배송/직배</th><td>무료</td></tr></tbody></table>
-<div class="view-content"><div class="note-editor"><div id="new_contents"><p>${body}</p><p></p><p><img src="${image}" alt="상품 사진"></p></div></div></div>
+<div class="view-content"><div class="note-editor"><div id="new_contents"><p>${body}</p><p></p><p><img class="brand-logo" src="${image}" alt="상품 사진"></p></div></div></div>
 <div class="reply-wrap v2-cmt-wrap"><p class="reply-tit">댓글: <span id="comm_cnt">2</span>개</p>
 <div class="reply-list" id="ajax-reply-list"><ul class="common-reply-list">
 <li id="comment1990135"><div class="listNode v2-cmt"><div class="contentArea v2-cmt__main"><div class="nickWrap">삣삐삣삐</div><div class="note-editor content-view-ok" id="saveComment_1990135">덕코프 재밌죠 ㅋㅋ</div></div></div></li>
@@ -66,7 +66,14 @@ try {
         (0, eval)(source);
       }, { source, control: PREAUTHORIZED_ADGUARD_CONTROL_SOURCE });
       await runtimePage.goto("https://quasarzone.com/bbs/qb_saleinfo/views/1990129", { referer: "https://www.algumon.com/" });
-      await runtimePage.waitForFunction(() => document.documentElement.getAttribute("data-hotdeal-focus-status") === "ready", null, {timeout:5000});
+      await runtimePage.waitForFunction(() => {
+        const root = document.documentElement;
+        const painted = getComputedStyle(root);
+        return root.getAttribute("data-hotdeal-focus-status") === "ready" &&
+          !root.hasAttribute("data-hotdeal-focus-lock") &&
+          painted.visibility === "visible" && painted.contentVisibility !== "hidden" &&
+          Number(painted.opacity) > 0;
+      }, null, {timeout:5000});
       const state = await runtimePage.evaluate(() => {
         const visible = e => getComputedStyle(e).visibility === "visible" && getComputedStyle(e).display !== "none" && !!e.getClientRects().length;
         return {
@@ -76,6 +83,8 @@ try {
           purchaseHref: document.querySelector(".market-info-view-table a").getAttribute("href"),
           purchaseVisible: visible(document.querySelector(".market-info-view-table a")),
           tooltipVisible: [...document.querySelectorAll(".market-info-view-table th .tooltip, .market-info-view-table th .common-tooltip, .market-info-view-table th img[alt='info']")].some(visible),
+          sellerLogoVisible: visible(document.querySelector(".market-info-view-table td img.brand-logo")),
+          originalBodyImageVisible: visible(document.querySelector("#new_contents img.brand-logo")),
           proofFrames: globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.standaloneGate?.cascadeProofFrames,
         };
       });
@@ -88,6 +97,8 @@ try {
       assert.equal(state.purchaseHref, purchaseHref);
       assert.equal(state.purchaseVisible, handler === "native", `Only a matching native purchase handler must be visible at ${width}px (drift=${drift}, handler=${handler})`);
       assert.equal(state.tooltipVisible, false);
+      assert.equal(state.sellerLogoVisible, false, "Seller decorations must not survive inside an otherwise retained purchase table");
+      assert.equal(state.originalBodyImageVisible, true, "The same class on a native body image must never be filtered");
     } finally { await context.close(); }
   }
   console.log("Actual QuasarZone title/comment-wrapper regression passed at 1280px and 390px");

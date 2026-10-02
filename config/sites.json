@@ -3,7 +3,7 @@
   "metadata": {
     "title": "AdGuard Hotdeal Focus",
     "description": "Shows only the hot-deal title, purchase information, article body, and comments.",
-  "version": "0.6.75",
+  "version": "0.6.76",
     "expires_hours": 12,
     "license": "MIT",
     "rollback_of": null
@@ -414,7 +414,7 @@
               "cardinality": "required",
               "order": "before-body",
               "selectors": [".market-info-view-table"],
-              "ignored": [".market-info-view-table th .tooltip", ".market-info-view-table th .common-tooltip", ".market-info-view-table th img[alt='info']"]
+              "ignored": [".market-info-view-table th .tooltip", ".market-info-view-table th .common-tooltip", ".market-info-view-table th img[alt='info']", ".market-info-view-table td img.brand-logo"]
             },
             "comments": { "mode": "classified-children" }
           },
@@ -496,7 +496,7 @@
               "cardinality": "required",
               "order": "before-body",
               "selectors": [".market-info-view-table"],
-              "ignored": [".market-info-view-table th .tooltip", ".market-info-view-table th .common-tooltip", ".market-info-view-table th img[alt='info']"]
+              "ignored": [".market-info-view-table th .tooltip", ".market-info-view-table th .common-tooltip", ".market-info-view-table th img[alt='info']", ".market-info-view-table td img.brand-logo"]
             },
             "comments": { "mode": "classified-children" }
           },
@@ -682,7 +682,7 @@
               "cardinality": "required",
               "order": "before-body",
               "selectors": [".app-article-container > .app-board-extra-value"],
-              "ignored": []
+              "ignored": [".app-board-extra-value th .iconoir-info-circle"]
             },
             "comments": { "mode": "classified-children" }
           },
