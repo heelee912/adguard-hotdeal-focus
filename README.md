@@ -20,7 +20,7 @@ https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 
 ### 사용
 
-알구몬의 핫딜 링크를 평소처럼 여십시오. 등록된 핫딜 글은 PC·모바일 전환 뒤에도 읽기 화면이 적용됩니다. 같은 핫딜 주소를 직접 열어도 적용되며, 일반 게시판·목록에는 적용하지 않습니다.
+알구몬의 핫딜 링크를 평소처럼 여십시오. 읽기 화면 위쪽의 **알구몬으로 돌아가기 · 본문 · 댓글** 버튼으로 이동할 수 있습니다. 등록된 핫딜 글은 PC·모바일 전환 뒤에도 읽기 화면이 적용됩니다. 같은 핫딜 주소를 직접 열어도 적용되며, 일반 게시판·목록에는 적용하지 않습니다.
 
 ### 동작 범위와 업데이트
 
@@ -48,7 +48,7 @@ If an older hot-deal filter list is installed, remove that list and use this Use
 
 ### Use
 
-Open a deal through Algumon normally. Registered hot-deal articles retain reader mode across desktop/mobile redirects and direct address-bar visits. Ordinary boards and list pages are not filtered.
+Open a deal through Algumon normally. The reader toolbar provides **Return to Algumon · Body · Comments** navigation (displayed in Korean). Registered hot-deal articles retain reader mode across desktop/mobile redirects and direct address-bar visits. Ordinary boards and list pages are not filtered.
 
 ### Scope and updates
 
@@ -76,7 +76,7 @@ https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 
 ### 使い方
 
-Algumon のホットディールリンクを通常どおり開いてください。登録済みのホットディール記事は PC/モバイル転送後や直接アクセスでも読書表示になります。通常の掲示板や一覧には適用しません。
+Algumon のホットディールリンクを通常どおり開いてください。記事の上部に Algumon に戻る・本文・コメントへの移動ボタンが表示されます（韓国語表示）。登録済みのホットディール記事は PC/モバイル転送後や直接アクセスでも読書表示になります。通常の掲示板や一覧には適用しません。
 
 ### 動作範囲と更新
 
@@ -104,7 +104,7 @@ https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 
 ### 使用
 
-按平时方式从 Algumon 打开优惠链接。已登记的优惠文章在桌面/移动端跳转或直接访问时都会启用阅读视图；普通论坛和列表页不适用。
+按平时方式从 Algumon 打开优惠链接。文章上方提供返回 Algumon、正文和评论的导航按钮（韩文显示）。已登记的优惠文章在桌面/移动端跳转或直接访问时都会启用阅读视图；普通论坛和列表页不适用。
 
 ### 范围与更新
 

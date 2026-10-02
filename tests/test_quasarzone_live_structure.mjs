@@ -99,6 +99,77 @@ try {
       assert.equal(state.tooltipVisible, false);
       assert.equal(state.sellerLogoVisible, false, "Seller decorations must not survive inside an otherwise retained purchase table");
       assert.equal(state.originalBodyImageVisible, true, "The same class on a native body image must never be filtered");
+      const ui = runtimePage.locator('[data-hotdeal-focus-role="reader-ui"]');
+      assert.equal(await ui.count(), 1);
+      assert.deepEqual(await ui.locator('a').allTextContents(), ["알구몬으로 돌아가기", "본문", "댓글"]);
+      assert.equal(await ui.locator('a').first().getAttribute('href'), 'https://www.algumon.com/');
+      await runtimePage.evaluate(() => {
+        globalThis.__originalReaderBody = document.querySelector('#new_contents');
+        globalThis.__originalReaderComments = document.querySelector('#ajax-reply-list');
+      });
+      await ui.getByText('댓글', {exact:true}).click();
+      await ui.getByText('본문', {exact:true}).click();
+      await runtimePage.evaluate(() => {
+        const ui = document.querySelector('[data-hotdeal-focus-role="reader-ui"]');
+        const clone = ui.cloneNode(true);
+        clone.querySelector('a').textContent = '인기글 추천글';
+        document.body.appendChild(clone);
+        ui.querySelector('a').setAttribute('href', 'https://example.com/popular');
+        ui.querySelector('a').textContent = '광고 인기글';
+        ui.style.cssText = 'position:fixed;inset:0;background:red';
+        ui.appendChild(document.createElement('aside')).textContent = '추천글 인기글 광고';
+        ui.remove();
+        for (let index = 0; index < 12; index += 1) {
+          const wrapper = document.createElement('div');
+          wrapper.className = `publisher-changing-wrapper-${index}`;
+          wrapper.innerHTML = `<aside><a href="/popular/${index}">인기글 추천글 ${index}</a></aside>`;
+          document.querySelector('#publisher-root, #con-body').appendChild(wrapper);
+        }
+      });
+      await runtimePage.waitForFunction(() => {
+        const ui = document.querySelector('[data-hotdeal-focus-role="reader-ui"]');
+        return ui?.parentElement === document.body && ui.children.length === 3 &&
+          ui.firstElementChild.getAttribute('href') === 'https://www.algumon.com/' &&
+          ui.firstElementChild.textContent === '알구몬으로 돌아가기' && !ui.hasAttribute('style');
+      }, null, {timeout:5000});
+      const afterUiRepair = await runtimePage.evaluate(() => {
+        const visible = e => getComputedStyle(e).visibility === 'visible' && getComputedStyle(e).display !== 'none' && !!e.getClientRects().length;
+        return {
+          status: document.documentElement.getAttribute('data-hotdeal-focus-status'),
+          locked: document.documentElement.hasAttribute('data-hotdeal-focus-lock'),
+          uiCount: document.querySelectorAll('[data-hotdeal-focus-role="reader-ui"]').length,
+          uiVisible: visible(document.querySelector('[data-hotdeal-focus-role="reader-ui"]')),
+          bodyIdentity: document.querySelector('#new_contents') === globalThis.__originalReaderBody,
+          commentsIdentity: document.querySelector('#ajax-reply-list') === globalThis.__originalReaderComments,
+          bodyVisible: visible(globalThis.__originalReaderBody),
+          commentsVisible: [...document.querySelectorAll('li[id^="comment"]')].every(visible),
+          noiseVisible: [...document.querySelectorAll('aside')].some(visible),
+          wide: document.documentElement.scrollWidth > window.innerWidth,
+          width: window.innerWidth,
+          scrollWidth: document.documentElement.scrollWidth,
+        };
+      });
+      assert.equal(afterUiRepair.status, 'ready', JSON.stringify(afterUiRepair));
+      assert.equal(afterUiRepair.locked, false);
+      assert.equal(afterUiRepair.uiCount, 1, 'A publisher clone must never gain reader UI authority');
+      assert.equal(afterUiRepair.uiVisible, true);
+      assert.equal(afterUiRepair.bodyIdentity && afterUiRepair.commentsIdentity, true, 'Reader UI must not clone or move native content');
+      assert.equal(afterUiRepair.bodyVisible && afterUiRepair.commentsVisible, true, JSON.stringify(afterUiRepair));
+      assert.equal(afterUiRepair.noiseVisible, false);
+      assert.equal(afterUiRepair.wide, false, JSON.stringify(afterUiRepair));
+      await runtimePage.evaluate(() => {
+        const reply = document.createElement('li');
+        reply.id = 'comment1990147';
+        const text = document.createElement('p');
+        text.textContent = 'New native comment after toolbar repair';
+        reply.appendChild(text);
+        document.querySelector('#ajax-reply-list > ul').appendChild(reply);
+      });
+      await runtimePage.waitForFunction(() => {
+        const reply = document.querySelector('#comment1990147');
+        return reply?.getAttribute('data-hotdeal-focus-role') === 'comment-item' &&
+          getComputedStyle(reply).visibility === 'visible' && !!reply.getClientRects().length;
+      }, null, {timeout:5000});
     } finally { await context.close(); }
   }
   console.log("Actual QuasarZone title/comment-wrapper regression passed at 1280px and 390px");

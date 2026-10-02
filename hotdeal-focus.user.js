@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.76
+// @version      0.6.77
 // @description  Fail-closed semantic reader gate for Algumon hot-deal destinations.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
@@ -90,6 +90,7 @@
   });
   const BOOTSTRAP_PUBLISHER_INLINE = new WeakMap();
   const MEASUREMENT_HTML_RESTORES = new WeakMap();
+  const READER_UI = new WeakMap();
   let measurementStyleSheetMutationDepth = 0;
   const CASCADE_PROOF_FRAMES = 2;
   const ALGUMON_HANDOFF_SETTLE_TIMEOUT_MS = 5_000;
@@ -5383,7 +5384,10 @@
       markAncestorChain(control, ownedElements, nonce, shellElements);
     });
     markAncestorChain(commonRoot, ownedElements, nonce, shellElements);
+    const readerUi = createReaderUi(document, roles);
+    markDeepSubtree(readerUi.root, "reader-ui", ownedElements, nonce);
     const state = {
+      readerUi,
       ownedElements,
       ownedElementSet: new Set(document.querySelectorAll(`[${ATTR.keep}="${nonce}"]`)),
       expectedMarkerShapes: new Map(),
@@ -5454,6 +5458,90 @@
       }));
     });
     return state;
+  }
+
+  function createReaderUi(document, roles) {
+    const previous = READER_UI.get(document);
+    if (previous) previous.root.remove();
+    const root = document.createElement("nav");
+    root.setAttribute("aria-label", "핫딜 읽기 도구");
+    const links = [
+      ["알구몬으로 돌아가기", "https://www.algumon.com/", null],
+      ["본문", "#", roles.body],
+      ["댓글", "#", roles.comments],
+    ].map(function createReaderLink([label, href, destination]) {
+      const link = document.createElement("a");
+      const text = document.createTextNode(label);
+      link.setAttribute("href", href);
+      link.appendChild(text);
+      if (destination) {
+        const navigate = function scrollOriginalContent(event) {
+          event.preventDefault();
+          event.stopPropagation();
+          if (destination.isConnected) {
+            destination.scrollIntoView({ block: "start", behavior: "auto" });
+          }
+        };
+        if (typeof NATIVE.addEventListener === "function") {
+          NATIVE.reflectApply(NATIVE.addEventListener, link, ["click", navigate, true]);
+        } else {
+          link.addEventListener("click", navigate, true);
+        }
+      }
+      return Object.freeze({ link, text, label, href });
+    });
+    root.append(...links.map(function uiLink(entry) { return entry.link; }));
+    document.body.prepend(root);
+    const ui = Object.freeze({
+      root,
+      links: Object.freeze(links),
+      elements: new Set([root, ...links.map(function uiLink(entry) { return entry.link; })]),
+      nodes: new Set([root, ...links.flatMap(function uiNodes(entry) {
+        return [entry.link, entry.text];
+      })]),
+    });
+    READER_UI.set(document, ui);
+    return ui;
+  }
+
+  function repairReaderUi(document, state) {
+    const ui = state?.readerUi;
+    if (!ui || READER_UI.get(document) !== ui || !document.body) return;
+    const exactAttribute = function restoreAttribute(element, name, value) {
+      if (element.getAttribute(name) !== value) element.setAttribute(name, value);
+    };
+    const restoreElement = function restoreUiElement(element, ordinaryAttributes) {
+      const expected = state.expectedMarkerShapes.get(element);
+      if (!expected) return;
+      const attributes = new Map(ordinaryAttributes);
+      for (const key of ["keep", "shell", "deep", "role"]) {
+        if (expected[key] !== null) attributes.set(ATTR[key], expected[key]);
+      }
+      attributes.set("class", expected.classes.join(" "));
+      Array.from(element.attributes).forEach(function removeInjectedUiAttribute(attribute) {
+        if (!attributes.has(attribute.name)) element.removeAttribute(attribute.name);
+      });
+      attributes.forEach(function restoreUiAttribute(value, name) {
+        exactAttribute(element, name, value);
+      });
+    };
+    restoreElement(ui.root, [["aria-label", "핫딜 읽기 도구"]]);
+    ui.links.forEach(function restoreOriginalUiLink(entry) {
+      restoreElement(entry.link, [["href", entry.href]]);
+      if (entry.text.data !== entry.label) entry.text.data = entry.label;
+      if (entry.link.childNodes.length !== 1 || entry.link.firstChild !== entry.text) {
+        entry.link.replaceChildren(entry.text);
+      }
+    });
+    if (ui.root.childNodes.length !== ui.links.length ||
+        ui.links.some(function changedUiOrder(entry, index) {
+          return ui.root.childNodes[index] !== entry.link;
+        })) {
+      ui.root.replaceChildren(...ui.links.map(function originalUiLink(entry) { return entry.link; }));
+    }
+    if (ui.root.parentElement !== document.body || document.body.firstChild !== ui.root) {
+      document.body.prepend(ui.root);
+    }
   }
 
   function markerShapeMatches(element, expected) {
@@ -5945,6 +6033,31 @@
         `[${ATTR.role}="comment-control"] { visibility: visible !important; }`,
       `${readyRoot} ${owned}${shell}::before,`,
       `${readyRoot} ${owned}${shell}::after { content: none !important; display: none !important; }`,
+      `${readyRoot} body { box-sizing: border-box !important; max-width: 1040px !important; ` +
+        `margin-left: auto !important; margin-right: auto !important; padding: 16px !important; }`,
+      `${readyRoot} body ${owned}${shell} { min-width: 0 !important; max-width: 100% !important; }`,
+      `${readyRoot} ${owned}.${roleClass("body")}, ` +
+        `${readyRoot} ${owned}.${roleClass("product")} { overflow-wrap: anywhere !important; }`,
+      `${readyRoot} ${owned}.${roleClass("reader-ui")}[${ATTR.role}="reader-ui"] { ` +
+        `display: flex !important; flex-wrap: wrap !important; gap: 8px !important; ` +
+        `position: static !important; float: none !important; width: auto !important; ` +
+        `margin: 0 0 20px !important; padding: 10px 0 !important; ` +
+        `border: 0 !important; border-bottom: 1px solid #d7dce2 !important; ` +
+        `background: transparent !important; box-shadow: none !important; }`,
+      `${readyRoot} ${owned}.${roleClass("reader-ui")} > ${owned} { ` +
+        `display: inline-flex !important; align-items: center !important; position: static !important; ` +
+        `float: none !important; min-height: 40px !important; margin: 0 !important; ` +
+        `padding: 0 12px !important; border: 1px solid #c9d2de !important; ` +
+        `border-radius: 6px !important; color: #164b80 !important; background: #f3f7fb !important; ` +
+        `font: 600 14px/1.4 system-ui, sans-serif !important; text-decoration: none !important; ` +
+        `white-space: nowrap !important; cursor: pointer !important; }`,
+      `${readyRoot} ${owned}.${roleClass("reader-ui")} > ${owned}:focus-visible { ` +
+        `outline: 2px solid #164b80 !important; outline-offset: 2px !important; }`,
+      `${readyRoot} ${owned}.${roleClass("reader-ui")}::before, ` +
+        `${readyRoot} ${owned}.${roleClass("reader-ui")}::after, ` +
+        `${readyRoot} ${owned}.${roleClass("reader-ui")} > ${owned}::before, ` +
+        `${readyRoot} ${owned}.${roleClass("reader-ui")} > ${owned}::after { ` +
+        `display: none !important; content: none !important; }`,
       `@media (max-width: 720px) {`,
       `${readyRoot}, ${readyRoot} body { ` +
         `box-sizing: border-box !important; width: 100% !important; ` +
@@ -6101,7 +6214,10 @@
       // Unowned elements and noise nested inside a role remain checked.
       const verifiedRoleRoot = owned && ["title", "body", "product", "comments"]
         .some(function exactVerifiedRole(role) { return state.roles[role] === element; });
-      const autonomousNoise = !verifiedRoleRoot && isAutonomousProjectionNoiseRoot(element);
+      const trustedReaderUi = READER_UI.get(document) === state?.readerUi &&
+        state.readerUi?.elements.has(element) && owned;
+      const autonomousNoise = !verifiedRoleRoot && !trustedReaderUi &&
+        isAutonomousProjectionNoiseRoot(element);
       if (autonomousNoise) countedNoiseRoots.push(element);
       if (
         isRendered(element) &&
@@ -7249,6 +7365,7 @@
         !["armed", "released", "frozen"].includes(runtime.releasePhase) || !state ||
         runtime.activeNonce !== state.nonce
       ) return;
+      repairReaderUi(document, state);
       // Restore only private presentation metadata from the accepted in-memory
       // projection. Never infer ownership from publisher-supplied attributes.
       const changedElements = new Set([html, styleElement]);
@@ -8520,6 +8637,7 @@
         const dynamicCommentControlsChanged = new Set();
         for (const mutation of mutations) {
         if (failureReason) break;
+        if (state.readerUi?.nodes.has(mutation.target)) continue;
         if (mutationTouchesCommentTotalEvidence(mutation)) {
           projectionTouched = true;
           commentCountEvidenceChanged = true;
@@ -8697,6 +8815,7 @@
         }
         for (const removed of mutation.removedNodes) {
           if (failureReason) break;
+          if (state.readerUi?.nodes.has(removed)) continue;
           const removesCore = removed.nodeType === 1 && (
             removed === state.commonRoot ||
             removed.contains(state.commonRoot) ||
@@ -8759,6 +8878,7 @@
         }
         for (const added of mutation.addedNodes) {
           if (failureReason) break;
+          if (state.readerUi?.nodes.has(added)) continue;
           if (added === styleElement) continue;
           if (inBody || inProduct) {
             const reservedMarkerSelector =

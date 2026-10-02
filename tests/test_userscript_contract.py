@@ -432,9 +432,19 @@ process.stdout.write(JSON.stringify(results));
         self.assertNotIn("resolvedTitle:", diagnostics_function)
 
     def test_core_dom_identity_is_not_replaced_or_recreated(self) -> None:
+        # The script-created toolbar may repair its own three links. This is
+        # not permission to replace the publisher's article or comments.
+        ui_repair = self.source[
+            self.source.index("  function repairReaderUi(document, state) {"):
+            self.source.index("  function markerShapeMatches(")
+        ]
+        self.assertIn("READER_UI.get(document) !== ui", ui_repair)
+        self.assertEqual(self.source.count(".replaceChildren("), 2)
+        self.assertEqual(ui_repair.count(".replaceChildren("), 2)
+        self.assertIn("entry.link.replaceChildren(entry.text)", ui_repair)
+        self.assertIn("ui.root.replaceChildren(...ui.links.map(", ui_repair)
         for forbidden in (
             ".replaceWith(",
-            ".replaceChildren(",
             ".innerHTML =",
             ".outerHTML =",
             'createElement("span")',
