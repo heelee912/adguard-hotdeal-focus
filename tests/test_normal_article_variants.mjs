@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import { chromium } from "playwright";
 import { PREAUTHORIZED_ADGUARD_CONTROL_SOURCE } from "../scripts/preauthorized_adguard_control.mjs";
+import {
+  semanticOracle, semanticOracleEvidence, semanticOracleContractFailures,
+} from "../scripts/audit_pages.mjs";
 
 // Ordinary variations of the observed Arca article template are not evidence of
 // an invalid article. No request in this suite reaches a real site.
@@ -106,6 +109,141 @@ function fixture(article) {
 const browser = await chromium.launch({ headless: true });
 let completed = 0;
 try {
+  const discoveryPage = await browser.newPage();
+  try {
+    for (const [reference, visible, expected] of [
+      ["쌀", "[쿠팡] 쌀", true],
+      ["[쿠팡] 쌀", "쌀", true],
+      ["DOOM", "[Steam] DOOM", true],
+      ["[Steam] DOOM", "DOOM", true],
+      ["DOOM", "[스팀] DOOM", true],
+      ["[PS5] DOOM", "[PC] DOOM", false],
+      ["[PC] DOOM", "[XBOX] DOOM", false],
+      ["[빨강] 컵", "[파랑] 컵", false],
+      ["쌀", "찹쌀", false],
+      ["쌀", "쌀국수", false],
+      ["DOOM", "DOOM Eternal", false],
+      ["[쿠팡] 쌀", "[쿠팡] 우유", false],
+      ["[Steam] DOOM", "[Steam] DOOM Eternal", false],
+    ]) {
+      await discoveryPage.setContent(`<!doctype html><html><head>
+        <meta property="og:title" content="${escapeHtml(visible)}"></head><body>
+        <main><h1 class="new-title">${escapeHtml(visible)}</h1>
+        <article class="new-body"><p>This is the original product description with useful specifications,
+        delivery conditions and purchasing information for the current hot deal.</p>
+        <p>Another complete paragraph provides enough original article context for independent discovery.</p></article>
+        <section class="comments" aria-label="Comments">
+          <div itemprop="comment">Original first comment.</div>
+          <div itemprop="comment">Original second comment.</div>
+        </section></main></body></html>`);
+      const verdict = await discoveryPage.evaluate(({ source, reference }) => {
+        const module = { exports: {} };
+        new Function("module", source)(module);
+        const api = module.exports;
+        const result = api.discoverSemanticContract(document, [{
+          allowEmptyComments: true,
+          requiredRoles: ["title", "body", "comments"],
+          roleProjection: { product: { cardinality: "zero" } },
+          hints: { title: [".old-title"], body: [".old-body"], comments: [".old-comments"],
+            commentItems: ["[itemprop='comment']"], commentControls: [], commentIgnored: [] },
+        }], { title: reference, commentCount: 2 });
+        return {
+          ok: result.ok, reason: result.reason,
+          seedConsistency: result.seedConsistency,
+          policyComplete: result.policyProposal?.complete,
+          comparison: api.titleConsistency(reference, document.querySelector("h1").textContent),
+        };
+      }, { source, reference });
+      assert.equal(verdict.ok, expected, `${reference} -> ${visible}: ${JSON.stringify(verdict)}`);
+      assert.equal(verdict.comparison.ok, expected, `${reference} -> ${visible}: bounded exact core`);
+      if (expected) {
+        assert.equal(verdict.seedConsistency.titleConsistencyOk, true);
+        assert.equal(verdict.policyComplete, true);
+      }
+    }
+  } finally { await discoveryPage.close(); }
+  // These are ordinary registered articles, not new-layout promotion inputs.
+  // Exercise the cloud auditor against the same untouched DOM before the
+  // userscript runs, including h4/span titles and nested div/span comments.
+  const regressions = JSON.parse(fs.readFileSync(
+    new URL("fixtures/dom-regressions.json", import.meta.url), "utf8",
+  )).fixtures;
+  const contracts = JSON.parse(fs.readFileSync(
+    new URL("../config/sites.json", import.meta.url), "utf8",
+  )).sites;
+  for (const id of ["clien-jirum-july", "ppomppu-mobile-july", "ruliweb-hotdeal-july", "eomisae-hotdeal-july",
+    "quasarzone-market-july", "quasarzone-market-mobile-july"]) {
+    const sample = regressions.find(item => item.id === id);
+    const layout = contracts.find(site => site.id === sample.site_id).layouts
+      .find(item => item.id === sample.layout_id);
+    const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    try {
+      const page = await context.newPage();
+      await page.route("**/*", route => route.fulfill({ status: 200,
+        contentType: "text/html; charset=utf-8",
+        body: `<!doctype html><html><head></head><body>${sample.body_html}</body></html>`,
+      }));
+      await page.goto(sample.url);
+      const originalCommentCount = await page.evaluate(({ layout }) => {
+        const title = document.querySelector('[data-fixture-node-id="title"]');
+        const direct = [...title.childNodes].find(node => node.nodeType === Node.TEXT_NODE);
+        direct.data = "쌀";
+        const items = [...new Set(layout.comment_contract.items.flatMap(selector =>
+          [...document.querySelectorAll(selector)]))];
+        for (const item of items) {
+          for (let index = 0; index < 12; index += 1) {
+            const wrapper = document.createElement("div");
+            const text = document.createElement("span");
+            text.textContent = "원래 댓글 내용";
+            wrapper.append(text);
+            item.append(wrapper);
+          }
+        }
+        return items.length;
+      }, { layout });
+      const before = await page.locator("body").innerHTML();
+      const target = { source: "sample", url: sample.url };
+      const oracle = await semanticOracle(page, source, sample.site_id, sample.layout_id,
+        layout.required_roles, target);
+      const evidence = semanticOracleEvidence(oracle, target);
+      assert.deepEqual(semanticOracleContractFailures(evidence), [], JSON.stringify({ id, evidence }));
+      assert.equal(evidence.verificationMode, "registered-sample");
+      assert.equal(evidence.commentItemCount, originalCommentCount, `${id}: nested wrappers are not comments`);
+      assert.equal(evidence.candidateEligible, false);
+      assert.equal(evidence.policyProposal, null);
+      assert.equal(evidence.algumon, null);
+      assert.equal(await page.locator("body").innerHTML(), before, `${id}: source DOM must stay untouched`);
+      if (sample.site_id === "quasarzone") {
+        const siblingId = sample.layout_id === "market" ? "market-mobile" : "market";
+        const siblingOracle = await semanticOracle(page, source, sample.site_id, siblingId,
+          layout.required_roles, target);
+        const siblingEvidence = semanticOracleEvidence(siblingOracle, target);
+        assert.deepEqual(siblingOracle.approvedProjection.aliases, [sample.layout_id],
+          `${id}: only the actual sibling layout resolves this original DOM`);
+        assert.equal(siblingOracle.reason, "expected-layout-not-approved");
+        assert.ok(semanticOracleContractFailures(siblingEvidence).length > 0,
+          `${id}: a successful same-route sibling cannot hide failure of the audited layout`);
+      }
+      const invalidPromotionEvidence = semanticOracleEvidence(oracle, { ...target, source: "algumon-latest" });
+      assert.ok(semanticOracleContractFailures(invalidPromotionEvidence).length > 0,
+        "registered proof must not be relabeled as independent discovery evidence");
+      await page.locator('[data-fixture-node-id="body"]').evaluate(element => element.remove());
+      const missingBody = semanticOracleEvidence(await semanticOracle(page, source,
+        sample.site_id, sample.layout_id, layout.required_roles, target), target);
+      assert.ok(semanticOracleContractFailures(missingBody).length > 0,
+        `${id}: a genuinely missing original body must still fail`);
+      await page.goto(new URL("/not-a-hotdeal", sample.url).href);
+      const wrongRoute = semanticOracleEvidence(await semanticOracle(page, source,
+        sample.site_id, sample.layout_id, layout.required_roles, target), target);
+      assert.ok(semanticOracleContractFailures(wrongRoute).length > 0,
+        `${id}: matching markup outside a registered article route must still fail`);
+      await page.goto("https://unrelated.invalid/not-a-hotdeal");
+      const foreign = semanticOracleEvidence(await semanticOracle(page, source,
+        sample.site_id, sample.layout_id, layout.required_roles, target), target);
+      assert.ok(semanticOracleContractFailures(foreign).length > 0,
+        `${id}: matching markup on another host cannot become an approved article`);
+    } finally { await context.close(); }
+  }
   // One browser and one context at a time keep the regression cheap in RAM.
   for (const width of [1280, 390]) {
     for (const article of cases) {
@@ -120,6 +258,18 @@ try {
           }
           return route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: fixture(article) });
         });
+        const target = { source: "sample", url: "https://arca.live/b/hotdeal/184784422" };
+        await page.goto(target.url);
+        const oracle = semanticOracleEvidence(await semanticOracle(page, source,
+          "arcalive", "hotdeal", contracts.find(site => site.id === "arcalive")
+            .layouts.find(layout => layout.id === "hotdeal").required_roles, target), target);
+        assert.deepEqual(semanticOracleContractFailures(oracle), [],
+          `${article.name}/${width}: ${JSON.stringify(oracle)}`);
+        assert.equal(oracle.commentItemCount, (article.comments ?? []).length,
+          `${article.name}/${width}: use loaded items, not aggregate counters or child wrappers`);
+        assert.equal(oracle.dormantCommentItemCount,
+          (article.comments ?? []).filter(comment => comment.hidden).length,
+          `${article.name}/${width}: native folded replies are loaded items, not missing comments`);
         await page.addInitScript(({ source, control }) => {
           globalThis.originalArticleNodes = new Map();
           globalThis.originalControlClicks = 0;
@@ -215,14 +365,15 @@ try {
           null, { timeout: 5000 });
           assert.equal(await page.evaluate(() => globalThis.originalControlClicks), 2, label);
         }
-        assert.deepEqual(requests, ["https://arca.live/b/hotdeal/184784422", ...(article.imageUrl ? [article.imageUrl] : [])]);
+        const fixtureRequests = [target.url, ...(article.imageUrl ? [article.imageUrl] : [])];
+        assert.deepEqual(requests, [...fixtureRequests, ...fixtureRequests]);
         completed += 1;
       } finally {
         await context.close();
       }
     }
   }
-  console.log(`Normal article variants: ${completed} desktop/mobile cases preserve original article, purchase link, comments and controls while hiding ads and sidebars.`);
+  console.log(`Short-title discovery: 13 allowed-prefix/negative cases passed. Registered sample oracle: six site layouts, same-route sibling rejection, and ${completed} desktop/mobile normal variants passed before runtime; original article, purchase link, comments and controls preserved while ads and sidebars stay hidden.`);
 } finally {
   await browser.close();
 }
