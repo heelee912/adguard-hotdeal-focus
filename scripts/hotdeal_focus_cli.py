@@ -2268,7 +2268,7 @@ def _generated_automation_push_identity(repo: str) -> Iterator[dict[str, Any]]:
         generated = _capture_command(
             (
                 "ssh-keygen", "-q", "-t", "ed25519", "-N", "",
-                "-C", f"hotdeal-focus-automation@{repo}",
+                "-C", "",
                 "-f", str(private_path),
             ),
             label="generate-automation-push-ed25519",

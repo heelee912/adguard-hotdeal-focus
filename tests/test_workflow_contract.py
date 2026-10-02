@@ -216,6 +216,7 @@ class StandaloneUserscriptReleaseWorkflowTests(unittest.TestCase):
                 self.assertIn("name: hdf-main-automation", section)
                 self.assertIn("IdentitiesOnly yes", section)
                 self.assertIn("StrictHostKeyChecking yes", section)
+                self.assertIn("ssh-keygen -y -f \"${key_path}\" | awk '{ print $1 \" \" $2 }'", section)
                 self.assertIn("git -c core.hooksPath=/dev/null push --porcelain", section)
                 self.assertNotIn("--force", section)
 

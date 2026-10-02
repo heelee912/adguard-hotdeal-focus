@@ -1005,7 +1005,7 @@ jobs:
           ssh_config_path="${RUNNER_TEMP}/hdf-governed-push-ssh-config"
           umask 077
           printf '%s\n' "${AUTOMATION_PUSH_PRIVATE_KEY}" > "${key_path}"
-          public_key="$(ssh-keygen -y -f "${key_path}")"
+          public_key="$(ssh-keygen -y -f "${key_path}" | awk '{ print $1 " " $2 }')"
           [[ "${public_key}" == ssh-ed25519\ * ]]
           [[ "$(printf '%s\n' "${public_key}" | awk '{print NF}')" == "2" ]]
           actual_fingerprint="$(
@@ -1273,7 +1273,7 @@ jobs:
           ssh_config_path="${RUNNER_TEMP}/hdf-governed-push-ssh-config"
           umask 077
           printf '%s\n' "${AUTOMATION_PUSH_PRIVATE_KEY}" > "${key_path}"
-          public_key="$(ssh-keygen -y -f "${key_path}")"
+          public_key="$(ssh-keygen -y -f "${key_path}" | awk '{ print $1 " " $2 }')"
           [[ "${public_key}" == ssh-ed25519\ * ]]
           [[ "$(printf '%s\n' "${public_key}" | awk '{print NF}')" == "2" ]]
           actual_fingerprint="$(
