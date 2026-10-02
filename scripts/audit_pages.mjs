@@ -8856,6 +8856,22 @@ function recordedSignedRelayAcquisitionEvidence(
   return expected;
 }
 
+function algumonNavigationErrorEvidence(error) {
+  if (error === null || error === undefined) return null;
+  const categories = ["timeout", "network", "navigation-failed"];
+  if (categories.includes(error?.category) && typeof error?.errorSha256 === "string" &&
+    /^[a-f0-9]{64}$/u.test(error.errorSha256)) {
+    return { category: error.category, errorSha256: error.errorSha256 };
+  }
+  const message = String(error?.message ?? error);
+  return {
+    category: /\b(?:timeout|timed out)\b/iu.test(message)
+      ? "timeout"
+      : /\bnet::ERR_[A-Z_]+\b/u.test(message) ? "network" : "navigation-failed",
+    errorSha256: sha256(message),
+  };
+}
+
 function classifyAlgumonSourceResponse(responseEvidence) {
   const status = responseEvidence?.status;
   const body = normalizeAlgumonSourceLabel(
@@ -8906,7 +8922,7 @@ function classifyAlgumonSourceResponse(responseEvidence) {
       requested: describeUrl(responseEvidence?.requestedUrl),
       final: describeUrl(responseEvidence?.finalUrl),
       response: describeUrl(responseEvidence?.responseUrl),
-      navigationError: responseEvidence?.navigationError ?? null,
+      navigationError: algumonNavigationErrorEvidence(responseEvidence?.navigationError),
     };
   }
   return null;
@@ -9093,7 +9109,7 @@ async function navigateAlgumonSourcePage(page, requestedUrl, timeoutMs) {
       contentType: "",
       title: await page.title().catch(() => ""),
       bodyText: await page.locator("body").innerText().catch(() => ""),
-      navigationError: error?.message ?? String(error),
+      navigationError: algumonNavigationErrorEvidence(error),
     };
   }
   await page.waitForTimeout(350);
@@ -11702,6 +11718,7 @@ export {
   fixtureCoverageFailures,
   finalizeProfileLandingCoverage,
   matchingApprovedPaths,
+  navigateAlgumonSourcePage,
   networkFidelityFailures,
   networkResourceUrlSha256,
   networkRequestDecision,

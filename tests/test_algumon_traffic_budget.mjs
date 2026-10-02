@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { runInNewContext } from "node:vm";
 
 import {
@@ -9,6 +10,7 @@ import {
   countExistingApprovedLayoutMatches,
   createAlgumonRequestStartBudget,
   createLowTrafficAlgumonProbePlan,
+  navigateAlgumonSourcePage,
   transferAlgumonRelaySession,
 } from "../scripts/audit_pages.mjs";
 
@@ -286,6 +288,38 @@ function testSourceUrlMismatchRetainsDiagnosticIdentityWithoutQueryValues() {
   assert.notEqual(failure.final.urlSha256, failure.requested.urlSha256);
 }
 
+async function testNavigationErrorsPersistOnlyCategoryAndDigest() {
+  const requestedUrl = "https://www.algumon.com/n/deal?session=private-query-token";
+  for (const [prefix, category] of [
+    ["page.goto: Timeout 30000ms exceeded", "timeout"],
+    ["page.goto: net::ERR_CONNECTION_RESET", "network"],
+    ["page.goto: Target page closed", "navigation-failed"],
+  ]) {
+    const message = `${prefix}\nCall log:\n- navigating to "${requestedUrl}"\n` +
+      "- redirected to https://www.algumon.com/private-navigation-path?token=private-redirect-token";
+    const expected = {
+      category,
+      errorSha256: createHash("sha256").update(message).digest("hex"),
+    };
+    const page = {
+      goto: async () => { throw new Error(message); },
+      url: () => "about:blank",
+      title: async () => "",
+      locator: () => ({ innerText: async () => "" }),
+    };
+    const response = await navigateAlgumonSourcePage(page, requestedUrl, 30_000);
+    assert.deepEqual(response.navigationError, expected, "raw navigation exceptions are removed at capture");
+    for (const navigationError of [message, new Error(message), expected, { ...expected, raw: message }]) {
+      const failure = classifyAlgumonSourceResponse({ ...response, navigationError });
+      assert.deepEqual(failure.navigationError, expected, "classification never forwards unchecked error fields");
+      for (const secret of ["private-query-token", "private-navigation-path", "private-redirect-token", "Call log:"]) {
+        assert.equal(JSON.stringify(failure).includes(secret), false, secret);
+      }
+    }
+  }
+  assert.equal(classifyAlgumonSourceResponse({ status: null }).navigationError, null);
+}
+
 testLowTrafficProbePlan();
 testHardRequestStartBudget();
 testCapturedSnapshotProducesNoSourceRequests();
@@ -293,4 +327,5 @@ testCurrentEncryptedRelaySnapshotRetainsExactProvenance();
 await testSourceSessionCookiesStayInMemoryAndInScope();
 await testRegisteredArticleProjectionDoesNotRequireLegacySeed();
 testSourceUrlMismatchRetainsDiagnosticIdentityWithoutQueryValues();
+await testNavigationErrorsPersistOnlyCategoryAndDigest();
 process.stdout.write("Algumon traffic budget tests passed\n");
