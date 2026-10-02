@@ -463,10 +463,17 @@ def _capture_command(
     if not _command_exists(argv[0]):
         raise PrerequisiteFailure(f"required executable is unavailable: {argv[0]}")
     _log(f"running allowlisted step: {label}")
+    child_env = None
+    if sys.platform == "win32" and PureWindowsPath(argv[0]).name.casefold() == "powershell.exe":
+        # PowerShell 7's module path is incompatible with Windows PowerShell 5.1.
+        # Let only this child rebuild its native paths; leave the parent intact.
+        child_env = {key: value for key, value in os.environ.items()
+                     if key.casefold() != "psmodulepath"}
     try:
         completed = subprocess.run(
             list(argv),
             cwd=str(cwd),
+            env=child_env,
             check=False,
             capture_output=True,
             shell=False,

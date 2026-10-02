@@ -1,13 +1,24 @@
 import assert from "node:assert/strict";
 import vm from "node:vm";
+import { EventEmitter } from "node:events";
 
 import {
   FIRST_PAINT_PROBE_SOURCE,
+  canonicalArticleIdentity,
+  collectRetainedRoleResourceEvidence,
+  consumeArticleAccessLease,
+  createArticleAccessLease,
   createNetworkPolicyEvidenceRecorder,
+  createStylesheetDependencyRecorder,
   isPrivateOrSpecialIp,
   networkFidelityFailures,
   networkRequestDecision,
+  networkRequestRedirectEvidence,
+  networkResourceUrlSha256,
+  observeStylesheetDependencies,
   parseConnectAuthority,
+  primeDeclaredArticleNavigation,
+  validatePublicDnsAnswers,
 } from "../scripts/audit_pages.mjs";
 
 function assertDecision(label, input, expected) {
@@ -352,15 +363,17 @@ function testConcurrentReservations() {
   assert.equal(recorder.snapshot().attemptedRemoteRequestCount, 3);
 }
 
-function testAllowedResourceFailuresAreTerminalFidelityEvidence() {
+function testOptionalFailuresStayObservedWhileArticleResourcesRemainRequired() {
   const recorder = createNetworkPolicyEvidenceRecorder();
   recorder.recordAllowedRequestFailure(
     "ads.example",
     "script",
     "net::ERR_CONNECTION_RESET",
     false,
+    "https://ads.example/collect/private-token?secret=value",
   );
-  recorder.recordAllowedResponseFailure("api.example", "fetch", 503, false);
+  recorder.recordAllowedResponseFailure("api.example", "fetch", 503, false,
+    "https://api.example/analytics?secret=value");
 
   const evidence = recorder.snapshot();
   assert.deepEqual(evidence.failedAllowedRequestHosts, [{
@@ -377,9 +390,406 @@ function testAllowedResourceFailuresAreTerminalFidelityEvidence() {
     requestTypes: ["fetch"],
     reasons: ["http-503"],
   }]);
-  const failures = networkFidelityFailures(evidence);
+  assert.deepEqual(networkFidelityFailures(evidence), [], "unrelated ads and analytics must not reject an article");
+  assert.equal(JSON.stringify(evidence).includes("private-token"), false);
+  assert.equal(JSON.stringify(evidence).includes("secret=value"), false);
+  const failures = networkFidelityFailures(evidence, [], {
+    hosts: ["ads.example", "api.example"],
+    urlSha256s: [
+      networkResourceUrlSha256("https://ads.example/collect/private-token?secret=value"),
+      networkResourceUrlSha256("https://api.example/analytics?secret=value"),
+    ],
+  });
   assert.ok(failures.includes("an allowed remote request failed before a complete response"));
   assert.ok(failures.includes("an allowed remote response returned HTTP 4xx or 5xx"));
+  const sameHost = createNetworkPolicyEvidenceRecorder();
+  sameHost.recordAllowedResponseFailure("article.example", "script", 404, false,
+    "https://article.example/obsolete-analytics.js");
+  const articleResources = { hosts: ["article.example"], urlSha256s: [
+    networkResourceUrlSha256("https://article.example/product.webp"),
+    networkResourceUrlSha256("https://article.example/article.css"),
+  ] };
+  assert.deepEqual(networkFidelityFailures(sameHost.snapshot(), ["article.example"], articleResources), [],
+    "a stale same-origin analytics script must not be confused with an article resource");
+  sameHost.recordAllowedRequestFailure("article.example", "image", "net::ERR_ABORTED", false,
+    "https://article.example/product.webp#ignored");
+  sameHost.recordAllowedResponseFailure("article.example", "stylesheet", 404, false,
+    "https://article.example/article.css");
+  assert.equal(networkFidelityFailures(sameHost.snapshot(), ["article.example"], articleResources).length, 2);
+  const document = createNetworkPolicyEvidenceRecorder();
+  document.recordAllowedRequestFailure("article.example", "document", "net::ERR_ABORTED", true,
+    "https://article.example/deal/1");
+  assert.equal(networkFidelityFailures(document.snapshot()).length, 1,
+    "main document failures remain terminal without any role evidence");
+}
+
+function redirectRequestChain(urls) {
+  return urls.reduce((ancestor, url) => ({ url: () => url, redirectedFrom: () => ancestor }), null);
+}
+
+function testRedirectedArticleResourceFailuresRemainRequired() {
+  const urls = [
+    "https://article.example/private-photo?signature=original-secret",
+    "https://images.example/private-hop?signature=intermediate-secret",
+    "https://cdn.example/private-final?signature=final-secret#ignored",
+  ];
+  const request = redirectRequestChain(urls);
+  const redirectEvidence = networkRequestRedirectEvidence(request);
+  assert.deepEqual(redirectEvidence, {
+    ancestorUrlSha256s: urls.slice(0, -1).reverse().map(networkResourceUrlSha256),
+    status: "complete",
+  });
+  const recorder = createNetworkPolicyEvidenceRecorder();
+  recorder.recordAllowedRequestFailure("cdn.example", "image", "net::ERR_CONNECTION_RESET", false,
+    request.url(), redirectEvidence);
+  const snapshot = recorder.snapshot();
+  for (const url of urls) {
+    assert.deepEqual(networkFidelityFailures(snapshot, [], {
+      hosts: [], urlSha256s: [networkResourceUrlSha256(url)],
+    }), ["an allowed remote request failed before a complete response"],
+    "a retained original, intermediate, or final resource URL must identify a failed redirect chain");
+  }
+  assert.deepEqual(networkFidelityFailures(snapshot, ["cdn.example"], {
+    hosts: ["cdn.example"], urlSha256s: [networkResourceUrlSha256("https://cdn.example/unrelated.webp")],
+  }), [], "unrelated redirected advertising remains observed without rejecting the article");
+  for (const sensitiveText of ["private-photo", "private-hop", "private-final", "signature=", "secret"]) {
+    assert.equal(JSON.stringify(snapshot).includes(sensitiveText), false, sensitiveText);
+  }
+  snapshot.failedAllowedRequests[0].redirectAncestorUrlSha256s.length = 0;
+  assert.equal(recorder.snapshot().failedAllowedRequests[0].redirectAncestorUrlSha256s.length, 2,
+    "snapshot consumers cannot mutate recorded ancestry");
+
+  const stylesheet = redirectRequestChain([
+    "https://article.example/article.css", "https://cdn.example/article-v2.css",
+  ]);
+  const responses = createNetworkPolicyEvidenceRecorder();
+  responses.recordAllowedResponseFailure("cdn.example", "stylesheet", 503, false,
+    stylesheet.url(), networkRequestRedirectEvidence(stylesheet));
+  assert.deepEqual(networkFidelityFailures(responses.snapshot(), [], {
+    hosts: [], urlSha256s: [networkResourceUrlSha256("https://article.example/article.css")],
+  }), ["an allowed remote response returned HTTP 4xx or 5xx"]);
+  assert.deepEqual(networkRequestRedirectEvidence(redirectRequestChain([urls[0]])), {
+    ancestorUrlSha256s: [], status: "complete",
+  });
+}
+
+function testRedirectAncestryBoundsAndIncompleteEvidence() {
+  const urls = Array.from({ length: 34 }, (_, index) => `https://cdn.example/hop-${index}`);
+  const atLimit = networkRequestRedirectEvidence(redirectRequestChain(urls.slice(0, 33)));
+  assert.equal(atLimit.status, "complete");
+  assert.equal(atLimit.ancestorUrlSha256s.length, 32);
+  const overflow = networkRequestRedirectEvidence(redirectRequestChain(urls));
+  assert.equal(overflow.status, "overflow");
+  assert.equal(overflow.ancestorUrlSha256s.length, 32);
+  const cycle = { url: () => urls[0], redirectedFrom: () => cycle };
+  const invalid = redirectRequestChain(["not a URL", urls[1]]);
+  const unavailable = { url: () => urls[0], redirectedFrom: () => { throw new Error("private-secret"); } };
+  for (const [request, status] of [
+    [redirectRequestChain(urls), "overflow"], [cycle, "cycle"],
+    [invalid, "invalid-url"], [unavailable, "unavailable"],
+  ]) {
+    const ancestry = networkRequestRedirectEvidence(request);
+    assert.equal(ancestry.status, status);
+    for (const failureKind of ["request", "response"]) {
+      const recorder = createNetworkPolicyEvidenceRecorder();
+      if (failureKind === "request") {
+        recorder.recordAllowedRequestFailure("cdn.example", "image", "net::ERR_ABORTED", false,
+          request.url(), ancestry);
+      } else {
+        recorder.recordAllowedResponseFailure("cdn.example", "stylesheet", 503, false,
+          request.url(), ancestry);
+      }
+      assert.ok(networkFidelityFailures(recorder.snapshot()).includes(
+        "failed resource redirect ancestry was incomplete or cyclic"),
+      `${failureKind}: ${status} must not be silently treated as an optional resource`);
+      assert.equal(JSON.stringify(recorder.snapshot()).includes("private-secret"), false);
+    }
+  }
+  assert.equal(networkRequestRedirectEvidence(redirectRequestChain([urls[0], urls[0]])).status, "complete",
+    "distinct requests sharing one URL are not an object-reference cycle");
+}
+
+async function testStylesheetDependenciesPreserveImportedCssAndFonts() {
+  const main = "https://article.example/main.css?private=root-token";
+  const redirected = "https://styles.example/main.css?private=redirect-token";
+  const imported = "https://themes.example/theme.css?private=theme-token";
+  const font = "https://fonts.example/article.woff2?private=font-token";
+  const event = (url, parent, type = "Stylesheet", frameId = "article-frame") => ({
+    frameId, type, request: { url }, initiator: { type: "parser", url: parent },
+  });
+  const dependencies = createStylesheetDependencyRecorder();
+  const session = new EventEmitter();
+  const commands = [];
+  session.send = async (command) => {
+    commands.push(command);
+    return command === "Page.getFrameTree" ? { frameTree: { frame: { id: "article-frame" } } } : {};
+  };
+  session.detach = async () => { commands.push("detach"); };
+  const stop = await observeStylesheetDependencies({ newCDPSession: async () => session }, {}, dependencies);
+  assert.deepEqual(commands, ["Page.enable", "Page.getFrameTree", "Network.enable"]);
+  session.emit("Network.requestWillBeSent", { ...event(redirected, "https://article.example/deal/1"),
+    redirectResponse: { url: main } });
+  session.emit("Network.requestWillBeSent", event(imported, redirected));
+  session.emit("Network.requestWillBeSent", event(font, imported, "Font"));
+  // Cyclic CSS imports are harmless to dependency traversal, not an unbounded loop.
+  session.emit("Network.requestWillBeSent", event(redirected, imported));
+  const optionalUrls = [
+    ["https://themes.example/ads.css", "https://ads.example/ad-root.css", "Stylesheet", "article-frame"],
+    ["https://fonts.example/ad.woff2", "https://ads.example/ad-root.css", "Font", "article-frame"],
+    ["https://themes.example/frame.css", main, "Stylesheet", "ad-frame"],
+    ["https://fonts.example/frame.woff2", main, "Font", "ad-frame"],
+    ["https://themes.example/analytics", main, "XHR", "article-frame"],
+    ["https://fonts.example/analytics.js", main, "Script", "article-frame"],
+  ];
+  for (const args of optionalUrls) session.emit("Network.requestWillBeSent", event(...args));
+  const roleEvidence = { hosts: ["article.example"], urlSha256s: [networkResourceUrlSha256(main)] };
+  for (const [url, type] of [[imported, "stylesheet"], [font, "font"]]) {
+    const failed = createNetworkPolicyEvidenceRecorder();
+    failed.recordAllowedRequestFailure(new URL(url).hostname, type, "net::ERR_CONNECTION_RESET", false, url);
+    failed.recordAllowedResponseFailure(new URL(url).hostname, type, 503, false, url);
+    const evidence = { ...failed.snapshot(), stylesheetDependencies: dependencies.snapshot() };
+    assert.deepEqual(networkFidelityFailures(evidence, [], roleEvidence), [
+      "an allowed remote request failed before a complete response",
+      "an allowed remote response returned HTTP 4xx or 5xx",
+    ], "required cross-origin CSS imports and fonts retain the same failure semantics as their root stylesheet");
+  }
+  for (const [url, , type] of optionalUrls) {
+    const failed = createNetworkPolicyEvidenceRecorder();
+    failed.recordAllowedResponseFailure(new URL(url).hostname, type.toLowerCase(), 503, false, url);
+    assert.deepEqual(networkFidelityFailures({ ...failed.snapshot(),
+      stylesheetDependencies: dependencies.snapshot() }, [], roleEvidence), [],
+    "unrelated same-host, other-frame, and non-CSS/font resources stay optional");
+  }
+  const serialized = JSON.stringify(dependencies.snapshot());
+  for (const token of ["private=", "root-token", "redirect-token", "theme-token", "font-token", ".css", ".woff2"]) {
+    assert.equal(serialized.includes(token), false, token);
+  }
+  await stop();
+  assert.equal(session.listenerCount("Network.requestWillBeSent"), 0);
+  assert.equal(session.listenerCount("Page.frameNavigated"), 0);
+  assert.equal(commands.at(-1), "detach", "the CDP session is detached during context cleanup");
+
+  const bounded = createStylesheetDependencyRecorder({ maximumDependencies: 1 });
+  bounded.recordRequest(event(imported, main), "article-frame");
+  bounded.recordRequest(event(font, imported, "Font"), "article-frame");
+  assert.equal(bounded.snapshot().dependencies.length, 1);
+  assert.equal(bounded.snapshot().dependencyOverflowCount, 1);
+  assert.ok(networkFidelityFailures({ stylesheetDependencies: bounded.snapshot() }, [], roleEvidence)
+    .includes("stylesheet dependency evidence was invalid or exceeded its bounded dependency count"));
+  const invalid = createStylesheetDependencyRecorder();
+  invalid.recordRequest(event(font, "not-a-url", "Font"), "article-frame");
+  assert.equal(invalid.snapshot().invalidDependencyCount, 1);
+  assert.ok(networkFidelityFailures({ stylesheetDependencies: invalid.snapshot() }, [], roleEvidence)
+    .includes("stylesheet dependency evidence was invalid or exceeded its bounded dependency count"));
+  const brokenSession = new EventEmitter();
+  let detachedAfterFailure = false;
+  brokenSession.send = async (command) => {
+    if (command === "Network.enable") throw new Error("fixture CDP capture unavailable");
+    return command === "Page.getFrameTree" ? { frameTree: { frame: { id: "article-frame" } } } : {};
+  };
+  brokenSession.detach = async () => { detachedAfterFailure = true; };
+  await assert.rejects(() => observeStylesheetDependencies(
+    { newCDPSession: async () => brokenSession }, {}, createStylesheetDependencyRecorder()),
+  /fixture CDP capture unavailable/u);
+  assert.equal(detachedAfterFailure, true);
+  assert.equal(brokenSession.listenerCount("Network.requestWillBeSent"), 0);
+  assert.equal(brokenSession.listenerCount("Page.frameNavigated"), 0);
+}
+
+function testInlineStylesheetDependenciesUseActualDocumentUrl() {
+  const documentUrl = "https://article.example/deal/7?private=document-token";
+  const baseUri = "https://unrelated.example/private-base/";
+  const inlineFont = "https://fonts.example/inline.woff2";
+  const inlineStyle = {
+    localName: "style", matches: () => false, nextElementSibling: null,
+    sheet: { href: null, cssRules: [{ type: 4, cssRules: [
+      { type: 5, style: { getPropertyValue: () => `url("${inlineFont}")` } },
+    ] }] },
+  };
+  const roleEvidence = vm.runInNewContext(`(${collectRetainedRoleResourceEvidence.toString()})([])`, {
+    document: { URL: documentUrl, baseURI: baseUri, head: { firstElementChild: inlineStyle } },
+    performance: { now: () => 0 }, URL,
+  });
+  assert.deepEqual([...roleEvidence.urls], [documentUrl, inlineFont],
+    "the actual document initiator and grouped inline font sources survive a base element");
+  const { urls, ...safeEvidence } = roleEvidence;
+  safeEvidence.urlSha256s = urls.map(networkResourceUrlSha256);
+  const theme = "https://themes.example/inline-theme.css";
+  const importedFont = "https://fonts.example/imported.woff2";
+  const unrelatedFont = "https://fonts.example/unrelated.woff2";
+  const dependencies = createStylesheetDependencyRecorder();
+  for (const [url, parent, type] of [
+    [theme, documentUrl, "Stylesheet"],
+    [importedFont, theme, "Font"],
+    [unrelatedFont, baseUri, "Font"],
+  ]) {
+    dependencies.recordRequest({ frameId: "main", type,
+      request: { url }, initiator: { type: "parser", url: parent } }, "main");
+  }
+  dependencies.recordRequest({ frameId: "main", type: "Font",
+    request: { url: inlineFont }, initiator: { type: "other" } }, "main");
+  for (const url of [theme, importedFont, inlineFont, unrelatedFont]) {
+    const failed = createNetworkPolicyEvidenceRecorder();
+    failed.recordAllowedResponseFailure(new URL(url).hostname, url === theme ? "stylesheet" : "font", 503, false, url);
+    const actual = networkFidelityFailures({ ...failed.snapshot(), stylesheetDependencies: dependencies.snapshot() }, [], safeEvidence);
+    assert.deepEqual(actual, url === unrelatedFont ? [] : ["an allowed remote response returned HTTP 4xx or 5xx"],
+      "only document-rooted inline CSS/font dependencies become required");
+  }
+  const serialized = JSON.stringify({ ...safeEvidence, stylesheetDependencies: dependencies.snapshot() });
+  assert.equal(serialized.includes("document-token"), false);
+  assert.equal(serialized.includes("/deal/7"), false);
+  assert.equal(serialized.includes("private-base"), false);
+  inlineStyle.sheet.cssRules = Array.from({ length: 2049 }, () => ({ type: 1 }));
+  const overBudget = vm.runInNewContext(`(${collectRetainedRoleResourceEvidence.toString()})([])`, {
+    document: { URL: documentUrl, baseURI: baseUri, head: { firstElementChild: inlineStyle } },
+    performance: { now: () => 0 }, URL,
+  });
+  assert.equal(overBudget.stylesheetRuleCount, 2048);
+  assert.equal(overBudget.stylesheetRuleOverflowCount, 1);
+  assert.ok(networkFidelityFailures({}, [], overBudget)
+    .includes("inline stylesheet font evidence was unreadable or exceeded its bounded rule count"));
+}
+
+function testRetainedComputedUrlPropertiesExcludeUnrelatedImages() {
+  const properties = ["maskImage", "webkitMaskImage", "borderImageSource", "maskBorderSource",
+    "webkitMaskBoxImageSource", "cursor", "shapeOutside", "filter", "backdropFilter",
+    "webkitBackdropFilter", "clipPath", "offsetPath", "fill", "stroke", "markerStart",
+    "markerMid", "markerEnd", "webkitBoxReflect"];
+  class FixtureElement {
+    localName = "div";
+    children = [];
+    style = {};
+    getAttribute() { return null; }
+  }
+  const element = new FixtureElement();
+  const computedStyle = Object.fromEntries(properties.map((name) => [name,
+    `url("https://cdn.example/retained-${name}.svg?private=resource-token#shape")`]));
+  computedStyle["--unused-image"] = 'url("https://cdn.example/unused-ad.webp")';
+  const { urls, ...roleEvidence } = vm.runInNewContext(
+    `(${collectRetainedRoleResourceEvidence.toString()})(["#article"])`, {
+      Element: FixtureElement,
+      document: { URL: "https://article.example/deal/7", baseURI: "https://article.example/deal/7",
+        head: null, querySelector: () => element },
+      window: { getComputedStyle: () => computedStyle },
+      performance: { now: () => 0 }, URL,
+    });
+  roleEvidence.urlSha256s = urls.map(networkResourceUrlSha256);
+  assert.equal(urls.length, properties.length + 1, "resolved aliases and pseudo-elements are URL-deduplicated");
+  for (const property of properties) {
+    const recorder = createNetworkPolicyEvidenceRecorder();
+    recorder.recordAllowedRequestFailure("cdn.example", "image", "net::ERR_FAILED", false,
+      `https://cdn.example/retained-${property}.svg?private=resource-token`);
+    assert.deepEqual(networkFidelityFailures(recorder.snapshot(), [], roleEvidence),
+      ["an allowed remote request failed before a complete response"], property);
+  }
+  for (const url of ["https://cdn.example/unused-ad.webp", "https://cdn.example/sidebar-ad.webp"]) {
+    const recorder = createNetworkPolicyEvidenceRecorder();
+    recorder.recordAllowedRequestFailure("cdn.example", "image", "net::ERR_FAILED", false, url);
+    assert.deepEqual(networkFidelityFailures(recorder.snapshot(), [], roleEvidence), [],
+      "unused custom properties and non-retained same-host ad images remain optional");
+  }
+  assert.equal(JSON.stringify(roleEvidence).includes("resource-token"), false);
+}
+
+function testRetainedUrlBudgetCountsUniqueNormalizedResources() {
+  class FixtureElement {
+    localName = "div";
+    children = [];
+    style = {};
+    getAttribute() { return null; }
+  }
+  const element = new FixtureElement();
+  const collect = (values) => vm.runInNewContext(
+    `(${collectRetainedRoleResourceEvidence.toString()})(["#article"])`, {
+      Element: FixtureElement,
+      document: { baseURI: "https://article.example/deal/7", head: null, querySelector: () => element },
+      window: { getComputedStyle: (_element, pseudo) => pseudo ? {} : {
+        cursor: values.map((value) => `url("${value}")`).join(","),
+      } }, performance: { now: () => 0 }, URL,
+    });
+  const repeated = collect(Array.from({ length: 4096 }, (_, index) => index % 2 === 0
+    ? "/shared-cursor.svg#pointer" : "https://article.example/shared-cursor.svg#alternate"));
+  assert.equal(repeated.urlCount, 1, "relative/absolute and fragment variants share one resource budget entry");
+  assert.equal(repeated.urlOverflowCount, 0, "4096 references to one inherited cursor must not fail");
+  assert.deepEqual([...repeated.urls], ["https://article.example/shared-cursor.svg"]);
+  const unique = collect(Array.from({ length: 4097 }, (_, index) => `https://cdn.example/cursor-${index}.svg`));
+  assert.equal(unique.urlCount, 4096);
+  assert.equal(unique.urlOverflowCount, 1, "4097 genuinely different resources still exceed the limit");
+  assert.ok(networkFidelityFailures({}, [], unique)
+    .includes("semantic role resource traversal exceeded its URL budget"));
+}
+
+function testPublicDnsAnswerCardinalityAndPrivacy() {
+  const publicRecords = Array.from({ length: 128 }, (_, index) => ({ address: `8.8.8.${index + 1}` }));
+  const full = validatePublicDnsAnswers(publicRecords);
+  assert.equal(full.reason, "public-addresses-validated");
+  assert.equal(full.answerCount, 128);
+  assert.equal(full.uniqueAddressCount, 128);
+  assert.equal(full.addresses.length, 128);
+  const normalCdn = validatePublicDnsAnswers(publicRecords.slice(0, 32));
+  assert.equal(normalCdn.addresses.length, 32, "a normal CDN may legitimately have more than sixteen public addresses");
+  const duplicates = validatePublicDnsAnswers([...publicRecords.slice(0, 32), ...publicRecords.slice(0, 32)]);
+  assert.equal(duplicates.answerCount, 64);
+  assert.equal(duplicates.uniqueAddressCount, 32);
+  assert.equal(duplicates.addresses.length, 32);
+  const tooMany = validatePublicDnsAnswers([...publicRecords, { address: "1.1.1.1" }]);
+  assert.equal(tooMany.reason, "dns-answer-budget-exceeded");
+  assert.equal(tooMany.uniqueAddressCount, 129);
+  assert.deepEqual(tooMany.addresses, []);
+  for (const address of ["127.0.0.1", "10.0.0.1", "::1", "::ffff:7f00:1", "invalid"]) {
+    const unsafe = validatePublicDnsAnswers([...publicRecords.slice(0, 32), { address }]);
+    assert.equal(unsafe.reason, "dns-not-public", address);
+    assert.deepEqual(unsafe.addresses, [], "one private answer rejects the entire pinned set");
+  }
+}
+
+function testArticleLeaseBudgetsOnlyScopedCookies() {
+  const now = 1_800_000_000_000;
+  const identity = canonicalArticleIdentity("https://example.com/deal/7");
+  const binding = { siteId: "example", profileName: "desktop",
+    requestedArticleIdentitySha256: identity.sha256,
+    resolvedArticleIdentitySha256: identity.sha256, resolvedRouteFamily: identity.routeFamily };
+  const cookie = (index, domain = ".example.com", value = "test-value") => ({
+    name: `c${index}`, value, domain, path: "/", expires: -1,
+    httpOnly: true, secure: true, sameSite: "None",
+  });
+  const foreign = Array.from({ length: 80 }, (_, index) => cookie(index, ".ads.example.net", "x".repeat(1000)));
+  const scoped = Array.from({ length: 64 }, (_, index) => cookie(index));
+  const lease = createArticleAccessLease([...foreign, ...scoped], binding, ["example.com"], now);
+  assert.equal(lease.evidence.cookieCount, 64);
+  assert.deepEqual(lease.storageState.origins, []);
+  assert.equal(lease.storageState.cookies.some(entry => entry.domain === ".ads.example.net"), false);
+  assert.equal(JSON.stringify(lease.evidence).includes("test-value"), false);
+  const consumed = consumeArticleAccessLease(lease, binding, now + 1);
+  assert.equal(consumed.cookies.length, 64);
+  assert.throws(() => consumeArticleAccessLease(lease, binding, now + 2));
+  assert.throws(() => createArticleAccessLease([...scoped, cookie(65)], binding, ["example.com"], now), /cookie count/);
+  assert.throws(() => createArticleAccessLease(Array.from({ length: 17 }, (_, i) => cookie(i, ".example.com", "x".repeat(4096))),
+    binding, ["example.com"], now), /cookie bytes/);
+  assert.throws(() => createArticleAccessLease([cookie(1, ".example.com", "bad\nvalue")], binding, ["example.com"], now), /invalid cookie/);
+  const rejected = createArticleAccessLease([
+    { ...cookie(1), secure: false }, { ...cookie(2), expires: now / 1000 - 1 }, cookie(3, ".example.com.attacker.test"),
+  ], binding, ["example.com"], now);
+  assert.equal(rejected.evidence.cookieCount, 0);
+}
+
+async function testArticleNavigationPrimingIsScopedAndPublic() {
+  const calls = [];
+  const session = { approvePublicHost: async hostname => {
+    calls.push(hostname);
+    return ["8.8.8.8"];
+  } };
+  await primeDeclaredArticleNavigation(session, "https://www.example.com/deal/7", ["example.com"]);
+  assert.deepEqual(calls, ["www.example.com"]);
+  for (const url of ["http://example.com/deal/7", "https://evil.example.net/deal/7",
+    "https://user:secret@example.com/deal/7", "https://example.com:8443/deal/7", "https://127.0.0.1/deal/7"]) {
+    await assert.rejects(primeDeclaredArticleNavigation(session, url, ["example.com"]), /priming refused/);
+  }
+  assert.deepEqual(calls, ["www.example.com"], "invalid destinations must never reach DNS or approval");
+  for (const addresses of [[], ["127.0.0.1"], ["8.8.8.8", "10.0.0.1"]]) {
+    await assert.rejects(primeDeclaredArticleNavigation({ approvePublicHost: async () => addresses },
+      "https://example.com/deal/7", ["example.com"]), /no verified public/);
+  }
 }
 
 async function testSealDrainAndLateRequest() {
@@ -509,6 +919,54 @@ function testConnectAuthorityParser() {
   }
 }
 
+function testHeadStylesheetTraversalBounds() {
+  const collect = (length, elapsedStep = 0) => {
+    let inspections = 0;
+    let clock = 0;
+    const headNodes = Array.from({ length }, (_, index) => ({
+      href: `https://example.com/article-${index}.css`,
+      matches() {
+        inspections += 1;
+        return index === length - 1;
+      },
+      nextElementSibling: null,
+    }));
+    for (let index = 0; index < headNodes.length - 1; index += 1) {
+      headNodes[index].nextElementSibling = headNodes[index + 1];
+    }
+    const evidence = vm.runInNewContext(`(${collectRetainedRoleResourceEvidence.toString()})([])`, {
+      document: { head: { firstElementChild: headNodes[0] ?? null }, baseURI: "https://example.com/deal/7" },
+      performance: { now: () => { const value = clock; clock += elapsedStep; return value; } },
+      URL,
+    });
+    return { evidence, inspections };
+  };
+
+  for (const length of [0, 100, 2048]) {
+    const { evidence, inspections } = collect(length);
+    assert.equal(inspections, length);
+    assert.equal(evidence.headNodeCount, length);
+    assert.equal(evidence.nodeOverflowCount, 0, "exactly completing the head budget is not overflow");
+    assert.equal(evidence.elapsedTimeOverflowCount, 0);
+    assert.equal(evidence.urlCount, length === 0 ? 0 : 1);
+    assert.deepEqual(networkFidelityFailures({}, [], evidence), [], "ordinary metadata does not fail an article");
+  }
+  const overNodes = collect(4096);
+  assert.equal(overNodes.inspections, 2048, "non-link children still consume the head traversal budget");
+  assert.equal(overNodes.evidence.headNodeCount, 2048);
+  assert.equal(overNodes.evidence.nodeOverflowCount, 1);
+  assert.equal(overNodes.evidence.urlCount, 0, "a stylesheet past the inspected bound must not be claimed as inspected");
+  assert.ok(networkFidelityFailures({}, [], overNodes.evidence)
+    .includes("semantic role resource traversal exceeded its node budget"));
+
+  const overTime = collect(1000, 20);
+  assert.ok(overTime.inspections > 0 && overTime.inspections < 1000);
+  assert.equal(overTime.evidence.nodeOverflowCount, 0);
+  assert.equal(overTime.evidence.elapsedTimeOverflowCount, 1);
+  assert.ok(networkFidelityFailures({}, [], overTime.evidence)
+    .includes("semantic role resource traversal exceeded its time budget"));
+}
+
 function testRecoveryPaintClassification() {
   for (const [label, attributes, active] of [
     ["recovery-only", { "data-hotdeal-focus-status": "recovery-preflight-not-ready" }, false],
@@ -550,11 +1008,21 @@ async function main() {
   testRemoteHostBudgetBoundary();
   testRemoteRequestBudgetBoundary();
   testConcurrentReservations();
-  testAllowedResourceFailuresAreTerminalFidelityEvidence();
+  testOptionalFailuresStayObservedWhileArticleResourcesRemainRequired();
+  testRedirectedArticleResourceFailuresRemainRequired();
+  testRedirectAncestryBoundsAndIncompleteEvidence();
+  await testStylesheetDependenciesPreserveImportedCssAndFonts();
+  testInlineStylesheetDependenciesUseActualDocumentUrl();
+  testRetainedComputedUrlPropertiesExcludeUnrelatedImages();
+  testRetainedUrlBudgetCountsUniqueNormalizedResources();
+  testPublicDnsAnswerCardinalityAndPrivacy();
+  testArticleLeaseBudgetsOnlyScopedCookies();
+  await testArticleNavigationPrimingIsScopedAndPublic();
   await testSealDrainAndLateRequest();
   await testSealDrainTimeoutFailsClosed();
   testSpecialIpRanges();
   testConnectAuthorityParser();
+  testHeadStylesheetTraversalBounds();
   process.stdout.write("PASS network fidelity pure-helper regression tests\n");
 }
 

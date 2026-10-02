@@ -1,11 +1,16 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import { runInNewContext } from "node:vm";
 
 import {
   AlgumonRequestBudgetExceeded,
   DEFAULT_ALGUMON_REQUEST_START_BUDGET,
   capturedAlgumonTargetsFromReport,
+  classifyAlgumonSourceResponse,
+  countExistingApprovedLayoutMatches,
   createAlgumonRequestStartBudget,
   createLowTrafficAlgumonProbePlan,
+  navigateAlgumonSourcePage,
   transferAlgumonRelaySession,
 } from "../scripts/audit_pages.mjs";
 
@@ -224,9 +229,125 @@ async function testSourceSessionCookiesStayInMemoryAndInScope() {
   assert.equal(actions.length, 2, "invalid source cookies never mutate the private relay context");
 }
 
+async function testRegisteredArticleProjectionDoesNotRequireLegacySeed() {
+  const layout = { id: "jirum", domain: "clien.net", paths: ["/service/board/jirum/"] };
+  const oracleSource = `module.exports = {
+    SITE_CONTRACTS: [{ id: "clien", domain: "clien.net", layouts: [${JSON.stringify(layout)}] }],
+    pathPatternMatches(path, prefix) { return path.startsWith(prefix); },
+    resolveProjectionClasses(document, layouts, seed) {
+      if (seed !== null && seed.siteType !== "clien") throw Error("wrong seed");
+      return { projectionClasses: layouts.map(layout => [{ layoutId: layout.id }]) };
+    }
+  };`;
+  const pageFor = (hostname) => ({ context: () => ({ newCDPSession: async () => ({
+    send: async (method, options) => {
+      if (method === "Page.getFrameTree") return { frameTree: { frame: { id: "fixture" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.callFunctionOn") {
+        const execute = runInNewContext(`(${options.functionDeclaration})`, {
+          location: { hostname, pathname: "/service/board/jirum/123", search: "" },
+          document: {},
+        });
+        return { result: { type: "object", value: execute(options.arguments[0].value) } };
+      }
+      return {};
+    },
+    detach: async () => {},
+  }) }) });
+  const registered = await countExistingApprovedLayoutMatches(pageFor("www.clien.net"), layout, oracleSource, null);
+  assert.equal(registered.semanticProjectionCount, 1);
+  assert.equal(registered.classes[0].canonicalId, "jirum");
+  const seeded = await countExistingApprovedLayoutMatches(pageFor("www.clien.net"), layout, oracleSource, {
+    siteType: "clien", title: "쌀", commentCount: 0,
+  });
+  assert.equal(seeded.semanticProjectionCount, 1);
+  const wrongHost = await countExistingApprovedLayoutMatches(pageFor("www.clien.net.evil.example"), layout, oracleSource, null, [layout]);
+  assert.equal(wrongHost.semanticProjectionCount, 0, "explicit layouts do not override the exact site hostname");
+  const wrongSeed = await countExistingApprovedLayoutMatches(pageFor("www.clien.net"), layout, oracleSource, {
+    siteType: "ruliweb", title: "쌀", commentCount: 0,
+  });
+  assert.equal(wrongSeed.semanticProjectionCount, 0, "a supplied contradictory source identity remains rejected");
+}
+
+function testSourceUrlMismatchRetainsDiagnosticIdentityWithoutQueryValues() {
+  const failure = classifyAlgumonSourceResponse({
+    status: 200,
+    contentType: "text/html",
+    requestedUrl: "https://www.algumon.com/n/deal",
+    responseUrl: "https://www.algumon.com/n/deal",
+    finalUrl: "https://www.algumon.com/n/deal?session=not-to-be-recorded#feed",
+    title: "알구몬", bodyText: "핫딜",
+  });
+  assert.equal(failure.kind, "source-or-infrastructure-failure");
+  assert.equal(failure.exactUrl, false);
+  assert.equal(failure.final.pathKind, "deal-feed");
+  assert.equal(failure.final.pathSha256, createHash("sha256").update("/n/deal").digest("hex"));
+  assert.deepEqual(failure.final.queryKeys, []);
+  assert.equal(failure.final.otherQueryKeyCount, 1);
+  assert.equal(failure.final.hasFragment, true);
+  assert.equal(failure.response.urlSha256, failure.requested.urlSha256);
+  assert.equal(JSON.stringify(failure).includes("not-to-be-recorded"), false);
+  assert.notEqual(failure.final.urlSha256, failure.requested.urlSha256);
+}
+
+function testSourceFailureRedactsRedirectPathsAndUnknownQueryKeys() {
+  const secretUrl = "https://private-user:private-password@www.algumon.com/callback/private-path-token?private-query-key=private-query-value&sites=private-site-value#private-fragment";
+  const failure = classifyAlgumonSourceResponse({
+    status: null, requestedUrl: secretUrl, finalUrl: secretUrl, responseUrl: secretUrl,
+  });
+  for (const description of [failure.requested, failure.final, failure.response]) {
+    assert.equal(description.pathKind, "other");
+    assert.equal(description.pathDepth, 2);
+    assert.equal(description.trailingSlash, false);
+    assert.equal(description.pathSha256, createHash("sha256").update("/callback/private-path-token").digest("hex"));
+    assert.deepEqual(description.queryKeys, ["sites"]);
+    assert.equal(description.otherQueryKeyCount, 1);
+    assert.equal(description.hasFragment, true);
+    assert.equal(Object.hasOwn(description, "pathname"), false);
+  }
+  assert.equal(JSON.stringify(failure).includes("private-"), false);
+  assert.equal(JSON.stringify(failure).includes("/callback/"), false);
+}
+
+async function testNavigationErrorsPersistOnlyCategoryAndDigest() {
+  const requestedUrl = "https://www.algumon.com/n/deal?session=private-query-token";
+  for (const [prefix, category] of [
+    ["page.goto: Timeout 30000ms exceeded", "timeout"],
+    ["page.goto: net::ERR_CONNECTION_RESET", "network"],
+    ["page.goto: Target page closed", "navigation-failed"],
+  ]) {
+    const message = `${prefix}\nCall log:\n- navigating to "${requestedUrl}"\n` +
+      "- redirected to https://www.algumon.com/private-navigation-path?token=private-redirect-token";
+    const expected = {
+      category,
+      errorSha256: createHash("sha256").update(message).digest("hex"),
+    };
+    const page = {
+      goto: async () => { throw new Error(message); },
+      url: () => "about:blank",
+      title: async () => "",
+      locator: () => ({ innerText: async () => "" }),
+    };
+    const response = await navigateAlgumonSourcePage(page, requestedUrl, 30_000);
+    assert.deepEqual(response.navigationError, expected, "raw navigation exceptions are removed at capture");
+    for (const navigationError of [message, new Error(message), expected, { ...expected, raw: message }]) {
+      const failure = classifyAlgumonSourceResponse({ ...response, navigationError });
+      assert.deepEqual(failure.navigationError, expected, "classification never forwards unchecked error fields");
+      for (const secret of ["private-query-token", "private-navigation-path", "private-redirect-token", "Call log:"]) {
+        assert.equal(JSON.stringify(failure).includes(secret), false, secret);
+      }
+    }
+  }
+  assert.equal(classifyAlgumonSourceResponse({ status: null }).navigationError, null);
+}
+
 testLowTrafficProbePlan();
 testHardRequestStartBudget();
 testCapturedSnapshotProducesNoSourceRequests();
 testCurrentEncryptedRelaySnapshotRetainsExactProvenance();
 await testSourceSessionCookiesStayInMemoryAndInScope();
+await testRegisteredArticleProjectionDoesNotRequireLegacySeed();
+testSourceUrlMismatchRetainsDiagnosticIdentityWithoutQueryValues();
+testSourceFailureRedactsRedirectPathsAndUnknownQueryKeys();
+await testNavigationErrorsPersistOnlyCategoryAndDigest();
 process.stdout.write("Algumon traffic budget tests passed\n");

@@ -212,6 +212,48 @@ class SubprocessContractTests(unittest.TestCase):
         self.assertIs(keywords["shell"], False)
         self.assertTrue(keywords["capture_output"])
 
+    def test_windows_powershell_rebuilds_only_child_module_path(self):
+        for executable in (
+            "powershell.exe",
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\PowerShell.EXE",
+        ):
+            parent_environment = {
+                "PSModulePath": "powershell-7-modules",
+                "psmodulepath": "case-insensitive-duplicate",
+                "PATH": "preserved-executable-path",
+                "HDF_TEST_SETTING": "preserved-value",
+            }
+            before = dict(parent_environment)
+            completed = subprocess.CompletedProcess([executable], 0, stdout=b"ok", stderr=b"")
+            with self.subTest(executable=executable), mock.patch.object(
+                cli.sys, "platform", "win32"
+            ), mock.patch.object(cli.os, "environ", parent_environment), mock.patch.object(
+                cli, "_command_exists", return_value=True
+            ), mock.patch.object(cli.subprocess, "run", return_value=completed) as run:
+                cli._capture_command((executable, "-NoProfile"), label="signature")
+            self.assertEqual(run.call_args.kwargs["env"], {
+                "PATH": "preserved-executable-path",
+                "HDF_TEST_SETTING": "preserved-value",
+            })
+            self.assertEqual(parent_environment, before)
+
+    def test_other_executables_and_platforms_keep_environment_inheritance(self):
+        for platform, executable in (
+            ("win32", "pwsh.exe"),
+            ("win32", "node"),
+            ("linux", "powershell.exe"),
+        ):
+            parent_environment = {"PSModulePath": "unchanged-modules"}
+            completed = subprocess.CompletedProcess([executable], 0, stdout=b"ok", stderr=b"")
+            with self.subTest(platform=platform, executable=executable), mock.patch.object(
+                cli.sys, "platform", platform
+            ), mock.patch.object(cli.os, "environ", parent_environment), mock.patch.object(
+                cli, "_command_exists", return_value=True
+            ), mock.patch.object(cli.subprocess, "run", return_value=completed) as run:
+                cli._capture_command((executable, "--version"), label="version")
+            self.assertIsNone(run.call_args.kwargs["env"])
+            self.assertEqual(parent_environment, {"PSModulePath": "unchanged-modules"})
+
     def test_binary_gh_download_streams_without_shell_or_output_option(self):
         def execute(argv, **keywords):
             keywords["stdout"].write(b"zip-bytes")
