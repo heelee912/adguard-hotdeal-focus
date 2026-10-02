@@ -1310,7 +1310,7 @@ function New-FakeNextDnsClient {
         Name = 'Previous'; ServerType = 'DnsOverHttps'; Addresses = @('https://previous.example/dns-query')
     }
     $target = [pscustomobject]@{
-        Name = 'NextDNS'; ServerType = 'DnsOverHttps'; Addresses = @('https://dns.nextdns.io/6cc53e')
+        Name = 'NextDNS'; ServerType = 'DnsOverHttps'; Addresses = @('https://dns.nextdns.io/a1b2c3')
     }
     $fake = [pscustomobject]@{
         Settings = [pscustomobject]@{
@@ -1334,18 +1334,18 @@ function New-FakeNextDnsClient {
     return $fake
 }
 $nextDnsClient = New-FakeNextDnsClient
-$nextDnsResult = Select-ExistingNextDnsServer -Client $nextDnsClient -ProfileId '6cc53e'
+$nextDnsResult = Select-ExistingNextDnsServer -Client $nextDnsClient -ProfileId 'a1b2c3'
 Assert-Contract $nextDnsResult.Changed 'Existing NextDNS server was not selected'
 Assert-Contract $nextDnsClient.Settings.IsEnabled 'NextDNS selection disabled DNS'
 Assert-Contract $nextDnsClient.Settings.ShouldDisableDnsByWifiExclusions 'NextDNS selection changed Wifi exclusions'
-Assert-Contract ($nextDnsClient.Settings.SelectedServer.Addresses[0] -ceq 'https://dns.nextdns.io/6cc53e') 'Wrong NextDNS profile selected'
-[void] (Select-ExistingNextDnsServer -Client $nextDnsClient -ProfileId '6cc53e')
+Assert-Contract ($nextDnsClient.Settings.SelectedServer.Addresses[0] -ceq 'https://dns.nextdns.io/a1b2c3') 'Wrong NextDNS profile selected'
+[void] (Select-ExistingNextDnsServer -Client $nextDnsClient -ProfileId 'a1b2c3')
 Assert-Contract ($nextDnsClient.SaveCount -eq 1) 'NextDNS repeated selection was not idempotent'
 $nextDnsRollback = New-FakeNextDnsClient -FailFirstSave $true
-Assert-ThrowsLike { Select-ExistingNextDnsServer -Client $nextDnsRollback -ProfileId '6cc53e' } '*injected NextDNS save failure*'
+Assert-ThrowsLike { Select-ExistingNextDnsServer -Client $nextDnsRollback -ProfileId 'a1b2c3' } '*injected NextDNS save failure*'
 Assert-Contract ($nextDnsRollback.Settings.SelectedServer.Name -ceq 'Previous') 'NextDNS rollback lost the original server'
 Assert-Contract $nextDnsRollback.Settings.IsEnabled 'NextDNS rollback disabled DNS'
-Assert-ThrowsLike { Select-ExistingNextDnsServer -Client (New-FakeNextDnsClient -Duplicate $true) -ProfileId '6cc53e' } '*was not unique*'
+Assert-ThrowsLike { Select-ExistingNextDnsServer -Client (New-FakeNextDnsClient -Duplicate $true) -ProfileId 'a1b2c3' } '*was not unique*'
 Assert-ThrowsLike { Select-ExistingNextDnsServer -Client (New-FakeNextDnsClient) -ProfileId '000000' } '*was not unique*'
 
 [ordered]@{
