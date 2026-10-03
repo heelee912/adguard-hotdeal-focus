@@ -1645,8 +1645,23 @@ function networkFidelityFailures(
   ) {
     failures.push("pinned numeric-IP transport was not sealed with network evidence");
   }
-  if ((pinnedTransport?.lateConnectCount ?? 0) > 0) {
-    failures.push("CONNECT attempts appeared after the pinned transport seal");
+  const lateConnectCount = pinnedTransport?.lateConnectCount ?? 0;
+  const rejectedBeforeUpstreamCount = pinnedTransport?.lateConnectRejectedBeforeUpstreamCount;
+  if (lateConnectCount !== 0 || (rejectedBeforeUpstreamCount ?? 0) !== 0) {
+    const allLateConnectsRejectedBeforeUpstream =
+      pinnedTransport?.mode === "route-approved-numeric-ip-connect" &&
+      pinnedTransport?.sealed === true &&
+      Number.isSafeInteger(lateConnectCount) && lateConnectCount > 0 &&
+      Number.isSafeInteger(pinnedTransport?.connectRequestCount) &&
+      pinnedTransport.connectRequestCount >= lateConnectCount &&
+      pinnedTransport.connectRequestCount <= PINNED_PROXY_MAX_CONNECT_REQUESTS &&
+      Number.isSafeInteger(rejectedBeforeUpstreamCount) &&
+      rejectedBeforeUpstreamCount === lateConnectCount;
+    // A locally refused CONNECT never became an upstream request. Its explicit
+    // rejection proof does not excuse any late HTTP/API or required resource.
+    if (!allLateConnectsRejectedBeforeUpstream) {
+      failures.push("CONNECT attempts appeared after the pinned transport seal without complete upstream-rejection proof");
+    }
   }
   if ((roleResourceEvidence.selectorErrorCount ?? 0) > 0) {
     failures.push("exact semantic role resource selector evaluation failed");
@@ -1842,6 +1857,7 @@ async function createPinnedPublicHttpsProxy() {
   let evidenceHostOverflowCount = 0;
   let transportErrorCount = 0;
   let lateConnectCount = 0;
+  let lateConnectRejectedBeforeUpstreamCount = 0;
   let sealed = false;
   let closePromise = null;
 
@@ -1983,6 +1999,9 @@ async function createPinnedPublicHttpsProxy() {
     if (sealed) {
       lateConnectCount += 1;
       rejectConnect(clientSocket, "403 Forbidden", evidenceHostname, "transport-sealed");
+      // This branch returns before approval lookup, upstream creation, or head
+      // forwarding. Record only rejections that completed this exact branch.
+      lateConnectRejectedBeforeUpstreamCount += 1;
       return;
     }
     if (connectRequestCount > PINNED_PROXY_MAX_CONNECT_REQUESTS) {
@@ -2121,6 +2140,7 @@ async function createPinnedPublicHttpsProxy() {
         evidenceHostOverflowCount,
         transportErrorCount,
         lateConnectCount,
+        lateConnectRejectedBeforeUpstreamCount,
         sealed,
         connectedHosts: serialize(connectedByHost),
         rejectedHosts: serialize(rejectedByHost),
