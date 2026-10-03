@@ -164,6 +164,35 @@ try {
       assert.equal(await page.locator('#original-comment .profile_image_m').getAttribute('data-hotdeal-focus-deep'), 'comment-item');
       assert.equal(await page.locator('#original-comment .profile_image_m').getAttribute('data-hotdeal-focus-role'), null);
       assert.equal(await page.locator('#original-comment .profile_image_m_inner').isVisible(), true);
+      for (const action of ['replace', 'remove']) {
+        await page.evaluate(async action => {
+          const profile = document.querySelector('#original-comment .profile_image_m');
+          if (action === 'replace') {
+            const replacement = document.createElement('span');
+            replacement.className = 'profile_image_m';
+            const inner = document.createElement('span');
+            inner.className = 'profile_image_m_inner';
+            inner.style.backgroundImage = profile.firstElementChild.style.backgroundImage;
+            replacement.append(inner);
+            profile.replaceWith(replacement);
+          } else {
+            profile.remove();
+          }
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }, action);
+        assert.equal(await page.locator('html').getAttribute('data-hotdeal-focus-state'), 'ready', action);
+        assert.equal(await page.locator('[data-hotdeal-focus-role="comment-item"]').count(), 43, action);
+        assert.equal(await page.locator('#original-comment .profile_image_m').count(), action === 'replace' ? 1 : 0);
+        if (action === 'replace') {
+          assert.equal(await page.locator('#original-comment .profile_image_m_inner').isVisible(), true);
+          assert.equal(await page.locator('#original-comment .profile_image_m').getAttribute('data-hotdeal-focus-role'), null);
+        }
+        assert.equal(await page.locator('#original-comment .text').innerText(), commentText);
+        assert.equal(await page.locator('#original-comment .btn_reply').getAttribute('data-hotdeal-focus-role'), 'comment-control');
+        assert.equal(await page.locator('.view_content').isVisible(), true);
+        assert.equal(await page.locator('.comment_view.best').isVisible(), false);
+        assert.equal(await page.locator('.popular-posts').isVisible(), false);
+      }
       const observed = await page.evaluate(() => ({
         rows: window.originalRows.map((row, index) => {
           const text = row.querySelector('.text');
@@ -207,6 +236,12 @@ try {
       await page.locator('#original-comment .btn_reply').click();
       await page.waitForFunction(() => getComputedStyle(document.querySelector('#original-comment .comment_reply')).display === 'none');
       assert.equal(await page.locator('html').getAttribute('data-hotdeal-focus-state'), 'ready');
+      await page.evaluate(async () => {
+        document.querySelector('#original-comment .text').remove();
+        await new Promise(resolve => setTimeout(resolve, 0));
+      });
+      assert.equal(await page.evaluate(() => window.__HOTDEAL_FOCUS_DIAGNOSTICS__?.targetReason),
+        'static-role-projection-unclassified-comment-element-removal');
     } finally { await context.close(); }
   }
   for (const width of [1280, 390]) {

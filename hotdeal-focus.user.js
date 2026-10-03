@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.98
+// @version      0.6.99
 // @description  Content-preserving hot-deal reader with automatic noise filtering.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
@@ -41,7 +41,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.6.98";
+  const GENERATOR_VERSION = "0.6.99";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -5470,6 +5470,7 @@
       commentIgnoredSelectors: commentIgnoredSelectors.slice(),
       commentItemRoots: new Set(roles.commentItems),
       commentControlRoots: new Set(roles.commentControls),
+      dynamicCommentContentElements: new WeakSet(),
       commentControlScope: roles.commentControlScope || roles.comments,
       commentControlMutationRoots: new Set(
         roles.commentControls
@@ -7399,6 +7400,7 @@
         state.ownedElementSet.delete(element);
         state.expectedMarkerShapes.delete(element);
         state.ownedElements.delete(element);
+        state.dynamicCommentContentElements?.delete(element);
       }
     );
   }
@@ -8839,7 +8841,11 @@
         element.classList.add(CLASS.deep);
       });
       rememberAuthorizedMarkerTree(added, state);
-      return consumeAuthorizedMarkerMutations(authorizedTargets);
+      if (!consumeAuthorizedMarkerMutations(authorizedTargets)) return false;
+      elements.forEach(function rememberDynamicCommentContent(element) {
+        state.dynamicCommentContentElements.add(element);
+      });
+      return true;
     };
     const observer = createNativeMutationObserver(browserRoot, function sealProjection(mutations) {
       try {
@@ -9084,13 +9090,18 @@
               if (removalKind === "item") {
                 failureReason = "comment-removal";
               } else if (removalKind === null) {
-                const removedOwnedProjection = removed.nodeType === 1 && [
+                const removedOwnedElements = removed.nodeType === 1 ? [
                   removed,
                   ...removed.querySelectorAll("*"),
-                ].some(function removedOwnedElement(element) {
+                ].filter(function removedOwnedElement(element) {
                   return state.ownedElements.has(element);
-                });
-                if (removedOwnedProjection) {
+                }) : [];
+                // A late avatar may be refreshed or removed. Only content
+                // adopted after the original item was proven is replaceable;
+                // a wrapper containing any original comment content still fails.
+                if (removedOwnedElements.some(function removesOriginalCommentContent(element) {
+                  return !state.dynamicCommentContentElements.has(element);
+                })) {
                   failureReason = "unclassified-comment-element-removal";
                 } else {
                   forgetRemovedTree(removed, state);
