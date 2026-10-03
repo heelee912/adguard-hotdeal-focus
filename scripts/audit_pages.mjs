@@ -9951,6 +9951,7 @@ async function collectAlgumonRedirectLinks(
   transitionBudget,
   requestKind = "site-discovery",
   relayContext = null,
+  interaction = null,
 ) {
   const source = site.algumon_source ?? site.id.toUpperCase();
   const discoveryUrl = `${ALGUMON_ORIGIN}/n/deal?sites=${encodeURIComponent(source)}`;
@@ -9978,7 +9979,7 @@ async function collectAlgumonRedirectLinks(
       requestKind,
       discoveryUrl,
     );
-    const response = await navigateAlgumonSourceSession(session, discoveryUrl, timeoutMs);
+    const response = await navigateAlgumonSourceSession(session, discoveryUrl, timeoutMs, interaction);
     const result = classifyAlgumonInventorySnapshot(
       await snapshotAlgumonInventoryPage(page, response),
       site.id,
@@ -10422,6 +10423,7 @@ async function discoverLatestTargets(
           transitionBudget,
           "site-discovery",
           relaySession.context,
+          interaction,
         );
         record.discoveryUrl = discovery.discoveryUrl;
         record.status = discovery.status;
@@ -10430,6 +10432,7 @@ async function discoverLatestTargets(
         record.siteTypeFailures = discovery.siteTypeFailures;
         record.inventoryFailures = discovery.failures;
         record.networkPolicy = discovery.networkPolicy;
+        if (interaction) record.confirmedInteraction = { ...interaction };
         if (discovery.status !== "ok") {
           if (discovery.status === "source-or-infrastructure-failure") {
             terminalSourceFailure = true;

@@ -458,6 +458,8 @@ async function testExplicitSourceCheckboxIsAtMostOnce() {
     assert.equal(await clickConfirmedAlgumonCheckboxOnce(page, null), false);
     assert.equal(clicks, 0, "default and scheduled runs do not click");
     const interaction = { confirmed: true, attempted: false };
+    await clickConfirmedAlgumonCheckboxOnce({ ...page, frames: () => [] }, interaction);
+    assert.equal(interaction.attempted, false, "a normal global feed preserves the shared action for a filtered source");
     await clickConfirmedAlgumonCheckboxOnce(page, interaction);
     await clickConfirmedAlgumonCheckboxOnce(page, interaction);
     assert.equal(clicks, ["success", "timeout"].includes(mode) ? 1 : 0, mode);
