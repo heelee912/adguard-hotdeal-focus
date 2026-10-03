@@ -4285,7 +4285,9 @@ async function semanticOracle(
           expectedLayoutApproved && resolution?.ok === true && containment && itemContainment &&
           rolesRequired.every((role) => Boolean(roles[role])) &&
           Object.values(cardinality).every((count) => count === 1);
-        if (exact || !siteMatches || !registeredRoute) return {
+        // A different approved sibling or ambiguous approved projections are
+        // profile/contract failures, not evidence of a previously unknown DOM.
+        if (exact || projection.projectionClasses.length > 0 || !siteMatches || !registeredRoute) return {
           ok: exact,
           verificationMode: "registered-sample",
           candidateEligible: false,
