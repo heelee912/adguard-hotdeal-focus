@@ -86,6 +86,12 @@ const ARTICLE_IDENTITY_DOMAINS = Object.freeze({
   zod: "zod.kr",
   arcalive: "arca.live",
 });
+// Exact mobile redirects observed in cloud audit 37079206298. Chromium can
+// establish their CONNECT tunnels before Playwright receives a redirect route.
+const OBSERVED_MOBILE_ARTICLE_REDIRECT_HOSTS = Object.freeze({
+  clien: Object.freeze({ from: "www.clien.net", to: "m.clien.net" }),
+  ruliweb: Object.freeze({ from: "bbs.ruliweb.com", to: "m.ruliweb.com" }),
+});
 const ORACLE_EXECUTION_WORLD = "chromium-isolated-v1";
 const SCREENSHOT_MAX_BYTES = 2 * 1024 * 1024;
 const SCREENSHOT_MAX_COUNT = 256;
@@ -1401,16 +1407,35 @@ async function observeStylesheetDependencies(context, page, recorder) {
   };
 }
 
-async function primeDeclaredArticleNavigation(session, targetUrl, navigationDomains) {
+async function primeDeclaredArticleNavigation(
+  session, targetUrl, navigationDomains, { siteId, profileName } = {},
+) {
   const decision = networkRequestDecision(targetUrl, true, navigationDomains, navigationDomains);
   if (!decision.allowed || !decision.hostname) {
     throw new Error(`article navigation priming refused: ${decision.reason}`);
   }
-  // Chromium may open CONNECT before route interception. Pin only the already
-  // approved article host before goto; redirects still pass the ordinary guard.
-  const addresses = await session.approvePublicHost(decision.hostname);
-  if (!Array.isArray(addresses) || addresses.length === 0 || addresses.some(isPrivateOrSpecialIp)) {
-    throw new Error("article navigation priming found no verified public DNS addresses");
+  const hostnames = new Set([decision.hostname]);
+  const mobileRedirect = profileName === "mobile"
+    ? OBSERVED_MOBILE_ARTICLE_REDIRECT_HOSTS[siteId]
+    : null;
+  if (mobileRedirect?.from === decision.hostname) {
+    const mobileUrl = new URL(targetUrl);
+    mobileUrl.hostname = mobileRedirect.to;
+    const mobileDecision = networkRequestDecision(
+      mobileUrl.href, true, navigationDomains, navigationDomains,
+    );
+    if (!mobileDecision.allowed || mobileDecision.hostname !== mobileRedirect.to) {
+      throw new Error(`article navigation priming refused: ${mobileDecision.reason}`);
+    }
+    hostnames.add(mobileDecision.hostname);
+  }
+  // Preapprove only the initial host and this site's observed mobile redirect,
+  // with the same public DNS/IP pinning. Redirect URL/navigation guards remain.
+  for (const hostname of hostnames) {
+    const addresses = await session.approvePublicHost(hostname);
+    if (!Array.isArray(addresses) || addresses.length === 0 || addresses.some(isPrivateOrSpecialIp)) {
+      throw new Error("article navigation priming found no verified public DNS addresses");
+    }
   }
 }
 
@@ -5679,9 +5704,22 @@ async function auditUserscriptGate(
           `.hdf-v2-role-${role}[data-hotdeal-focus-role="${role}"]`,
         ),
       ];
+      const visibleCount = nodes.filter(visible).length;
+      const commentMounts = role === "comment-item" ? [...document.querySelectorAll(
+        '.hdf-v2-role-comments[data-hotdeal-focus-role="comments"]',
+      )] : [];
+      const approvedDormantCount = nodes.filter((element) =>
+        !visible(element) && exactlyOwned(element) &&
+        element.classList.contains("hdf-v2-role-comment-dormant") &&
+        commentMounts.some((mount) => exactlyOwned(mount) && mount.contains(element) &&
+          Boolean(mount.getAttribute("data-hotdeal-focus-keep")) &&
+          element.getAttribute("data-hotdeal-focus-keep") ===
+            mount.getAttribute("data-hotdeal-focus-keep")),
+      ).length;
       return {
         count: nodes.length,
-        visibleCount: nodes.filter(visible).length,
+        visibleCount,
+        ...(role === "comment-item" ? { approvedDormantCount } : {}),
         allKept: nodes.every(exactlyOwned),
       };
     };
@@ -5982,6 +6020,21 @@ function commentControlProjectionFailures(gate) {
   return failures;
 }
 
+function commentItemProjectionFailures(gate) {
+  const stats = gate?.commentItemStats;
+  const dormantCount = stats?.approvedDormantCount ?? 0;
+  if (!stats || [stats.count, stats.visibleCount, dormantCount].some((count) =>
+    !Number.isSafeInteger(count) || count < 0)) {
+    return ["comment item projection counts are missing or invalid"];
+  }
+  const failures = [];
+  if (stats.allKept !== true) failures.push("comment item lacks keep marker");
+  if (stats.visibleCount + dormantCount !== stats.count) {
+    failures.push("comment items are neither visible nor runtime-approved dormant");
+  }
+  return failures;
+}
+
 function userscriptGateFailures(gate, requiredRoles) {
   const failures = [];
   if (!gate.ready) failures.push(`userscript gate is not ready (state=${gate.state ?? "missing"})`);
@@ -6035,21 +6088,13 @@ function userscriptGateFailures(gate, requiredRoles) {
       failures.push(`${role} role has no visible keep-owned projection`);
     } else if (
       role === "comments" &&
-      (gate.commentItemStats?.count ?? 0) > 0 &&
+      (gate.commentItemStats?.count ?? 0) > (gate.commentItemStats?.approvedDormantCount ?? 0) &&
       stats.visibleCount === 0
     ) {
       failures.push("comments role has no visible keep-owned projection");
     }
   }
-  const commentItemStats = gate.commentItemStats;
-  if (commentItemStats?.count > 0) {
-    if (!commentItemStats.allKept) failures.push("comment item lacks keep marker");
-    if (commentItemStats.visibleCount !== commentItemStats.count) {
-      failures.push(
-        `${commentItemStats.count - commentItemStats.visibleCount} comment items are not visible`,
-      );
-    }
-  }
+  failures.push(...commentItemProjectionFailures(gate));
   failures.push(...commentControlProjectionFailures(gate));
   failures.push(...validateDiagnostics(gate.diagnostics, requiredRoles));
   return failures;
@@ -6561,7 +6606,9 @@ async function auditOneTarget({
     let sourceSnapshot;
     let sourceClassification;
     try {
-      await primeDeclaredArticleNavigation(staticSession, auditedTarget.url, navigationDomains);
+      await primeDeclaredArticleNavigation(staticSession, auditedTarget.url, navigationDomains, {
+        siteId: site.id, profileName,
+      });
       navigation = await navigate(
         staticSession.page,
         auditedTarget.url,
@@ -6881,7 +6928,9 @@ async function auditOneTarget({
   let auditedPage = userscriptSession.page;
   let runtimeCandidateExtractionAllowed = false;
   try {
-    await primeDeclaredArticleNavigation(userscriptSession, auditedTarget.url, navigationDomains);
+    await primeDeclaredArticleNavigation(userscriptSession, auditedTarget.url, navigationDomains, {
+      siteId: site.id, profileName,
+    });
     const navigation = await navigateThroughAlgumon(
       userscriptSession.page,
       auditedTarget,
@@ -10349,11 +10398,7 @@ function resultHasZeroLeak(result) {
       gate.inactivePublisherSafety?.passed === true,
     );
   }
-  const commentItemsProjected = Boolean(
-    gate?.commentItemStats &&
-    gate.commentItemStats.allKept === true &&
-    gate.commentItemStats.visibleCount === gate.commentItemStats.count,
-  );
+  const commentItemsProjected = commentItemProjectionFailures(gate).length === 0;
   const commentControlsProjected = Boolean(
     commentControlProjectionFailures(gate).length === 0,
   );
@@ -12105,6 +12150,7 @@ export {
   approvedPathsForLayout,
   articleIdentitiesLogicallyEquivalent,
   assertAuditConfig,
+  auditUserscriptGate,
   blockedUserscriptGateFailures,
   buildProjectedHideSelector,
   candidateGenerationAllowed,
@@ -12117,6 +12163,7 @@ export {
   classifyProfileLandingRoute,
   collectRetainedRoleResourceEvidence,
   commentControlProjectionFailures,
+  commentItemProjectionFailures,
   commentControlSelectorDigest,
   commentControlSelectorDigestsForUrl,
   commentLowerBoundConsistency,
@@ -12150,6 +12197,7 @@ export {
   promotionVariantId,
   recordedSignedRelayAcquisitionEvidence,
   runtimeExpectationForTarget,
+  resultHasZeroLeak,
   semanticOracle,
   semanticOracleEvidence,
   semanticOracleContractFailures,
@@ -12162,6 +12210,7 @@ export {
   siteArticleIdentity,
   staticRuntimeConsistencyFailures,
   transferAlgumonRelaySession,
+  userscriptGateFailures,
   validateDiagnostics,
   validatePublicDnsAnswers,
 };

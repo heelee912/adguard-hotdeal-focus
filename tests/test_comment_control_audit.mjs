@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 
 import {
   commentControlProjectionFailures,
+  commentItemProjectionFailures,
   commentControlSelectorDigest,
   commentControlSelectorDigestsForUrl,
   validateDiagnostics,
@@ -23,6 +24,20 @@ const readyDiagnostics = {
   reconciliationFailure: null,
 };
 const requiredDiagnosticRoles = ["title", "body", "comments"];
+for (const stats of [
+  { count: 0, visibleCount: 0, approvedDormantCount: 0, allKept: true },
+  { count: 24, visibleCount: 23, approvedDormantCount: 1, allKept: true },
+  { count: 2, visibleCount: 0, approvedDormantCount: 2, allKept: true },
+  { count: 2, visibleCount: 2, approvedDormantCount: 0, allKept: true },
+]) assert.deepEqual(commentItemProjectionFailures({ commentItemStats: stats }), []);
+for (const stats of [
+  { count: 24, visibleCount: 23, allKept: true },
+  { count: 24, visibleCount: 23, approvedDormantCount: 0, allKept: true },
+  { count: 24, visibleCount: 23, approvedDormantCount: 2, allKept: true },
+  { count: 24, visibleCount: 23, approvedDormantCount: 1, allKept: false },
+  { count: 24, visibleCount: 23, approvedDormantCount: -1, allKept: true },
+  { count: 24, visibleCount: 23, approvedDormantCount: 1.5, allKept: true },
+]) assert.ok(commentItemProjectionFailures({ commentItemStats: stats }).length > 0);
 assert.deepEqual(validateDiagnostics(readyDiagnostics, requiredDiagnosticRoles), []);
 assert.deepEqual(validateDiagnostics({
   ...readyDiagnostics,

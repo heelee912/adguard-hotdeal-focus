@@ -792,6 +792,43 @@ async function testArticleNavigationPrimingIsScopedAndPublic() {
     await assert.rejects(primeDeclaredArticleNavigation({ approvePublicHost: async () => addresses },
       "https://example.com/deal/7", ["example.com"]), /no verified public/);
   }
+  for (const [siteId, from, to, path] of [
+    ["clien", "www.clien.net", "m.clien.net", "/service/board/jirum/19230509"],
+    ["ruliweb", "bbs.ruliweb.com", "m.ruliweb.com", "/news/board/1020/read/105748"],
+  ]) {
+    const domain = from.slice(from.indexOf(".") + 1);
+    const url = `https://${from}${path}`;
+    calls.length = 0;
+    await primeDeclaredArticleNavigation(session, url, [domain], { siteId, profileName: "mobile" });
+    assert.deepEqual(calls, [from, to], "only the observed mobile redirect is primed before navigation");
+    for (const scope of [
+      { siteId, profileName: "desktop" },
+      { siteId: "other-site", profileName: "mobile" },
+      { siteId: siteId === "clien" ? "ruliweb" : "clien", profileName: "mobile" },
+    ]) {
+      calls.length = 0;
+      await primeDeclaredArticleNavigation(session, url, [domain], scope);
+      assert.deepEqual(calls, [from], "other profiles/sites never preapprove this mobile host");
+    }
+    calls.length = 0;
+    await primeDeclaredArticleNavigation(session, `https://unobserved.${domain}${path}`, [domain], {
+      siteId, profileName: "mobile",
+    });
+    assert.deepEqual(calls, [`unobserved.${domain}`], "unobserved source hosts do not widen priming");
+    calls.length = 0;
+    await assert.rejects(primeDeclaredArticleNavigation(session, url, [from], {
+      siteId, profileName: "mobile",
+    }), /priming refused/, "the mobile host must independently pass the declared navigation boundary");
+    assert.deepEqual(calls, [], "a disallowed mobile redirect never reaches DNS approval");
+    for (const addresses of [[], ["127.0.0.1"], ["::1"], ["8.8.8.8", "10.0.0.1"]]) {
+      const approvedHosts = [];
+      await assert.rejects(primeDeclaredArticleNavigation({ approvePublicHost: async hostname => {
+        approvedHosts.push(hostname);
+        return hostname === to ? addresses : ["8.8.8.8"];
+      } }, url, [domain], { siteId, profileName: "mobile" }), /no verified public/);
+      assert.deepEqual(approvedHosts, [from, to], "redirect DNS is checked, never trusted from the initial host");
+    }
+  }
 }
 
 async function testSealDrainAndLateRequest() {
