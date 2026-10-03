@@ -49,6 +49,20 @@ python scripts/hotdeal_focus_cli.py adguard rollback --backup-path 'C:\absolute\
 python scripts/hotdeal_focus_cli.py adguard csp-probe --json --evidence-dir outputs/csp-probe-dry-run
 ```
 
+공개 전 후보를 실제 Windows AdGuard에서 검증할 때는 빌드된 로컬 스크립트와 같은 빌드의 manifest를 기존 PowerShell 배포 도구에 함께 전달합니다. 공개 URL 전용 Python 명령 대신 아래 경로를 사용하면 동일한 해시 검증·백업·기존 필터 보존 검사를 거쳐 후보를 설치할 수 있습니다. Chrome에서 실제 동작을 확인한 후 동일한 산출물을 공개합니다.
+
+```powershell
+python scripts/build_release.py
+$candidateManifest = Get-Content -LiteralPath .\release-manifest.json -Raw | ConvertFrom-Json
+$candidateHash = $candidateManifest.artifacts.'hotdeal-focus.user.js'.canonicalTextSha256
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\adguard_windows_cli.ps1 deploy `
+  -UserscriptSource .\hotdeal-focus.user.js `
+  -ReleaseManifestSource .\release-manifest.json `
+  -ExpectedUserscriptSha256 $candidateHash `
+  -EvidencePath .\outputs\local-candidate-deploy.json `
+  -Apply
+```
+
 종료 코드는 `0` 성공, `2` 사용법, `3` 실행 조건, `4` 검증, `5` 무결성, `6` 일시적 외부 오류, `7` 변경 실패·롤백 완료, `8` 롤백 미완료입니다.
 
 ## English
