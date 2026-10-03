@@ -8,6 +8,7 @@ import {
   capturedAlgumonTargetsFromReport,
   classifyAlgumonSourceResponse,
   captureAlgumonSourceFailure,
+  clickConfirmedAlgumonCheckboxOnce,
   countExistingApprovedLayoutMatches,
   createAlgumonRequestStartBudget,
   createAlgumonSourceBrowserBudget,
@@ -433,6 +434,42 @@ async function testNavigationErrorsPersistOnlyCategoryAndDigest() {
   assert.equal(classifyAlgumonSourceResponse({ status: null }).navigationError, null);
 }
 
+async function testExplicitSourceCheckboxIsAtMostOnce() {
+  for (const mode of ["success", "timeout", "hidden", "disabled", "foreign-frame", "foreign-page"]) {
+    let clicks = 0;
+    const checkbox = {
+      isVisible: async () => mode !== "hidden",
+      isEnabled: async () => mode !== "disabled",
+      click: async () => {
+        clicks += 1;
+        if (mode === "timeout") throw new Error("Timeout private-query-token");
+      },
+    };
+    const page = {
+      url: () => mode === "foreign-page" ? "https://unrelated.example/" : "https://www.algumon.com/request/check",
+      frames: () => [{
+        url: () => mode === "foreign-frame" ? "https://unrelated.example/" : "https://challenges.cloudflare.com/widget",
+        getByRole: (role) => {
+          assert.equal(role, "checkbox");
+          return { count: async () => 1, nth: () => checkbox };
+        },
+      }],
+    };
+    assert.equal(await clickConfirmedAlgumonCheckboxOnce(page, null), false);
+    assert.equal(clicks, 0, "default and scheduled runs do not click");
+    const interaction = { confirmed: true, attempted: false };
+    await clickConfirmedAlgumonCheckboxOnce(page, interaction);
+    await clickConfirmedAlgumonCheckboxOnce(page, interaction);
+    assert.equal(clicks, ["success", "timeout"].includes(mode) ? 1 : 0, mode);
+    if (mode === "success") assert.equal(interaction.outcome, "clicked");
+    if (mode === "timeout") {
+      assert.equal(interaction.outcome, "click-failed");
+      assert.equal(interaction.error.category, "timeout");
+      assert.equal(JSON.stringify(interaction).includes("private-query-token"), false);
+    }
+  }
+}
+
 async function testSourceBrowserLocalFlows() {
   const { chromium } = await import("playwright");
   const browser = await chromium.launch({ headless: true });
@@ -517,6 +554,33 @@ async function testSourceBrowserLocalFlows() {
   process.stdout.write("Algumon local browser: normal JS/resource return, reload bound, and foreign-origin rejection passed\n");
 }
 
+async function testConfirmedCheckboxBrowserFlow() {
+  const { chromium } = await import("playwright");
+  const browser = await chromium.launch({ headless: true });
+  try {
+    const context = await browser.newContext();
+    await context.route("**/*", async (route) => {
+      const isWidget = new URL(route.request().url()).hostname === "challenges.cloudflare.com";
+      await route.fulfill({ contentType: "text/html; charset=utf-8", body: isWidget
+        ? '<label><input type="checkbox" onclick="parent.postMessage(\'checked\', \'https://www.algumon.com\')">Confirm fixture</label>'
+        : '<body data-clicks="0"><iframe src="https://challenges.cloudflare.com/widget"></iframe><script>addEventListener("message", event => { if (event.origin === "https://challenges.cloudflare.com" && event.data === "checked") document.body.dataset.clicks = String(Number(document.body.dataset.clicks) + 1); });</script></body>',
+      });
+    });
+    const page = await context.newPage();
+    await page.goto("https://www.algumon.com/request/check");
+    await page.frameLocator("iframe").getByRole("checkbox").waitFor({ state: "visible" });
+    await clickConfirmedAlgumonCheckboxOnce(page, null);
+    assert.equal(await page.locator("body").getAttribute("data-clicks"), "0");
+    const interaction = { confirmed: true, attempted: false };
+    await clickConfirmedAlgumonCheckboxOnce(page, interaction);
+    await page.waitForFunction(() => document.body.dataset.clicks === "1");
+    await clickConfirmedAlgumonCheckboxOnce(page, interaction);
+    assert.equal(await page.locator("body").getAttribute("data-clicks"), "1");
+    assert.equal(interaction.outcome, "clicked");
+  } finally { await browser.close(); }
+  process.stdout.write("Confirmed source checkbox: local cross-origin browser click occurred exactly once\n");
+}
+
 async function testSourceFailureScreenshotAddsNoNavigation() {
   const calls = [];
   const page = {
@@ -551,7 +615,11 @@ await testRegisteredArticleProjectionDoesNotRequireLegacySeed();
 testSourceUrlMismatchRetainsDiagnosticIdentityWithoutQueryValues();
 testSourceFailureRedactsRedirectPathsAndUnknownQueryKeys();
 await testNavigationErrorsPersistOnlyCategoryAndDigest();
+await testExplicitSourceCheckboxIsAtMostOnce();
 await testSourceHostIsApprovedBeforeNavigation();
 await testSourceFailureScreenshotAddsNoNavigation();
-if (process.argv.includes("--browser-fixture")) await testSourceBrowserLocalFlows();
+if (process.argv.includes("--browser-fixture")) {
+  await testSourceBrowserLocalFlows();
+  await testConfirmedCheckboxBrowserFlow();
+}
 process.stdout.write("Algumon traffic budget tests passed\n");

@@ -11,6 +11,11 @@ on:
         description: Machine correlation nonce
         required: false
         type: string
+      confirm_algumon_checkbox_once:
+        description: Click one visible source checkbox for this explicitly confirmed manual run
+        required: false
+        default: false
+        type: boolean
 
 run-name: hotdeal-focus-watch-dom-${{ inputs.dispatch_nonce || github.run_id }}
 
@@ -110,6 +115,8 @@ jobs:
         if: steps.preflight.outputs.status == '0'
         id: live
         shell: bash
+        env:
+          CONFIRM_ALGUMON_CHECKBOX_ONCE: ${{ github.event_name == 'workflow_dispatch' && inputs.confirm_algumon_checkbox_once == true }}
         run: |
           set +e
           status=0
@@ -121,11 +128,15 @@ jobs:
             || status=1
           timeout --kill-after=5s 60s npm run test:tamper || status=1
           if [[ "${status}" == "0" ]]; then
+            source_args=()
+            if [[ "${CONFIRM_ALGUMON_CHECKBOX_ONCE}" == "true" ]]; then
+              source_args+=(--confirm-algumon-checkbox-once)
+            fi
             timeout --kill-after=15s 210m xvfb-run -a npm run audit:dom -- \
               --headed \
               --require-algumon-discovery \
               --algumon-request-budget 29 \
-              --synthesize-candidates || status=1
+              --synthesize-candidates "${source_args[@]}" || status=1
           fi
           echo "status=${status}" >> "${GITHUB_OUTPUT}"
           exit 0

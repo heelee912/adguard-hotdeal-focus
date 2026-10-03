@@ -310,6 +310,7 @@ function parseArguments(argv) {
     noAlgumonNetwork: false,
     algumonRequestBudget: DEFAULT_ALGUMON_REQUEST_START_BUDGET,
     headed: false,
+    confirmAlgumonCheckboxOnce: false,
     siteIds: new Set(),
   };
 
@@ -429,6 +430,9 @@ function parseArguments(argv) {
       case "--headed":
         options.headed = true;
         break;
+      case "--confirm-algumon-checkbox-once":
+        options.confirmAlgumonCheckboxOnce = true;
+        break;
       case "--help":
         printUsage();
         process.exit(0);
@@ -487,6 +491,7 @@ function printUsage() {
   process.stdout.write(`  --algumon-request-budget N       Tighten the live Algumon-start cap (1-${DEFAULT_ALGUMON_REQUEST_START_BUDGET})\n`);
   process.stdout.write(`  --timeout-ms N                   Per-page timeout\n`);
   process.stdout.write(`  --headed                         Show Chromium\n`);
+  process.stdout.write(`  --confirm-algumon-checkbox-once  One explicitly confirmed source checkbox click\n`);
 }
 
 class AlgumonRequestBudgetExceeded extends Error {
@@ -9675,14 +9680,47 @@ function classifyAlgumonInventorySnapshot(snapshot, expectedSiteId = null) {
   };
 }
 
-async function navigateAlgumonSourceSession(session, requestedUrl, timeoutMs) {
+async function clickConfirmedAlgumonCheckboxOnce(page, interaction) {
+  if (!interaction?.confirmed || interaction.attempted) return false;
+  if (new URL(page.url()).origin !== ALGUMON_ORIGIN) return false;
+  for (const frame of page.frames()) {
+    let frameUrl;
+    try { frameUrl = new URL(frame.url()); } catch { continue; }
+    if (frameUrl.protocol !== "https:" || frameUrl.hostname !== "challenges.cloudflare.com") continue;
+    interaction.challengeFrameObserved = true;
+    const checkboxes = frame.getByRole("checkbox");
+    const count = Math.min(await checkboxes.count().catch(() => 0), 8);
+    interaction.checkboxCount = Math.max(interaction.checkboxCount ?? 0, count);
+    for (let index = 0; index < count; index += 1) {
+      const checkbox = checkboxes.nth(index);
+      if (!await checkbox.isVisible().catch(() => false) ||
+          !await checkbox.isEnabled().catch(() => false)) continue;
+      // Consume the single explicit action before dispatch: a timeout must not
+      // cause a second click whose first outcome is unknown.
+      interaction.attempted = true;
+      interaction.outcome = "click-started";
+      try {
+        await checkbox.click({ timeout: 3_000 });
+        interaction.outcome = "clicked";
+      } catch (error) {
+        interaction.outcome = "click-failed";
+        interaction.error = algumonNavigationErrorEvidence(error);
+      }
+      return true;
+    }
+  }
+  interaction.outcome = "visible-checkbox-not-found";
+  return false;
+}
+
+async function navigateAlgumonSourceSession(session, requestedUrl, timeoutMs, interaction = null) {
   // Chromium may open CONNECT before its routed request reaches the handler.
   // Use the existing public-DNS pinning before the initial source navigation.
   await primeDeclaredArticleNavigation(session, requestedUrl, ["algumon.com"]);
-  return navigateAlgumonSourcePage(session.page, requestedUrl, timeoutMs);
+  return navigateAlgumonSourcePage(session.page, requestedUrl, timeoutMs, interaction);
 }
 
-async function navigateAlgumonSourcePage(page, requestedUrl, timeoutMs) {
+async function navigateAlgumonSourcePage(page, requestedUrl, timeoutMs, interaction = null) {
   const responseObserver = observeMainDocumentResponses(page);
   let response;
   try {
@@ -9703,7 +9741,7 @@ async function navigateAlgumonSourcePage(page, requestedUrl, timeoutMs) {
         navigationError: algumonNavigationErrorEvidence(error),
       };
     }
-    const deadline = Date.now() + Math.min(timeoutMs, DESTINATION_CHALLENGE_SETTLE_MAX_MS);
+    let deadline = Date.now() + Math.min(timeoutMs, DESTINATION_CHALLENGE_SETTLE_MAX_MS);
     let evidence;
     do {
       await page.waitForTimeout(Math.min(250, Math.max(0, deadline - Date.now())));
@@ -9724,7 +9762,10 @@ async function navigateAlgumonSourcePage(page, requestedUrl, timeoutMs) {
       if (!sameOrigin) break;
       if (classifyAlgumonSourceResponse(evidence) === null &&
           await page.locator(".deal-feed-card[id^='deal-']").count().catch(() => 0) > 0) break;
-      // Let the publisher's own JS finish; no clicking, reload, or extra goto.
+      if (await clickConfirmedAlgumonCheckboxOnce(page, interaction)) {
+        deadline = Date.now() + Math.min(timeoutMs, DESTINATION_CHALLENGE_SETTLE_MAX_MS);
+      }
+      // No reload or extra goto. Scheduled runs do not receive a confirmation.
     } while (Date.now() < deadline);
     return evidence;
   } catch (error) {
@@ -9850,6 +9891,7 @@ async function collectAlgumonGlobalInventory(
   requestBudget,
   transitionBudget,
   runDirectory = null,
+  interaction = null,
 ) {
   const session = await createPageContext(
     browser,
@@ -9874,6 +9916,7 @@ async function collectAlgumonGlobalInventory(
       session,
       ALGUMON_GLOBAL_DISCOVERY_URL,
       timeoutMs,
+      interaction,
     );
     const result = classifyAlgumonInventorySnapshot(
       await snapshotAlgumonInventoryPage(page, response),
@@ -9881,6 +9924,7 @@ async function collectAlgumonGlobalInventory(
     return await finishAlgumonSourceBrowser(session, {
       discoveryUrl: ALGUMON_GLOBAL_DISCOVERY_URL,
       ...result,
+      ...(interaction ? { confirmedInteraction: { ...interaction } } : {}),
       ...(result.status !== "ok" ? { sourceScreenshot: await captureAlgumonSourceFailure(page, runDirectory) } : {}),
     }, transitionBudget);
   } catch (error) {
@@ -9889,6 +9933,7 @@ async function collectAlgumonGlobalInventory(
       status: "source-or-infrastructure-failure",
       failures: ["global source navigation or inventory inspection failed"],
       navigationError: algumonNavigationErrorEvidence(error),
+      ...(interaction ? { confirmedInteraction: { ...interaction } } : {}),
       sourceScreenshot: await captureAlgumonSourceFailure(page, runDirectory),
       links: [],
       observedSiteTypes: [],
@@ -10260,6 +10305,7 @@ async function discoverLatestTargets(
   promotionCandidate = null,
   requestBudget,
   runDirectory = null,
+  interaction = null,
 ) {
   if (!requestBudget || typeof requestBudget.snapshot !== "function") {
     throw new Error("live Algumon discovery requires one request-start budget");
@@ -10312,6 +10358,7 @@ async function discoverLatestTargets(
     requestBudget,
     transitionBudget,
     runDirectory,
+    interaction,
   );
   if (inventory.status !== "ok") {
     for (const site of sites) {
@@ -12139,6 +12186,9 @@ async function main() {
         promotionDraft?.candidate ?? null,
         algumonRequestBudget,
         runDirectory,
+        options.confirmAlgumonCheckboxOnce
+          ? { confirmed: true, attempted: false, outcome: "not-needed" }
+          : null,
       );
       report.discovery.inventory = discovery.inventory;
       report.discovery.records = discovery.records;
@@ -12384,6 +12434,7 @@ export {
   classifyAlgumonInventorySnapshot,
   classifyAlgumonSourceResponse,
   captureAlgumonSourceFailure,
+  clickConfirmedAlgumonCheckboxOnce,
   classifyDestinationResponse,
   classifyProfileLandingRoute,
   collectRetainedRoleResourceEvidence,

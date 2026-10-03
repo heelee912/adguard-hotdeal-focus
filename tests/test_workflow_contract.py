@@ -146,6 +146,15 @@ class PublicRepositoryHygieneTests(unittest.TestCase):
 
 
 class StandaloneUserscriptReleaseWorkflowTests(unittest.TestCase):
+    def test_source_checkbox_confirmation_is_manual_and_not_inherited(self) -> None:
+        self.assertIn("confirm_algumon_checkbox_once:", WATCH_WORKFLOW)
+        confirmation = WATCH_WORKFLOW.split("confirm_algumon_checkbox_once:", 1)[1].split("run-name:", 1)[0]
+        self.assertIn("default: false", confirmation)
+        self.assertIn("type: boolean", confirmation)
+        self.assertIn("github.event_name == 'workflow_dispatch' && inputs.confirm_algumon_checkbox_once == true", WATCH_WORKFLOW)
+        self.assertEqual(1, WATCH_WORKFLOW.count("source_args+=(--confirm-algumon-checkbox-once)"))
+        self.assertNotIn("--confirm-algumon-checkbox-once", VERIFY_WORKFLOW)
+
     def test_manual_workflows_expose_nonce_bound_machine_run_names(self) -> None:
         for workflow, prefix in (
             (VERIFY_WORKFLOW, "hotdeal-focus-verify-"),
