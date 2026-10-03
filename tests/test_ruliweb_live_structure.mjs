@@ -13,6 +13,20 @@ const row = (id, child = false) => `<tr id="${id}" class="comment_element normal
     <button class="like" type="button">추천 1</button><button class="dislike" type="button">비추천</button>
     <button class="btn_reply" type="button">답글</button><button class="report" type="button">신고</button></div></td>
 </tr>`;
+// Article 107755 has two native toolbars. The bottom BEST button has no
+// best_toggle class; both video labels are filled with ON after initial paint.
+const populatedToolbar = lower => `<div class="comment_btn_wrapper flex flex_wrap text_center padding_h_10" data-nosnippet>
+  <div class="box_line flex_item_1 comment_count"><span class="comment_title">댓글</span>
+    <span class="num_txt"><strong class="reply_count">43</strong></span></div>
+  <div class="box_line flex_item_1"><button class="${lower ? 'text_center border_box' : 'best_toggle'}"
+    onclick="app.best_toggle(event)"><span class="icon_best">BEST</span>
+    <span class="best_toggle_text_on">ON</span><span class="best_toggle_text_off screen_out">OFF</span></button></div>
+  <div class="box_line flex_item_1"><button class="btn_comment_video">
+    <i class="icon-youtube-play"></i><span class="btn_comment_video_text"></span></button></div>
+  <div class="box_line flex_item_1"><button class="btn_comment_img" data-active="0"><i class="icon-picture"></i>ON</button></div>
+  <div class="box_line flex_item_1"><a class="btn_comment_go" href="#comment_input"><i class="icon-pencil"></i></a></div>
+  <div class="box_line flex_item_1"><button class="btn_comment_refresh"><i class="icon-refresh"></i></button></div>
+</div>`;
 const html = `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
 <meta property="og:title" content="루리웹 정상 핫딜 댓글"><style>
 body { margin:8px; font:16px/1.5 sans-serif; }
@@ -33,13 +47,17 @@ body { margin:8px; font:16px/1.5 sans-serif; }
 <h1 class="subject_inner_text">루리웹 정상 핫딜 댓글</h1>
 <div class="view_content"><p>구매에 필요한 원본 상품 설명입니다.</p><p>배송과 결제 조건도 그대로 유지합니다.</p></div>
 <div class="source_url"><a href="https://shop.example/item/123">원래 구매 링크</a></div>
-<div id="cmt" class="comment_wrapper"><div class="comment_view normal"><table class="comment_table"><tbody>
+<div id="cmt" class="comment_wrapper">${populatedToolbar(false)}<div class="comment_view normal"><table class="comment_table"><tbody>
 ${row('original-comment')}${row('original-reply', true)}
+${Array.from({ length: 41 }, (_unused, index) => row(`additional-comment-${index}`)).join('')}
 <tr class="comment_element normal child"><td class="user">광고</td><td class="comment" colspan="2"><div class="nbp_container"><a href="https://ads.example/">광고</a></div></td></tr>
-</tbody></table></div></div><aside class="popular-posts">인기글 추천글</aside>
+</tbody></table></div>${populatedToolbar(true)}</div><aside class="popular-posts">인기글 추천글</aside>
 </article><script>
 window.originalRows = Array.from(document.querySelectorAll('#original-comment,#original-reply'));
 window.originalTexts = window.originalRows.map(row => row.querySelector('.text'));
+window.originalAllRows = Array.from(document.querySelectorAll('tr.comment_element:not(:has(.nbp_container))'));
+window.originalToolbars = Array.from(document.querySelectorAll('.comment_btn_wrapper'));
+window.app = { best_toggle() { window.originalBestClicks = (window.originalBestClicks || 0) + 1; } };
 document.querySelectorAll('.btn_reply').forEach(button => button.addEventListener('click', () => {
   const composer = button.closest('tr').querySelector('.comment_reply');
   composer.style.display = composer.style.display === 'none' ? 'block' : 'none';
@@ -100,6 +118,26 @@ try {
       await page.goto('https://bbs.ruliweb.com/news/board/1020/read/107751');
       await page.waitForFunction(() => document.documentElement.getAttribute('data-hotdeal-focus-state') === 'ready' &&
         !document.documentElement.hasAttribute('data-hotdeal-focus-lock'), null, { timeout: 5000 });
+      assert.equal(await page.locator('[data-hotdeal-focus-role="comment-item"]').count(), 43);
+      // Match the observed childList mutations: publisher text is appended
+      // independently of loading comments, on both already-mounted toolbars.
+      await page.evaluate(async () => {
+        await new Promise(resolve => setTimeout(resolve, 25));
+        document.querySelectorAll('.btn_comment_video_text').forEach(label =>
+          label.append(document.createTextNode('ON')));
+        await new Promise(resolve => setTimeout(resolve, 0));
+      });
+      assert.equal(await page.locator('html').getAttribute('data-hotdeal-focus-state'), 'ready');
+      assert.equal(await page.locator('html').getAttribute('data-hotdeal-focus-lock'), null);
+      assert.equal(await page.locator('[data-hotdeal-focus-role="comment-item"]').count(), 43);
+      assert.deepEqual(await page.evaluate(() => ({
+        rowsPreserved: window.originalAllRows.length === 43 && window.originalAllRows.every(row =>
+          row === document.getElementById(row.id) && row.isConnected && row.getClientRects().length > 0),
+        toolbarsPreserved: window.originalToolbars.length === 2 && window.originalToolbars.every(toolbar =>
+          toolbar.isConnected && toolbar.getAttribute('data-hotdeal-focus-role') === 'comment-control' &&
+          toolbar.getClientRects().length > 0 && getComputedStyle(toolbar).visibility === 'visible'),
+        labels: Array.from(document.querySelectorAll('.btn_comment_video_text'), label => label.textContent),
+      })), { rowsPreserved: true, toolbarsPreserved: true, labels: ['ON', 'ON'] });
       const observed = await page.evaluate(() => ({
         rows: window.originalRows.map((row, index) => {
           const text = row.querySelector('.text');
@@ -237,5 +275,5 @@ try {
       await evidencePage.close();
     } finally { await context.close(); }
   }
-  console.log('Ruliweb native comment/reply layout and handlers preserved; six-box controls survive zero-to-first-comment refresh on desktop/mobile while unclassified actual comments remain rejected.');
+  console.log('Ruliweb preserves 43 native comments and both toolbars through delayed ON updates; zero-to-first-comment refresh and unclassified-comment rejection pass on desktop/mobile.');
 } finally { await browser.close(); }
