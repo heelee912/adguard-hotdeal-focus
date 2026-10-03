@@ -7,6 +7,8 @@ import {
   FIRST_PAINT_PROBE_SOURCE,
   canonicalArticleIdentity,
   collectRetainedRoleResourceEvidence,
+  connectApprovedPublicAddresses,
+  connectPinnedPublicAddress,
   consumeArticleAccessLease,
   createArticleAccessLease,
   createNetworkPolicyEvidenceRecorder,
@@ -890,6 +892,176 @@ function testLateConnectRejectionProofPreservesContentFailures() {
   } }, [], ["cdn.example"]).some(failure => failure.includes("required resource hosts failed pinned transport")));
 }
 
+function fakePinnedSocket({ deferClose = false } = {}) {
+  const socket = new EventEmitter();
+  socket.destroyed = false;
+  socket.timeoutMs = null;
+  socket.setTimeout = (milliseconds, callback) => {
+    socket.timeoutMs = milliseconds;
+    if (callback) socket.once("timeout", callback);
+    return socket;
+  };
+  socket.destroy = () => {
+    if (socket.destroyed) return socket;
+    socket.destroyed = true;
+    if (!deferClose) socket.emit("close");
+    return socket;
+  };
+  return socket;
+}
+
+function assertPinnedSocketListenersCleared(socket) {
+  assert.equal(socket.timeoutMs, 0);
+  for (const event of ["connect", "close", "error", "timeout"]) {
+    assert.equal(socket.listenerCount(event), 0, `pending ${event} listener remains`);
+  }
+}
+
+async function testPinnedAddressSocketSettlement() {
+  for (const outcome of ["connect", "error", "timeout", "close"]) {
+    const socket = fakePinnedSocket();
+    const promise = connectPinnedPublicAddress("8.8.8.8", 3_000, upstream => {
+      assert.equal(upstream.listenerCount("close"), 1, "observe only after cancellation listeners exist");
+      if (outcome === "close") upstream.destroy();
+      else upstream.emit(outcome, outcome === "error" ? new Error("test connection failure") : undefined);
+    }, options => {
+      assert.deepEqual(options, { host: "8.8.8.8", port: 443, family: 4 });
+      return socket;
+    });
+    if (outcome === "connect") assert.equal(await promise, socket);
+    else {
+      await assert.rejects(promise, /failure|timed out|closed before connection/u);
+      assert.equal(socket.destroyed, true);
+    }
+    assertPinnedSocketListenersCleared(socket);
+  }
+  const pendingClose = fakePinnedSocket({ deferClose: true });
+  const timedOut = connectPinnedPublicAddress("2606:4700:4700::1111", 3_000,
+    socket => socket.emit("timeout"), options => {
+      assert.deepEqual(options, { host: "2606:4700:4700::1111", port: 443, family: 6 });
+      return pendingClose;
+    });
+  assert.doesNotThrow(() => pendingClose.emit("error", new Error("queued connection failure")));
+  pendingClose.emit("close");
+  await assert.rejects(timedOut, error => error.code === "ETIMEDOUT" && /timed out/u.test(error.message));
+  assertPinnedSocketListenersCleared(pendingClose);
+}
+
+async function testPinnedAddressFailoverUsesBoundedAttempts() {
+  const addresses = ["8.8.8.8", "1.1.1.1", "9.9.9.9", "8.8.4.4", "1.0.0.1", "149.112.112.112"];
+  const run = async (outcomes, suppliedAddresses = addresses) => {
+    let clock = 0;
+    const attempts = [];
+    const diagnostics = [];
+    const sockets = [];
+    const pending = [];
+    const upstream = await connectApprovedPublicAddresses(suppliedAddresses,
+      (address, timeoutMs, observeSocket) => {
+        const outcome = outcomes[attempts.length] ?? "timeout";
+        attempts.push({ address, timeoutMs });
+        const socket = fakePinnedSocket();
+        sockets.push(socket);
+        return connectPinnedPublicAddress(address, timeoutMs, observed => {
+          observeSocket(observed);
+          clock += outcome === "timeout" ? timeoutMs : 10;
+          observed.emit(outcome, outcome === "error" ? new Error("test connection failure") : undefined);
+        }, () => socket);
+      }, { now: () => clock, observePendingSocket: socket => pending.push(socket),
+        observeAttempt: attempt => diagnostics.push(attempt) });
+    for (const socket of sockets) assertPinnedSocketListenersCleared(socket);
+    assert.equal(pending.at(-1), null);
+    return { upstream, attempts, sockets, clock, diagnostics };
+  };
+  const recovered = await run(["timeout", "connect"]);
+  assert.equal(recovered.upstream, recovered.sockets[1]);
+  assert.deepEqual(recovered.attempts, [
+    { address: addresses[0], timeoutMs: 3_000 }, { address: addresses[1], timeoutMs: 3_000 },
+  ]);
+  assert.equal(recovered.clock, 3_010);
+  assert.deepEqual(recovered.diagnostics, [
+    { family: 4, outcome: "failed", errorCode: "ETIMEDOUT", elapsedMs: 3_000 },
+    { family: 4, outcome: "connected", errorCode: null, elapsedMs: 10 },
+  ]);
+  assert.ok(addresses.every(address => !JSON.stringify(recovered.diagnostics).includes(address)),
+    "attempt diagnostics never expose pinned IPs");
+  assert.equal(recovered.sockets[0].destroyed, true);
+  assert.equal(recovered.sockets[1].destroyed, false);
+  recovered.upstream.destroy();
+  const finalAddressRecovery = await run(["timeout", "connect"], addresses.slice(0, 2));
+  assert.deepEqual(finalAddressRecovery.attempts.map(attempt => attempt.timeoutMs), [3_000, 12_000],
+    "the last candidate keeps the full remaining budget after failover");
+  assert.equal(finalAddressRecovery.upstream, finalAddressRecovery.sockets[1]);
+  finalAddressRecovery.upstream.destroy();
+  const singleAddress = await run(["timeout"], addresses.slice(0, 1));
+  assert.deepEqual(singleAddress.attempts.map(attempt => attempt.timeoutMs), [15_000],
+    "one approved address preserves the original connection tolerance");
+  assert.equal(singleAddress.clock, 15_000);
+  assert.equal(singleAddress.upstream, null);
+  const allFailed = await run(["error", "error"], addresses.slice(0, 2));
+  assert.equal(allFailed.upstream, null);
+  assert.equal(allFailed.attempts.length, 2);
+  assert.ok(allFailed.sockets.every(socket => socket.destroyed));
+  const deadline = await run([]);
+  assert.equal(deadline.upstream, null);
+  assert.equal(deadline.clock, 15_000, "all address attempts share one overall deadline");
+  assert.equal(deadline.attempts.length, 5, "no address is attempted after the total deadline");
+  assert.ok(deadline.sockets.every(socket => socket.destroyed));
+
+  let clock = 0;
+  const budgets = [];
+  const lateSocket = fakePinnedSocket();
+  const late = await connectApprovedPublicAddresses(addresses, async (_address, budget, observe) => {
+    budgets.push(budget);
+    if (budgets.length === 1) { clock = 14_000; throw new Error("delayed callback"); }
+    observe(lateSocket);
+    clock = 15_001;
+    return lateSocket;
+  }, { now: () => clock });
+  assert.equal(late, null);
+  assert.deepEqual(budgets, [3_000, 1_000], "last attempt cannot exceed the remaining total budget");
+  assert.equal(lateSocket.destroyed, true, "a success arriving after the deadline is discarded");
+  const privateDiagnostics = [];
+  await connectApprovedPublicAddresses(addresses.slice(0, 1), async () => {
+    throw Object.assign(new Error("https://private.example/path?secret=private-value"), {
+      code: "private-error-value",
+    });
+  }, { observeAttempt: attempt => privateDiagnostics.push(attempt) });
+  assert.equal(privateDiagnostics[0].errorCode, "UNKNOWN");
+  assert.equal(JSON.stringify(privateDiagnostics).includes("private"), false);
+}
+
+async function testPinnedAddressClientCloseStopsFailover() {
+  for (const closeTiming of ["before-attempt", "during-connect", "after-connect"]) {
+    let closed = closeTiming === "before-attempt";
+    let attempts = 0;
+    let pending = null;
+    const sockets = [];
+    const upstream = await connectApprovedPublicAddresses(["8.8.8.8", "1.1.1.1"],
+      (address, timeoutMs, observe) => {
+        attempts += 1;
+        const socket = fakePinnedSocket();
+        sockets.push(socket);
+        return connectPinnedPublicAddress(address, timeoutMs, observe, () => socket);
+      }, {
+        isClientClosed: () => closed,
+        observePendingSocket: socket => {
+          pending = socket;
+          if (!socket) return;
+          if (closeTiming === "after-connect") socket.emit("connect");
+          closed = true;
+          if (closeTiming === "during-connect") socket.destroy();
+        },
+      });
+    assert.equal(upstream, null, closeTiming);
+    assert.equal(attempts, closeTiming === "before-attempt" ? 0 : 1);
+    assert.equal(pending, null);
+    for (const socket of sockets) {
+      assert.equal(socket.destroyed, true, closeTiming);
+      assertPinnedSocketListenersCleared(socket);
+    }
+  }
+}
+
 async function testSealedProxyRecordsRejectionBeforeUpstream() {
   const proxy = await createPinnedPublicHttpsProxy();
   try {
@@ -1356,6 +1528,9 @@ async function main() {
   testArticleLeaseBudgetsOnlyScopedCookies();
   await testArticleNavigationPrimingIsScopedAndPublic();
   testLateConnectRejectionProofPreservesContentFailures();
+  await testPinnedAddressSocketSettlement();
+  await testPinnedAddressFailoverUsesBoundedAttempts();
+  await testPinnedAddressClientCloseStopsFailover();
   await testSealedProxyRecordsRejectionBeforeUpstream();
   await testSealDrainAndLateRequest();
   await testSealDrainTimeoutFailsClosed();

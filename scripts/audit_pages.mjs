@@ -71,6 +71,12 @@ const PINNED_PROXY_MAX_CONNECT_REQUESTS = 1_024;
 const PINNED_PROXY_MAX_ACTIVE_TUNNELS = 256;
 const PINNED_PROXY_MAX_TRANSFER_BYTES = 512 * 1024 * 1024;
 const PINNED_PROXY_CONNECT_TIMEOUT_MS = 15_000;
+const PINNED_PROXY_ADDRESS_CONNECT_TIMEOUT_MS = 3_000;
+const PINNED_PROXY_MAX_CONNECT_ATTEMPT_EVIDENCE = 128;
+const PINNED_PROXY_SAFE_CONNECT_ERROR_CODES = new Set([
+  "ETIMEDOUT", "ECONNREFUSED", "ECONNRESET", "ECONNABORTED", "EHOSTUNREACH",
+  "ENETUNREACH", "EADDRNOTAVAIL", "EACCES", "EPERM", "EPIPE",
+]);
 const PINNED_PROXY_DNS_TIMEOUT_MS = 5_000;
 const PINNED_PROXY_MAX_DNS_ADDRESSES = 128;
 const PINNED_PROXY_MAX_EVIDENCE_HOSTS = 128;
@@ -1839,12 +1845,101 @@ function validatePublicDnsAnswers(records, maximumAddresses = PINNED_PROXY_MAX_D
   return { ...evidence, addresses, reason: "public-addresses-validated" };
 }
 
+function connectPinnedPublicAddress(
+  address, timeoutMs, observeSocket = () => {}, createSocket = createConnection,
+) {
+  return new Promise((resolve, reject) => {
+    const upstream = createSocket({ host: address, port: 443, family: isIP(address) });
+    let settled = false;
+    const cleanup = (awaitClose = false) => {
+      upstream.setTimeout(0);
+      upstream.removeListener("timeout", onTimeout);
+      upstream.removeListener("connect", onConnect);
+      if (!awaitClose) {
+        upstream.removeListener("error", fail);
+        upstream.removeListener("close", onClose);
+      }
+    };
+    const fail = (error) => {
+      if (settled) return;
+      settled = true;
+      // Keep the failure listener until close so a queued socket error cannot
+      // become unhandled while a timed-out/cancelled socket is being destroyed.
+      cleanup(true);
+      upstream.destroy();
+      reject(error);
+    };
+    const onTimeout = () => fail(Object.assign(new Error("pinned CONNECT timed out"), { code: "ETIMEDOUT" }));
+    const onClose = () => {
+      fail(Object.assign(new Error("pinned CONNECT closed before connection"), { code: "ECONNABORTED" }));
+      upstream.removeListener("error", fail);
+    };
+    const onConnect = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(upstream);
+    };
+    upstream.setTimeout(timeoutMs, onTimeout);
+    upstream.on("error", fail);
+    upstream.once("close", onClose);
+    upstream.once("connect", onConnect);
+    try { observeSocket(upstream); } catch (error) { fail(error); }
+  });
+}
+
+async function connectApprovedPublicAddresses(
+  addresses,
+  connectToAddress,
+  { now = Date.now, isClientClosed = () => false,
+    observePendingSocket = () => {}, observeAttempt = () => {} } = {},
+) {
+  const deadline = now() + PINNED_PROXY_CONNECT_TIMEOUT_MS;
+  for (const [index, address] of addresses.entries()) {
+    if (isClientClosed()) break;
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) break;
+    let pendingSocket = null;
+    const startedAt = now();
+    let outcome = "failed";
+    let errorCode = null;
+    try {
+      const upstream = await connectToAddress(
+        address,
+        index < addresses.length - 1
+          ? Math.min(remainingMs, PINNED_PROXY_ADDRESS_CONNECT_TIMEOUT_MS)
+          : remainingMs,
+        (socket) => { pendingSocket = socket; observePendingSocket(socket); },
+      );
+      if (isClientClosed() || now() >= deadline) {
+        outcome = isClientClosed() ? "cancelled" : "deadline-exceeded";
+        errorCode = outcome === "deadline-exceeded" ? "ETIMEDOUT" : null;
+        upstream.destroy();
+        return null;
+      }
+      outcome = "connected";
+      return upstream;
+    } catch (error) {
+      outcome = isClientClosed() ? "cancelled" : "failed";
+      errorCode = PINNED_PROXY_SAFE_CONNECT_ERROR_CODES.has(error?.code) ? error.code : "UNKNOWN";
+      pendingSocket?.destroy();
+    } finally {
+      observePendingSocket(null);
+      observeAttempt({ family: isIP(address), outcome, errorCode,
+        elapsedMs: Math.max(0, Math.min(PINNED_PROXY_CONNECT_TIMEOUT_MS, Math.round(now() - startedAt))) });
+    }
+  }
+  return null;
+}
+
 async function createPinnedPublicHttpsProxy() {
   const approvedAddressesByHost = new Map();
   const resolutionCache = new Map();
   const connectedByHost = new Map();
   const rejectedByHost = new Map();
   const dnsAnswersByHost = new Map();
+  const connectionAttempts = [];
+  let omittedConnectionAttemptCount = 0;
   const sockets = new Set();
   let connectRequestCount = 0;
   let activeTunnelCount = 0;
@@ -1945,37 +2040,6 @@ async function createPinnedPublicHttpsProxy() {
     approvedAddressesByHost.set(normalized, addresses);
     return addresses;
   };
-  const connectToAddress = (
-    address,
-    timeoutMs,
-    observeSocket = () => {},
-  ) => new Promise((resolve, reject) => {
-    const upstream = createConnection({
-      host: address,
-      port: 443,
-      family: isIP(address),
-    });
-    observeSocket(upstream);
-    let settled = false;
-    const fail = (error) => {
-      if (settled) return;
-      settled = true;
-      upstream.destroy();
-      reject(error);
-    };
-    upstream.setTimeout(
-      timeoutMs,
-      () => fail(new Error("pinned CONNECT timed out")),
-    );
-    upstream.once("error", fail);
-    upstream.once("connect", () => {
-      if (settled) return;
-      settled = true;
-      upstream.removeListener("error", fail);
-      upstream.setTimeout(0);
-      resolve(upstream);
-    });
-  });
   const rejectConnect = (clientSocket, status, hostname, reason) => {
     record(rejectedByHost, hostname, reason);
     if (!clientSocket.destroyed) {
@@ -2038,24 +2102,17 @@ async function createPinnedPublicHttpsProxy() {
       releaseTunnel();
     });
     void (async () => {
-      let upstream = null;
-      const connectDeadline = Date.now() + PINNED_PROXY_CONNECT_TIMEOUT_MS;
-      for (const address of approvedAddresses) {
-        if (clientClosed) break;
-        const remainingMs = connectDeadline - Date.now();
-        if (remainingMs <= 0) break;
-        try {
-          pendingUpstream = await connectToAddress(
-            address,
-            remainingMs,
-            (socket) => {
-              pendingUpstream = socket;
-            },
-          );
-          upstream = pendingUpstream;
-          break;
-        } catch {}
-      }
+      const upstream = await connectApprovedPublicAddresses(approvedAddresses, connectPinnedPublicAddress, {
+        isClientClosed: () => clientClosed,
+        observePendingSocket: (socket) => { pendingUpstream = socket; },
+        observeAttempt: (attempt) => {
+          if (connectionAttempts.length >= PINNED_PROXY_MAX_CONNECT_ATTEMPT_EVIDENCE) {
+            omittedConnectionAttemptCount += 1;
+          } else {
+            connectionAttempts.push({ hostname: authority.hostname, ...attempt });
+          }
+        },
+      });
       pendingUpstream = null;
       if (!upstream || clientClosed) {
         upstream?.destroy();
@@ -2133,6 +2190,8 @@ async function createPinnedPublicHttpsProxy() {
         activeTunnelBudgetOverflowCount,
         transferByteCount,
         transferByteBudgetOverflowCount,
+        connectionAttempts: connectionAttempts.map((attempt) => ({ ...attempt })),
+        omittedConnectionAttemptCount,
         dnsAddressOverflowCount,
         dnsAnswerEvidence: [...dnsAnswersByHost.values()].sort((left, right) =>
           left.hostname < right.hostname ? -1 : left.hostname > right.hostname ? 1 : 0),
@@ -9616,6 +9675,13 @@ function classifyAlgumonInventorySnapshot(snapshot, expectedSiteId = null) {
   };
 }
 
+async function navigateAlgumonSourceSession(session, requestedUrl, timeoutMs) {
+  // Chromium may open CONNECT before its routed request reaches the handler.
+  // Use the existing public-DNS pinning before the initial source navigation.
+  await primeDeclaredArticleNavigation(session, requestedUrl, ["algumon.com"]);
+  return navigateAlgumonSourcePage(session.page, requestedUrl, timeoutMs);
+}
+
 async function navigateAlgumonSourcePage(page, requestedUrl, timeoutMs) {
   const responseObserver = observeMainDocumentResponses(page);
   let response;
@@ -9804,8 +9870,8 @@ async function collectAlgumonGlobalInventory(
       "global-inventory",
       ALGUMON_GLOBAL_DISCOVERY_URL,
     );
-    const response = await navigateAlgumonSourcePage(
-      page,
+    const response = await navigateAlgumonSourceSession(
+      session,
       ALGUMON_GLOBAL_DISCOVERY_URL,
       timeoutMs,
     );
@@ -9867,7 +9933,7 @@ async function collectAlgumonRedirectLinks(
       requestKind,
       discoveryUrl,
     );
-    const response = await navigateAlgumonSourcePage(page, discoveryUrl, timeoutMs);
+    const response = await navigateAlgumonSourceSession(session, discoveryUrl, timeoutMs);
     const result = classifyAlgumonInventorySnapshot(
       await snapshotAlgumonInventoryPage(page, response),
       site.id,
@@ -12321,6 +12387,8 @@ export {
   classifyDestinationResponse,
   classifyProfileLandingRoute,
   collectRetainedRoleResourceEvidence,
+  connectApprovedPublicAddresses,
+  connectPinnedPublicAddress,
   commentControlProjectionFailures,
   commentItemProjectionFailures,
   commentControlSelectorDigest,
@@ -12343,6 +12411,7 @@ export {
   finalizeProfileLandingCoverage,
   matchingApprovedPaths,
   navigateAlgumonSourcePage,
+  navigateAlgumonSourceSession,
   networkFidelityFailures,
   networkResourceUrlSha256,
   networkRequestDecision,

@@ -14,6 +14,7 @@ import {
   createLowTrafficAlgumonProbePlan,
   finishAlgumonSourceBrowser,
   navigateAlgumonSourcePage,
+  navigateAlgumonSourceSession,
   transferAlgumonRelaySession,
 } from "../scripts/audit_pages.mjs";
 
@@ -359,6 +360,46 @@ function testSourceFailureRedactsRedirectPathsAndUnknownQueryKeys() {
   assert.equal(JSON.stringify(failure).includes("/callback/"), false);
 }
 
+async function testSourceHostIsApprovedBeforeNavigation() {
+  for (const requestedUrl of [
+    "https://www.algumon.com/n/deal",
+    "https://www.algumon.com/n/deal?sites=CLIEN",
+  ]) {
+    const calls = [];
+    const session = {
+      approvePublicHost: async (hostname) => {
+        calls.push(["approve", hostname]);
+        return ["1.1.1.1"];
+      },
+      page: {
+        on: () => {}, off: () => {},
+        goto: async (url) => {
+          calls.push(["goto", url]);
+          throw new Error("fixture navigation ends after approval");
+        },
+        url: () => "about:blank",
+        title: async () => "",
+        locator: () => ({ innerText: async () => "" }),
+      },
+    };
+    await navigateAlgumonSourceSession(session, requestedUrl, 1_000);
+    assert.deepEqual(calls, [["approve", "www.algumon.com"], ["goto", requestedUrl]]);
+
+    for (const addresses of [[], ["127.0.0.1"], ["1.1.1.1", "::1"]]) {
+      calls.length = 0;
+      await assert.rejects(navigateAlgumonSourceSession({
+        ...session, approvePublicHost: async () => addresses,
+      }, requestedUrl, 1_000), /no verified public DNS/);
+      assert.deepEqual(calls, [], "unverified addresses must not begin source navigation");
+    }
+    calls.length = 0;
+    await assert.rejects(navigateAlgumonSourceSession(
+      session, "https://unrelated.example/n/deal", 1_000,
+    ), /priming refused/);
+    assert.deepEqual(calls, [], "source priming must not expand navigation domains");
+  }
+}
+
 async function testNavigationErrorsPersistOnlyCategoryAndDigest() {
   const requestedUrl = "https://www.algumon.com/n/deal?session=private-query-token";
   for (const [prefix, category] of [
@@ -510,6 +551,7 @@ await testRegisteredArticleProjectionDoesNotRequireLegacySeed();
 testSourceUrlMismatchRetainsDiagnosticIdentityWithoutQueryValues();
 testSourceFailureRedactsRedirectPathsAndUnknownQueryKeys();
 await testNavigationErrorsPersistOnlyCategoryAndDigest();
+await testSourceHostIsApprovedBeforeNavigation();
 await testSourceFailureScreenshotAddsNoNavigation();
 if (process.argv.includes("--browser-fixture")) await testSourceBrowserLocalFlows();
 process.stdout.write("Algumon traffic budget tests passed\n");
