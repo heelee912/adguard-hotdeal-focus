@@ -1038,6 +1038,7 @@ function networkRequestDecision(
   allowedResourceDomains = allowedNavigationDomains,
   exactResourceHosts = [],
   allowPublicHttpsSubresources = false,
+  noAlgumonNetwork = false,
 ) {
   let parsed;
   try {
@@ -1056,6 +1057,9 @@ function networkRequestDecision(
     return { allowed: true, reason: "local-browser-scheme", hostname: null };
   }
   const hostname = normalizedHostname(parsed.hostname);
+  if (noAlgumonNetwork && hostnameMatches(hostname, "algumon.com")) {
+    return { allowed: false, reason: "algumon-network-disabled", hostname };
+  }
   const secureTransport =
     parsed.protocol === "https:" ||
     (!isMainNavigation && parsed.protocol === "wss:");
@@ -6318,6 +6322,7 @@ async function createPageContext(
     (contextPolicy.exactResourceHosts ?? []).map((hostname) => normalizedHostname(hostname)),
   );
   const allowPublicHttpsSubresources = contextPolicy.allowPublicHttpsSubresources === true;
+  const noAlgumonNetwork = contextPolicy.noAlgumonNetwork === true;
   const sourceBrowserBudget = contextPolicy.algumonSourceUrl
     ? createAlgumonSourceBrowserBudget(contextPolicy.algumonSourceUrl)
     : null;
@@ -6327,6 +6332,14 @@ async function createPageContext(
   const stylesheetDependencyRecorder = createStylesheetDependencyRecorder();
   let stopStylesheetObservation = null;
   const pinnedTransport = await createPinnedPublicHttpsProxy();
+  const approvePublicHost = (hostname) => {
+    // Redirect CONNECTs may bypass Playwright routing. Never approve this host
+    // in a no-Algumon context, including through navigation priming.
+    if (noAlgumonNetwork && hostnameMatches(normalizedHostname(hostname), "algumon.com")) {
+      return Promise.resolve([]);
+    }
+    return pinnedTransport.approvePublicHost(hostname);
+  };
   let context;
   try {
     context = await browser.newContext({
@@ -6435,6 +6448,7 @@ async function createPageContext(
       [...resourceDomains],
       [...exactResourceHosts],
       allowPublicHttpsSubresources,
+      noAlgumonNetwork,
     );
     if (decision.reason === "local-browser-scheme") {
       await route.continue();
@@ -6457,7 +6471,7 @@ async function createPageContext(
         return;
       }
       const approvedAddresses = decision.allowed
-        ? await pinnedTransport.approvePublicHost(parsed.hostname)
+        ? await approvePublicHost(parsed.hostname)
         : [];
       if (!decision.allowed || approvedAddresses.length < 1) {
         networkEvidenceRecorder.recordBlocked(
@@ -6527,6 +6541,7 @@ async function createPageContext(
       [...resourceDomains],
       [...exactResourceHosts],
       allowPublicHttpsSubresources,
+      noAlgumonNetwork,
     );
     const reservation = networkEvidenceRecorder.reserveRemoteRequest(parsed.hostname, {
       requestType: "websocket", isMainNavigation: false, urlText: webSocketRoute.url(),
@@ -6543,7 +6558,7 @@ async function createPageContext(
         await webSocketRoute.close({ code: 1008, reason: "network-policy" });
         return;
       }
-      const approvedAddresses = await pinnedTransport.approvePublicHost(parsed.hostname);
+      const approvedAddresses = await approvePublicHost(parsed.hostname);
       if (approvedAddresses.length < 1) {
         networkEvidenceRecorder.recordBlocked(
           parsed.hostname,
@@ -6594,6 +6609,7 @@ async function createPageContext(
       [...resourceDomains],
       [...exactResourceHosts],
       allowPublicHttpsSubresources,
+      noAlgumonNetwork,
     );
     if (decision.allowed) return;
     let parsed = null;
@@ -6633,7 +6649,7 @@ async function createPageContext(
   return {
     context,
     page,
-    approvePublicHost: pinnedTransport.approvePublicHost,
+    approvePublicHost,
     sourceBrowserBudgetSnapshot: () => sourceBrowserBudget?.snapshot() ?? null,
     sealNetworkPolicyEvidence: async () => {
       validateAllMainDocumentUrls();
@@ -6676,6 +6692,7 @@ async function auditOneTarget({
   userscriptContent,
   promotionCandidate,
   runtimeOnly,
+  noAlgumonNetwork = false,
   runDirectory,
   timeoutMs,
 }) {
@@ -6746,6 +6763,7 @@ async function auditOneTarget({
       {
         exactResourceHosts: exactChallengeResourceHosts,
         allowPublicHttpsSubresources: true,
+        noAlgumonNetwork,
       },
     );
     try {
@@ -7060,6 +7078,7 @@ async function auditOneTarget({
       exactResourceHosts: exactChallengeResourceHosts,
       storageState,
       allowPublicHttpsSubresources: true,
+      noAlgumonNetwork,
     },
   );
   const consoleErrors = [];
@@ -12170,6 +12189,7 @@ async function main() {
         userscriptContent,
         promotionCandidate: promotionDraft?.candidate ?? null,
         runtimeOnly: options.runtimeOnly,
+        noAlgumonNetwork: options.noAlgumonNetwork,
         runDirectory,
         timeoutMs: options.timeoutMs,
       });
@@ -12419,6 +12439,7 @@ export {
   createAlgumonSourceBrowserBudget,
   createLowTrafficAlgumonProbePlan,
   createNetworkPolicyEvidenceRecorder,
+  createPageContext,
   createStylesheetDependencyRecorder,
   createPinnedPublicHttpsProxy,
   exactSignedAlgumonDealUrl,

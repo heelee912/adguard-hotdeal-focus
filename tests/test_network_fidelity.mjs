@@ -12,9 +12,11 @@ import {
   consumeArticleAccessLease,
   createArticleAccessLease,
   createNetworkPolicyEvidenceRecorder,
+  createPageContext,
   createPinnedPublicHttpsProxy,
   createStylesheetDependencyRecorder,
   isPrivateOrSpecialIp,
+  isTopLevelNavigationRequest,
   networkFidelityFailures,
   networkRequestDecision,
   networkRequestRedirectEvidence,
@@ -35,6 +37,7 @@ function assertDecision(label, input, expected) {
       input.allowedResourceDomains,
       input.exactResourceHosts,
       input.allowPublicHttpsSubresources,
+      input.noAlgumonNetwork,
     ),
     expected,
     label,
@@ -306,6 +309,135 @@ function testNetworkPolicyTable() {
 function finishReservation(reservation) {
   reservation.finish();
   reservation.finish();
+}
+
+function testNoAlgumonNetworkOverridesResourceAllowances() {
+  for (const url of [
+    "https://algumon.com/resource", "https://www.algumon.com/resource",
+    "https://sub.www.algumon.com/resource", "https://ALGUMON.COM./resource",
+    "wss://algumon.com/socket", "wss://push.algumon.com/socket",
+  ]) {
+    const decision = networkRequestDecision(url, false,
+      ["algumon.com"], ["algumon.com"], ["www.algumon.com"], true, true);
+    assert.equal(decision.allowed, false, url);
+    assert.equal(decision.reason, "algumon-network-disabled", url);
+  }
+  assert.equal(networkRequestDecision("https://algumon.com/article", true,
+    ["algumon.com"], ["algumon.com"], [], true, true).allowed, false);
+  for (const url of ["https://publisher.example/article", "https://notalgumon.com/resource",
+    "https://algumon.com.other.example/resource", "wss://publisher.example/socket"]) {
+    assert.equal(networkRequestDecision(url, false, ["publisher.example"], [], [], true, true).allowed,
+      true, "the no-Algumon option must not widen unrelated blocking");
+  }
+  assert.equal(networkRequestDecision("https://algumon.com/resource", false, [], [], [], true).allowed,
+    true, "explicit legacy discovery contexts keep their existing policy");
+}
+
+async function testNoAlgumonArticleContextsBlockRequestsSocketsAndRedirectConnects() {
+  // Run the production routing function with only device/user-script bootstrap
+  // substituted; the policy recorders and localhost pinned proxy remain real.
+  const createFixtureContext = vm.runInNewContext(`(${createPageContext.toString()})`, {
+    URL,
+    contextOptions: () => ({}),
+    userscriptAuditInitSource: content => content,
+    normalizedHostname: hostname => networkRequestDecision(`https://${hostname}/`, false).hostname,
+    hostnameMatches: (hostname, domain) => networkRequestDecision(`https://${hostname}/`, true, [domain]).allowed,
+    createNetworkPolicyEvidenceRecorder,
+    createStylesheetDependencyRecorder,
+    createPinnedPublicHttpsProxy,
+    observeStylesheetDependencies,
+    isTopLevelNavigationRequest,
+    networkRequestDecision,
+    networkRequestRedirectEvidence,
+  });
+  for (const [profile, userscript] of [["desktop", null], ["mobile", "void 0;"]]) {
+    const context = new EventEmitter();
+    const page = new EventEmitter();
+    const frame = { parentFrame: () => null, url: () => "about:blank" };
+    page.mainFrame = () => frame;
+    page.url = () => frame.url();
+    const cdp = new EventEmitter();
+    let detached = 0;
+    cdp.send = async method => method === "Page.getFrameTree" ? { frameTree: { frame: { id: "main" } } } : {};
+    cdp.detach = async () => { detached += 1; };
+    let httpRoute;
+    let socketRoute;
+    let proxyUrl;
+    let initScriptCount = 0;
+    context.route = async (_pattern, handler) => { httpRoute = handler; };
+    context.routeWebSocket = async (_pattern, handler) => { socketRoute = handler; };
+    context.newPage = async () => { context.emit("page", page); return page; };
+    context.newCDPSession = async () => cdp;
+    context.pages = () => [page];
+    context.addInitScript = async () => { initScriptCount += 1; };
+    context.close = async () => { context.emit("close"); };
+    const browser = { newContext: async options => {
+      proxyUrl = options.proxy.server;
+      assert.equal(options.serviceWorkers, "block");
+      return context;
+    } };
+    const session = await createFixtureContext(browser, profile, userscript,
+      ["publisher.example"], ["publisher.example", "algumon.com"], {
+        allowPublicHttpsSubresources: true, exactResourceHosts: ["www.algumon.com"],
+        noAlgumonNetwork: true,
+      });
+    try {
+      let continued = 0;
+      const blocked = [];
+      const original = { url: () => "https://publisher.example/redirect", redirectedFrom: () => null };
+      for (const [url, type, main, redirected] of [
+        ["https://algumon.com/image", "image", false, false],
+        ["https://cdn.algumon.com/script", "script", false, false],
+        ["https://www.algumon.com/redirected", "document", true, true],
+      ]) {
+        await httpRoute({ request: () => ({ url: () => url, resourceType: () => type,
+          isNavigationRequest: () => main, frame: () => frame,
+          redirectedFrom: () => redirected ? original : null }),
+          abort: async reason => blocked.push(reason),
+          continue: async () => { continued += 1; },
+        });
+      }
+      let socketClosed = 0;
+      await socketRoute({ url: () => "wss://push.algumon.com/socket",
+        close: async () => { socketClosed += 1; },
+        connectToServer: () => { throw new Error("Algumon websocket must not connect"); },
+      });
+      assert.equal(continued, 0);
+      assert.equal(blocked.length, 3);
+      assert.equal(socketClosed, 1);
+      // Priming cannot approve the hostname either. Thus an HTTP redirect that
+      // bypasses Playwright interception still stops at the local proxy.
+      assert.equal((await session.approvePublicHost("WWW.ALGUMON.COM.")).length, 0);
+      for (const hostname of ["algumon.com", "redirect.algumon.com"]) {
+        const local = new URL(proxyUrl);
+        const response = await new Promise((resolve, reject) => {
+          const socket = createConnection({ host: local.hostname, port: Number(local.port) });
+          let received = "";
+          socket.setEncoding("utf8");
+          socket.setTimeout(2_000, () => socket.destroy(new Error("local redirect CONNECT timed out")));
+          socket.on("error", reject);
+          socket.on("data", chunk => { received += chunk; });
+          socket.once("end", () => { socket.destroy(); resolve(received); });
+          socket.once("connect", () => socket.write(
+            `CONNECT ${hostname}:443 HTTP/1.1\r\nHost: ${hostname}:443\r\n\r\n`,
+          ));
+        });
+        assert.match(response, /^HTTP\/1\.1 403 Forbidden\r\n/u);
+      }
+      const evidence = await session.sealNetworkPolicyEvidence();
+      assert.equal(evidence.pinnedTransport.approvedHostCount, 0);
+      assert.deepEqual(evidence.pinnedTransport.dnsAnswerEvidence, []);
+      assert.deepEqual(evidence.pinnedTransport.connectedHosts, []);
+      assert.equal(evidence.pinnedTransport.transferByteCount, 0);
+      assert.equal(evidence.allowedPublicHosts.length, 0);
+      assert.ok(evidence.blockedHosts.every(entry => entry.reasons.includes("algumon-network-disabled")));
+      assert.deepEqual(networkFidelityFailures(evidence), []);
+      assert.equal(detached, 1);
+      assert.equal(initScriptCount, userscript === null ? 0 : 1);
+    } finally {
+      await session.context.close();
+    }
+  }
 }
 
 function testRemoteHostBudgetBoundary() {
@@ -1514,6 +1646,8 @@ function testRecoveryPaintClassification() {
 async function main() {
   testRecoveryPaintClassification();
   testNetworkPolicyTable();
+  testNoAlgumonNetworkOverridesResourceAllowances();
+  await testNoAlgumonArticleContextsBlockRequestsSocketsAndRedirectConnects();
   testRemoteHostBudgetBoundary();
   testRemoteRequestBudgetBoundary();
   testConcurrentReservations();
