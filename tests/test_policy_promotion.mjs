@@ -381,3 +381,5 @@ process.stdout.write(
   "independent policy promotion: inventory, comment lower-bound, and " +
     "required/zero/optional drift proofs passed\n",
 );
+
+await import("./test_registered_site_monitor.mjs");

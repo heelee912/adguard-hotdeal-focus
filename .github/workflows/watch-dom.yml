@@ -2,7 +2,7 @@ name: Watch live DOM
 
 on:
   schedule:
-    # Monday 03:17 Asia/Seoul. One bounded source audit per week; GitHub
+    # Monday 03:17 Asia/Seoul. One bounded registered-sample audit per week; GitHub
     # dispatches are manual only and no workflow may self-dispatch this audit.
     - cron: "17 18 * * 0"
   workflow_dispatch:
@@ -106,7 +106,7 @@ jobs:
         if: steps.preflight.outputs.status == '0'
         run: npx playwright install --with-deps chromium
 
-      - name: Audit bounded samples and the exact global Algumon source inventory
+      - name: Audit bounded registered article samples without Algumon access
         if: steps.preflight.outputs.status == '0'
         id: live
         shell: bash
@@ -123,7 +123,8 @@ jobs:
           if [[ "${status}" == "0" ]]; then
             timeout --kill-after=15s 210m xvfb-run -a npm run audit:dom -- \
               --headed \
-              --require-algumon-discovery \
+              --no-discover-algumon \
+              --no-algumon-network \
               --algumon-request-budget 29 \
               --synthesize-candidates || status=1
           fi
@@ -325,7 +326,7 @@ jobs:
               --userscript "${draft_root}/hotdeal-focus.user.js" \
               --headed \
               --runtime-only \
-              --algumon-source-snapshot .candidate-queue/base-audit-report.json \
+              --no-discover-algumon \
               --no-algumon-network \
               --promotion-draft "${draft}" \
               --draft-manifest "${draft_root}/draft-manifest.json" \
@@ -402,7 +403,7 @@ jobs:
 
           if [[ -z "${status}" ]]; then
             status="proven"
-            reason="three independent Algumon proofs passed"
+            reason="registered article sample proofs passed"
             mkdir -p .candidate-result/release .candidate-result/proof
             cp -a "${release_root}/." .candidate-result/release/
             install -m 0644 "${draft}" \
@@ -782,7 +783,7 @@ jobs:
           timeout --kill-after=10s 15m npm run test:behavior
           timeout --kill-after=15s 180m xvfb-run -a npm run audit:dom -- \
             --headed \
-            --algumon-source-snapshot .promotion-package/proof/base-audit-report.json \
+            --no-discover-algumon \
             --no-algumon-network \
             --promotion-scope .promotion-package/proof/promotion-ready.json \
             --baseline-report .promotion-package/proof/base-audit-report.json
@@ -1118,7 +1119,7 @@ jobs:
           3. \`dom-audit-failure-screenshots-${RUN_ID}\` — deterministic capped screenshots for a failed full audit.
           4. \`candidate-aggregate-${RUN_ID}\` and \`candidate-result-${RUN_ID}-*\` — only after isolated retests finish.
 
-          The issue stays open until a later full cloud audit is clean. Candidate proofs reuse frozen source evidence, and no workflow self-dispatches another Algumon audit. A source-repository promotion is separately opt-in and can use only a digest-bound candidate that passes the isolated proof, zero-leak, tamper, and reproducibility gates.
+          The issue stays open until a later full cloud audit is clean. Candidate proofs use registered article samples without contacting Algumon, and no workflow self-dispatches another live audit. A source-repository promotion is separately opt-in and can use only a digest-bound candidate that passes the isolated proof, zero-leak, tamper, and reproducibility gates.
           EOF
           if [[ -n "${existing}" ]]; then
             gh issue comment "${existing}" --repo "${GITHUB_REPOSITORY}" --body-file issue-body.md

@@ -288,9 +288,23 @@ class SubprocessContractTests(unittest.TestCase):
         live = cli._verification_steps("live")
         self.assertEqual(
             live[-1][1], (
-                "node", "scripts/audit_pages.mjs", "--discover-algumon",
-                "--require-algumon-discovery",
+                "node", "scripts/audit_pages.mjs", "--no-discover-algumon",
+                "--no-algumon-network",
             )
+        )
+
+    def test_live_verification_reports_registered_samples_without_discovery(self):
+        manifest, _manifest_bytes, artifacts = release_bundle()
+        with mock.patch.object(cli, "_assert_new_directory"), mock.patch.object(
+            cli, "_execute_verification", return_value={"passed": True}
+        ), mock.patch.object(cli, "_local_release_contract", return_value=(manifest, artifacts)), \
+             mock.patch.object(cli, "_try_source_sha", return_value="a" * 40), \
+             mock.patch.object(cli, "_attach_command_evidence", side_effect=lambda result, _directory: result):
+            result = cli.command_verify(cli.argparse.Namespace(profile="live", evidence_dir="unused-evidence"))
+        self.assertFalse(result["liveDiscoveryRequired"])
+        self.assertEqual(
+            "Registered original-article samples are audited directly; Algumon network access is disabled.",
+            result["liveEnvironmentPolicy"],
         )
 
     def test_verification_failure_maps_to_exit_four(self):

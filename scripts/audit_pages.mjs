@@ -292,7 +292,7 @@ function parseArguments(argv) {
     evidencePath: DEFAULT_EVIDENCE_PATH,
     userscriptPath: DEFAULT_USERSCRIPT_PATH,
     timeoutMs: DEFAULT_TIMEOUT_MS,
-    discoverAlgumon: true,
+    discoverAlgumon: false,
     requireAlgumonDiscovery: false,
     integrityOnly: false,
     fixtureOnly: false,
@@ -437,7 +437,7 @@ function parseArguments(argv) {
         throw new Error(`unknown argument: ${argument}`);
     }
   }
-  if (options.capturedAlgumonReportPath) {
+  if (options.capturedAlgumonReportPath || options.noAlgumonNetwork) {
     options.discoverAlgumon = false;
     options.noAlgumonNetwork = true;
   }
@@ -450,13 +450,6 @@ function parseArguments(argv) {
     throw new Error(
       "--require-algumon-discovery needs live discovery or --algumon-source-snapshot",
     );
-  }
-  if (
-    options.noAlgumonNetwork &&
-    !options.fixtureOnly &&
-    !options.capturedAlgumonReportPath
-  ) {
-    throw new Error("--no-algumon-network requires --algumon-source-snapshot");
   }
   return options;
 }
@@ -483,7 +476,7 @@ function printUsage() {
   process.stdout.write(`  --baseline-report PATH           Frozen full audit used for non-regression scope\n`);
   process.stdout.write(`  --algumon-source-snapshot PATH   Reuse sealed relay evidence; never revisit Algumon\n`);
   process.stdout.write(`  --captured-algumon-report PATH   Compatibility alias for --algumon-source-snapshot\n`);
-  process.stdout.write(`  --no-algumon-network             Require the sealed source-snapshot path\n`);
+  process.stdout.write(`  --no-algumon-network             Audit registered articles without Algumon discovery\n`);
   process.stdout.write(`  --algumon-request-budget N       Tighten the live Algumon-start cap (1-${DEFAULT_ALGUMON_REQUEST_START_BUDGET})\n`);
   process.stdout.write(`  --timeout-ms N                   Per-page timeout\n`);
   process.stdout.write(`  --headed                         Show Chromium\n`);
@@ -2290,11 +2283,16 @@ function candidateGenerationAllowed(
   networkFidelityFailureCount = 0,
 ) {
   return Boolean(
-    runtimeExpectation === "relay-positive" &&
+    ["registered-positive", "relay-positive"].includes(runtimeExpectation) &&
       sourceClassification?.kind === "article-response" &&
       sourceClassification?.candidateEligible === true &&
       networkFidelityFailureCount === 0,
   );
+}
+
+function isPromotionArticleResult(result) {
+  return (result?.source === "sample" && result.runtimeExpectation === "registered-positive") ||
+    result?.source === "algumon-latest";
 }
 
 function classifyProfileLandingRoute(
@@ -4218,9 +4216,8 @@ async function semanticOracle(
             expectedLayoutId,
         );
       }
-      // A registered article is checked against its approved DOM contract.
-      // New-layout discovery is deliberately separate: missing aggregator
-      // metadata and generic inference scores cannot invalidate an exact match.
+      // Preserve an exact approved contract. A changed registered tuple alone
+      // proceeds to the independent native-article discovery below.
       if (registeredSample) {
         const hostname = location.hostname.toLocaleLowerCase();
         const siteMatches = hostname === siteContract.domain ||
@@ -4288,7 +4285,7 @@ async function semanticOracle(
           expectedLayoutApproved && resolution?.ok === true && containment && itemContainment &&
           rolesRequired.every((role) => Boolean(roles[role])) &&
           Object.values(cardinality).every((count) => count === 1);
-        return {
+        if (exact || !siteMatches || !registeredRoute) return {
           ok: exact,
           verificationMode: "registered-sample",
           candidateEligible: false,
@@ -4664,7 +4661,11 @@ async function semanticOracle(
         nodes.every(
           (node) => node === pageRoot || pageRoot.contains(node),
         );
+      const nativeTitleEvidence = registeredSample && roleNodes.title
+        ? api.titleEvidence(document, null, roleNodes.title.textContent)
+        : null;
       return {
+        verificationMode: registeredSample ? "native-article-discovery" : "relay-discovery",
         ok:
           resolution.ok === true &&
           pageRoot !== document.documentElement &&
@@ -4703,15 +4704,18 @@ async function semanticOracle(
           : "",
         containment,
         seedTitleSimilarity:
-          resolution.seedConsistency?.titleSimilarity ?? 0,
+          nativeTitleEvidence?.score ?? resolution.seedConsistency?.titleSimilarity ?? 0,
         seedTitleConsistencyOk:
-          resolution.seedConsistency?.titleConsistencyOk === true,
-        seedTitleConsistencyMode:
-          resolution.seedConsistency?.titleMode ?? "missing",
+          nativeTitleEvidence ? nativeTitleEvidence.ok === true
+            : resolution.seedConsistency?.titleConsistencyOk === true,
+        seedTitleConsistencyMode: registeredSample
+          ? String(nativeTitleEvidence?.mode ?? "missing")
+            .replace(/^algumon(?:-referrer)?/u, "native-article")
+          : resolution.seedConsistency?.titleMode ?? "missing",
         seedTitleMetadataSourceCount:
-          resolution.seedConsistency?.metadataSourceCount ?? 0,
+          nativeTitleEvidence?.metadata.sourceCount ?? resolution.seedConsistency?.metadataSourceCount ?? 0,
         seedTitleMetadataSourceKinds:
-          resolution.seedConsistency?.metadataSourceKinds ?? [],
+          nativeTitleEvidence?.metadata.sourceKinds ?? resolution.seedConsistency?.metadataSourceKinds ?? [],
         productOrder: resolution.productOrder ?? null,
         existingPolicy: resolution.existingPolicy ?? null,
         policyProposal: resolution.policyProposal ?? null,
@@ -5165,10 +5169,11 @@ async function auditCandidateOverlay(
         roles: roleEvidence,
         titleConsistency: Number(titleResult.score.toFixed(3)),
         titleConsistencyOk: titleResult.ok === true,
-        titleConsistencyMode: titleResult.mode,
+        titleConsistencyMode: algumon?.title ? titleResult.mode
+          : String(titleResult.mode).replace(/^algumon(?:-referrer)?/u, "native-article"),
         titleMetadataSourceCount: titleResult.metadata.sourceCount,
         titleMetadataSourceKinds: titleResult.metadata.sourceKinds,
-        titleConsistent: Boolean(algumon?.title) && titleResult.ok === true,
+        titleConsistent: titleResult.ok === true,
         commentItemCount: commentItems.length,
         ignoredSelectors: [...(payload.commentIgnored ?? [])].sort(),
         ignoredCount: commentIgnored.length,
@@ -5319,13 +5324,15 @@ function semanticOracleEvidence(oracle, target) {
     };
   }
   const algumonTitle = target.algumon?.title ?? "";
+  const nativeArticle = target.source === "sample" &&
+    target.readerRouteRegistered === true && oracle.verificationMode === "native-article-discovery";
   const algumonCommentCount = target.algumon?.commentCount ?? null;
   const titleSimilarity = Number(oracle.seedTitleSimilarity ?? 0);
   const titleComparable = Boolean(oracle.titleNormalized && algumonTitle);
   const commentComparable =
     Number.isInteger(oracle.commentItemCount) && Number.isInteger(algumonCommentCount);
   const commentTolerance = commentComparable ? 0 : null;
-  const titleConsistency = titleComparable
+  const titleConsistency = titleComparable || nativeArticle
     ? Number(titleSimilarity.toFixed(3))
     : 0;
   const countConsistency = commentComparable
@@ -5366,11 +5373,12 @@ function semanticOracleEvidence(oracle, target) {
     ok:
       oracle.ok === true &&
       oracle.containment === true &&
-      target.source === "algumon-latest" &&
+      (target.source === "algumon-latest" || nativeArticle) &&
       titleConsistent &&
       commentConsistent &&
       exactCommentStructure,
     structuralOk: oracle.ok === true,
+    verificationMode: oracle.verificationMode,
     reason: oracle.reason,
     projectionTupleCount: oracle.projectionTupleCount,
     oracleSource: oracle.oracleSource,
@@ -6685,6 +6693,7 @@ async function auditOneTarget({
     profile: profileName,
     source: auditedTarget.source,
     runtimeExpectation,
+    candidateGenerationAllowed: false,
     requestedUrl: auditedTarget.url,
     relayDestinationUrl: auditedTarget.algumon?.verifiedResolution?.resolvedDestination ?? null,
     relayAcquisition: auditedTarget.relayAcquisition ?? null,
@@ -7198,7 +7207,7 @@ async function auditOneTarget({
       promotionCandidate &&
       promotionCandidate.siteId === site.id &&
       promotionCandidate.layoutId === auditedLayout.id &&
-      auditedTarget.source === "algumon-latest"
+      ["registered-positive", "relay-positive"].includes(runtimeExpectation)
     ) {
       result.candidateOverlay = await auditCandidateOverlay(
         auditedPage,
@@ -7221,7 +7230,7 @@ async function auditOneTarget({
       : userscriptGateFailures(gate, requiredRoles);
     result.failures.push(...runtimeFailures.map((item) => `userscript: ${item}`));
     if (
-      runtimeExpectation === "relay-positive" &&
+      ["registered-positive", "relay-positive"].includes(runtimeExpectation) &&
       runtimeCandidateExtractionAllowed &&
       result.failures.length > 0 &&
       candidates.length === 0
@@ -7278,13 +7287,13 @@ async function auditOneTarget({
       result.failures.push(`userscript audit error: ${evidence.category} (${evidence.errorSha256})`);
     }
     if (
-      runtimeExpectation === "relay-positive" &&
+      ["registered-positive", "relay-positive"].includes(runtimeExpectation) &&
       runtimeCandidateExtractionAllowed !== true
     ) {
       candidates = [];
     }
     if (
-      runtimeExpectation === "relay-positive" &&
+      ["registered-positive", "relay-positive"].includes(runtimeExpectation) &&
       runtimeCandidateExtractionAllowed &&
       candidates.length === 0
     ) {
@@ -7319,6 +7328,7 @@ async function auditOneTarget({
   }
 
   result.capturedAt = new Date().toISOString().replace(/\.\d{3}Z$/u, "Z");
+  result.candidateGenerationAllowed = candidateExtractionAllowed && runtimeCandidateExtractionAllowed;
   result.passed = result.failures.length === 0;
   return { result, candidates };
 }
@@ -10660,7 +10670,7 @@ function promotionRetestFailures(report, scope) {
             result.siteId === scope.siteId &&
             result.layoutId === scope.candidateLayoutId &&
             result.profile === profile &&
-            result.source === "algumon-latest" &&
+            isPromotionArticleResult(result) &&
             result.passed === true,
         )
         .map((result) => result.requestedUrl),
@@ -10668,7 +10678,7 @@ function promotionRetestFailures(report, scope) {
     if (distinctCandidateProofs.size < 3) {
       failures.push(
         `promotion-retest ${scope.candidateLayoutId}/${profile}: ` +
-          `${distinctCandidateProofs.size}/3 distinct Algumon proofs passed`,
+          `${distinctCandidateProofs.size}/3 distinct article proofs passed`,
       );
     }
   }
@@ -11255,7 +11265,8 @@ function independentPolicyProposalIsComplete(oracle) {
 function qualifiedDiscoveryResult(result) {
   const oracle = result.semanticOracle;
   return (
-    result.source === "algumon-latest" &&
+    isPromotionArticleResult(result) &&
+    result.candidateGenerationAllowed !== false &&
     typeof result.capturedAt === "string" &&
     oracle?.ok === true &&
     oracle.oracleSource === "verified-userscript-export" &&
@@ -11768,7 +11779,7 @@ function measuredVisibleLeakCount(gate) {
     Number(gate?.diagnostics?.visibleLeakCount ?? 1),
     Number(gate?.visibleWithoutKeepCount ?? 1),
     Number(gate?.directVisibleTextLeakCount ?? 1),
-    Number(gate?.uncoveredUnmarkedCount ?? 1),
+    Number(gate?.standaloneRuntimeCoverage?.visibleUnownedCount ?? gate?.uncoveredUnmarkedCount ?? 1),
     Number(gate?.paintProbe?.unsafeGateFrameCount ?? 1),
   );
 }
@@ -11841,7 +11852,7 @@ function synthesizePromotionProof(report, config, draftEnvelope, draftManifest) 
       (result) =>
         result.siteId === candidate.siteId &&
         result.layoutId === candidate.layoutId &&
-        result.source === "algumon-latest" &&
+        isPromotionArticleResult(result) &&
         candidate.sampleUrls.includes(result.requestedUrl) &&
         expectedProfiles.includes(result.profile) &&
         result.candidateOverlay,
@@ -12375,10 +12386,13 @@ export {
   approvedPathsForLayout,
   articleIdentitiesLogicallyEquivalent,
   assertAuditConfig,
+  auditCandidateOverlay,
   auditUserscriptGate,
   blockedUserscriptGateFailures,
   buildProjectedHideSelector,
   candidateGenerationAllowed,
+  candidateOracleProjectionEvidence,
+  candidateOverlayFailures,
   canonicalArticleIdentity,
   capturedAlgumonTargetsFromReport,
   classifyAlgumonInventorySnapshot,
@@ -12425,6 +12439,7 @@ export {
   retainUnobservedSessionNetworkPolicy,
   projectionCardinalityEvidence,
   promotionVariantId,
+  promotionRetestFailures,
   recordedSignedRelayAcquisitionEvidence,
   runtimeExpectationForTarget,
   resultHasZeroLeak,
@@ -12439,6 +12454,8 @@ export {
   signedRelayAcquisitionEvidence,
   siteArticleIdentity,
   staticRuntimeConsistencyFailures,
+  synthesizePromotionDraftForGroup,
+  synthesizePromotionProof,
   transferAlgumonRelaySession,
   userscriptGateFailures,
   validateDiagnostics,

@@ -1117,8 +1117,8 @@ RELEASE_STEPS: tuple[tuple[str, tuple[str, ...], int], ...] = FAST_STEPS + (
 LIVE_STEP = (
     "live-audit",
     (
-        "node", "scripts/audit_pages.mjs", "--discover-algumon",
-        "--require-algumon-discovery",
+        "node", "scripts/audit_pages.mjs", "--no-discover-algumon",
+        "--no-algumon-network",
     ),
     LIVE_TIMEOUT_SECONDS,
 )
@@ -1217,10 +1217,10 @@ def command_verify(args: argparse.Namespace) -> dict[str, Any]:
         source_sha=_try_source_sha(),
         artifacts=artifacts,
         profile=args.profile,
-        liveDiscoveryRequired=args.profile == "live",
+        liveDiscoveryRequired=False,
         liveEnvironmentPolicy=(
-            "Complete Algumon discovery is mandatory; an environment policy refusal, "
-            "including local Arca access refusal, is a failed live verification."
+            "Registered original-article samples are audited directly; "
+            "Algumon network access is disabled."
             if args.profile == "live" else None
         ),
         releaseVersion=manifest["releaseVersion"],

@@ -10,7 +10,7 @@
 
 Runtime, content configuration, candidate discovery, release publication, and Windows deployment are separate bounded contexts. Canonical JSON and exact DTOs cross those boundaries; browser or infrastructure objects do not.
 
-The configured Algumon source catalog contains seven identities: Clien, Ppomppu, Ruliweb, QuasarZone, Eomisae, ZOD, and Arca Live. Cloud collection checks this inventory explicitly. Desktop and mobile contracts remain distinct proof profiles even when they share selectors.
+The configured destination sites are Clien, Ppomppu, Ruliweb, QuasarZone, Eomisae, ZOD, and Arca Live. Cloud monitoring directly opens the fixed article URLs in each layout's `sample_urls`; it does not visit Algumon. Desktop and mobile contracts remain distinct proof profiles even when they share selectors.
 
 ## Single runtime authority
 
@@ -94,7 +94,7 @@ Purchase information is resolved according to the layout's declared boundary
 and cardinality; genuinely competing purchase roots remain ambiguity. Original
 article links and product content are not rewritten into a separate reader copy.
 
-## Runtime entry and cloud Algumon provenance
+## Runtime entry and independent site monitoring
 
 The installed script matches the seven destination sites, not Algumon. It does
 not intercept Algumon clicks, fetch signed relays, create a popup, attach a
@@ -107,8 +107,8 @@ drop the referrer. An unregistered route requires an exact HTTPS Algumon referre
 before bounded discovery is attempted. Entry eligibility does not itself reveal
 the page: one complete projection and the rendering checks must still pass.
 
-Signed relay provenance is instead a **cloud collection and promotion** boundary
-in `scripts/audit_pages.mjs`. Collection permits the publisher's ordinary
+Signed relay provenance belongs to an optional, manually selected legacy collector
+in `scripts/audit_pages.mjs`, not the scheduled update workflow. Collection permits the publisher's ordinary
 JavaScript, styles, images, and bounded same-origin document transitions. It
 waits at most 12 seconds after initial navigation for the exact requested feed
 and deal cards; it does not click verification controls or initiate reloads.
@@ -133,11 +133,11 @@ installed reader.
 
 ## Deterministic adaptation without AI
 
-Once each Monday at 03:17 KST (Sunday 18:17 UTC), the scheduled workflow performs one bounded source collection:
+Once each Monday at 03:17 KST (Sunday 18:17 UTC), the scheduled workflow checks the fixed destination article samples directly:
 
 ```text
-exact Algumon inventory
-→ desktop/mobile relay acquisition
+registered destination articles (three per layout)
+→ direct desktop/mobile rendering
 → semantic candidate generation
 → isolated userscript-only build
 → profile-complete live proof
@@ -149,17 +149,18 @@ exact Algumon inventory
 → live HTTPS byte attestation
 ```
 
-The only live Algumon source pass has an explicit acquisition-start budget of
-29: one global inventory, one source visit for each of the seven identities,
-and three signed relays per identity. This is not a total HTTP request count.
-Browser request events, automatic document transitions, subresources, and
-blocked attempts are counted separately without double-counting routed requests.
-Each source context retains the existing 4,096-request and 128-host network
-limits, public DNS/IP validation, and a maximum of 32 main-document starts.
-Candidate proof and promotion retest consume
-the immutable `base-audit-report.json` snapshot and therefore start zero
-additional Algumon requests. Freshness is checked against the recorded,
-canonical relay acquisition time, not by refetching a signed relay later.
+The initial audit, isolated candidate proof, and final promotion retest all use
+`--no-discover-algumon --no-algumon-network`. No live Algumon inventory, relay,
+verification screen, referrer, or saved browser login is needed for these runs.
+Each layout currently has three fixed article samples (42 desktop/mobile targets
+across nine layouts). Ordinary articles and a long-lived publisher notice are
+included; availability is measured, never assumed to be permanent. A deleted
+article, login page, WAF response, or failed network request is not eligible to
+generate a new DOM rule. Existing bounded network, public DNS/IP, source-response,
+content-preservation, and artifact-integrity checks still apply.
+Candidate proof and promotion retest open the same registered articles afresh.
+The immutable `base-audit-report.json` still defines non-regression scope and
+digest provenance, but is not an Algumon access dependency.
 Manual dispatch is allowed for an operator, but no workflow self-dispatches
 `watch-dom.yml`; remaining drift waits for the next bounded scheduled pass.
 
@@ -168,7 +169,11 @@ do not resolve the page, runtime can call `resolveIndependentSemanticDocument`
 to obtain a bounded complete projection for that document. It neither contacts
 GitHub nor saves new selectors. The cloud audit runs the verified script's
 semantic discovery independently in an isolated execution world, adds the
-recorded source/profile evidence, and may propose a persistent contract update.
+native article/profile evidence, and may propose a persistent contract update.
+An exact approved registered projection remains valid without extra metadata
+gates. Only a changed projection enters independent discovery, which compares
+the selected visible title with the article's own metadata and proves its loaded
+comment structure without an aggregator comment total.
 
 The oracle explores bounded complete tuples `Projection(title, product?, body, comments)`. It rejects disconnected roles, multiple equally valid tuples, escaped comment items, body noise, unstable empty mounts, candidate-budget overflow, or ambiguous route wildcards.
 
@@ -176,8 +181,8 @@ A candidate can be promoted only when:
 
 1. The registered contract does not resolve an approved projection, the audit records a failed or previously unregistered route, and the independent proposal resolves exactly one candidate projection. A blank page or zero visible publisher content is not a prerequisite for discovery.
 2. `proofProfiles` equals `applicableProfiles` exactly.
-3. Each applicable desktop/mobile profile has at least three fresh-at-acquisition, distinct Algumon relay article proofs with the same semantic shape.
-4. New routes have at least three exact redirect-chain proofs and one delimiter-bounded wildcard contract.
+3. Each applicable desktop/mobile profile has at least three distinct registered article proofs with the same semantic shape.
+4. Automatic updates retain the registered route boundary; new unrelated routes are not inferred from an error page or a guessed address.
 5. Title identity, role containment/order, purchase cardinality, and exhaustive comment classification pass fixed thresholds.
 6. Historical June/July fixtures, all previously passing siblings, direct-negative samples, network fidelity, tamper, and zero-leak tests remain valid.
 7. The isolated draft and proven release bytes recompute exactly.
