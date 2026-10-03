@@ -949,6 +949,71 @@
         "canonicalTextSha256": "61cdc4c54ab37229586862a06ec8f9c8f942e09a6d3e0740ceda183757e4d51d",
         "sha256": "5346b486b510ac6cf8f158167d1b1d2fd269d2976a499a30799d3e02fd40e913"
       }
+    },
+    {
+      "bundleSha256": "c3f4ff2bd6f0a62cc77bdea5bbe0b968f277248fd87877b999f908c126f2bddf",
+      "manifest": {
+        "bytes": 6280,
+        "sha256": "f22c57570b5ba71960e0c81b3a6b6603b401afb1e7ee02bfefa83c1f46bd1a3b"
+      },
+      "releaseVersion": "0.6.98",
+      "userscript": {
+        "bytes": 427409,
+        "canonicalTextSha256": "966cdcb27ab3b72d40a3851f1d8173aa20beafca3899f1f5da7d8ffddde031f3",
+        "sha256": "6ef1a4265c0e9f432858f02a565b28d037ce56e39b6d13295af30067451071f0"
+      }
+    },
+    {
+      "bundleSha256": "b3b2c9de03836eb126ad8a2bd83762abd33813d328d8b6a820d0d78642da8217",
+      "manifest": {
+        "bytes": 6280,
+        "sha256": "b55ddfb03efcea74e204ac3c5b20d05359434c87bcc41cc62b1289ce0b042eea"
+      },
+      "releaseVersion": "0.6.99",
+      "userscript": {
+        "bytes": 428082,
+        "canonicalTextSha256": "e6e05f2faee1bc0abb535d052b081070fa0d34518ca39305af085095c96adcc0",
+        "sha256": "bbb9d43f3218d4a56d01ba0ce1ce2e7acb331cfa02d85e40135859f49f2a2e11"
+      }
+    },
+    {
+      "bundleSha256": "198c4a46427f8440dd51c54de06a0ecf39df7b31bd177c03b4098e779818c1f4",
+      "manifest": {
+        "bytes": 6283,
+        "sha256": "2813fd1835bc6884e2f3877af7656b5a1ff6fe9109377e006932413d3b9f6c3b"
+      },
+      "releaseVersion": "0.6.100",
+      "userscript": {
+        "bytes": 428555,
+        "canonicalTextSha256": "f88e05d28eb801704e34300e2d7b9bace43209a58d06e268f8c7093ddec3848a",
+        "sha256": "dbb3aef071092e0ae4da6327d7165d3e402f7c4614690556b3daef2d8d2d3294"
+      }
+    },
+    {
+      "bundleSha256": "a608fcbae61de7e9d9f0f9140434f862488f1d8c97e48e40fda301edb3e3841c",
+      "manifest": {
+        "bytes": 6283,
+        "sha256": "34a1f49e08c967ab810dedbe1633629e56f9fe834bddd002cdf474ff8b04881b"
+      },
+      "releaseVersion": "0.6.101",
+      "userscript": {
+        "bytes": 428609,
+        "canonicalTextSha256": "a380755bbba22d6e4f99cc34e38d21cf015a0404c3da169a642ece120237e13a",
+        "sha256": "bc79995fe420c192b3d45c1b358d2a643118d061f5e53d7707fa4cf215d6014b"
+      }
+    },
+    {
+      "bundleSha256": "eea34d5b964668667927cf966ac4a73a83a419cc5941a733939250293f890775",
+      "manifest": {
+        "bytes": 6283,
+        "sha256": "bd75520346f17a445c8a0dc16ef460fea80197c963f365c306de6f4df88a7e11"
+      },
+      "releaseVersion": "0.6.102",
+      "userscript": {
+        "bytes": 429834,
+        "canonicalTextSha256": "ff19c928bea1296219e7021a50fd6d0d32f58d7ec74fef1279be0537f0f01a6f",
+        "sha256": "b80109c4e777ff9e973ed5986425cd72a52f9b65ba4feda56b4524a5b2345bed"
+      }
     }
   ],
   "schemaVersion": 1

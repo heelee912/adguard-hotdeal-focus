@@ -43,11 +43,14 @@ body { margin:8px; font:16px/1.5 sans-serif; }
 .control_box .time { position:absolute; top:0; right:0; font-size:12px; white-space:nowrap; }
 .comment_element.child td.user { padding-left:20px; }
 .comment_reply textarea { width:100%; box-sizing:border-box; }
+.profile_image_m, .profile_image_m_inner { display:inline-block; width:36px; height:36px; }
 </style></head><body><article id="board_read">
 <h1 class="subject_inner_text">루리웹 정상 핫딜 댓글</h1>
 <div class="view_content"><p>구매에 필요한 원본 상품 설명입니다.</p><p>배송과 결제 조건도 그대로 유지합니다.</p></div>
 <div class="source_url"><a href="https://shop.example/item/123">원래 구매 링크</a></div>
-<div id="cmt" class="comment_wrapper">${populatedToolbar(false)}<div class="comment_view normal"><table class="comment_table"><tbody>
+<div id="cmt" class="comment_wrapper">${populatedToolbar(false)}
+<div class="comment_view best"><table class="comment_table"><tbody>${row('best-duplicate-comment')}</tbody></table></div>
+<div class="comment_view normal"><table class="comment_table"><tbody>
 ${row('original-comment')}${row('original-reply', true)}
 ${Array.from({ length: 41 }, (_unused, index) => row(`additional-comment-${index}`)).join('')}
 <tr class="comment_element normal child"><td class="user">광고</td><td class="comment" colspan="2"><div class="nbp_container"><a href="https://ads.example/">광고</a></div></td></tr>
@@ -55,7 +58,7 @@ ${Array.from({ length: 41 }, (_unused, index) => row(`additional-comment-${index
 </article><script>
 window.originalRows = Array.from(document.querySelectorAll('#original-comment,#original-reply'));
 window.originalTexts = window.originalRows.map(row => row.querySelector('.text'));
-window.originalAllRows = Array.from(document.querySelectorAll('tr.comment_element:not(:has(.nbp_container))'));
+window.originalAllRows = Array.from(document.querySelectorAll('.comment_view.normal tr.comment_element:not(:has(.nbp_container))'));
 window.originalToolbars = Array.from(document.querySelectorAll('.comment_btn_wrapper'));
 window.app = { best_toggle() { window.originalBestClicks = (window.originalBestClicks || 0) + 1; } };
 document.querySelectorAll('.btn_reply').forEach(button => button.addEventListener('click', () => {
@@ -138,6 +141,72 @@ try {
           toolbar.getClientRects().length > 0 && getComputedStyle(toolbar).visibility === 'visible'),
         labels: Array.from(document.querySelectorAll('.btn_comment_video_text'), label => label.textContent),
       })), { rowsPreserved: true, toolbarsPreserved: true, labels: ['ON', 'ON'] });
+      for (const commentId of ['best-duplicate-comment', 'original-comment']) {
+        await page.evaluate(async commentId => {
+          const outer = document.createElement('span');
+          outer.className = 'profile_image_m';
+          const inner = document.createElement('span');
+          inner.className = 'profile_image_m_inner';
+          inner.style.backgroundImage = 'url("data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")';
+          const parent = document.querySelector(`#${commentId} .user_inner_wrapper`);
+          if (commentId === 'original-comment') {
+            // Same observer batch: the outer addition already sees inner,
+            // then the connected outer's child-addition record follows.
+            parent.append(outer);
+            outer.append(inner);
+          } else {
+            outer.append(inner);
+            parent.append(outer);
+          }
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }, commentId);
+        assert.equal(await page.locator('html').getAttribute('data-hotdeal-focus-state'), 'ready', commentId);
+        assert.equal(await page.locator('[data-hotdeal-focus-role="comment-item"]').count(), 43, commentId);
+        assert.equal(await page.locator('.comment_view.best').isVisible(), false);
+        assert.equal(await page.locator('#original-comment .text').innerText(), commentText);
+        assert.equal(await page.locator('#original-comment .btn_reply').getAttribute('data-hotdeal-focus-role'), 'comment-control');
+        assert.equal(await page.locator('.view_content').isVisible(), true);
+        assert.equal(await page.locator('.popular-posts').isVisible(), false);
+      }
+      assert.equal(await page.locator('#best-duplicate-comment .profile_image_m').getAttribute('data-hotdeal-focus-keep'), null);
+      assert.equal(await page.locator('#original-comment .profile_image_m').getAttribute('data-hotdeal-focus-deep'), 'comment-item');
+      assert.equal(await page.locator('#original-comment .profile_image_m').getAttribute('data-hotdeal-focus-role'), null);
+      assert.equal(await page.locator('#original-comment .profile_image_m_inner').isVisible(), true);
+      for (const action of ['text', 'text-update', 'replace', 'remove']) {
+        await page.evaluate(async action => {
+          const profile = document.querySelector('#original-comment .profile_image_m');
+          if (action === 'text' || action === 'text-update') {
+            profile.firstElementChild.textContent = action === 'text' ? '프로필' : '사진';
+          } else if (action === 'replace') {
+            const replacement = document.createElement('span');
+            replacement.className = 'profile_image_m';
+            const inner = document.createElement('span');
+            inner.className = 'profile_image_m_inner';
+            inner.style.backgroundImage = profile.firstElementChild.style.backgroundImage;
+            replacement.append(inner);
+            profile.replaceWith(replacement);
+          } else {
+            profile.remove();
+          }
+          await new Promise(resolve => setTimeout(resolve, 0));
+        }, action);
+        assert.equal(await page.locator('html').getAttribute('data-hotdeal-focus-state'), 'ready', action);
+        assert.equal(await page.locator('[data-hotdeal-focus-role="comment-item"]').count(), 43, action);
+        assert.equal(await page.locator('#original-comment .profile_image_m').count(), action === 'remove' ? 0 : 1);
+        if (action !== 'remove') {
+          assert.equal(await page.locator('#original-comment .profile_image_m_inner').isVisible(), true);
+          assert.equal(await page.locator('#original-comment .profile_image_m').getAttribute('data-hotdeal-focus-role'), null);
+        }
+        if (action === 'text' || action === 'text-update') {
+          assert.equal(await page.locator('#original-comment .profile_image_m_inner').innerText(),
+            action === 'text' ? '프로필' : '사진');
+        }
+        assert.equal(await page.locator('#original-comment .text').innerText(), commentText);
+        assert.equal(await page.locator('#original-comment .btn_reply').getAttribute('data-hotdeal-focus-role'), 'comment-control');
+        assert.equal(await page.locator('.view_content').isVisible(), true);
+        assert.equal(await page.locator('.comment_view.best').isVisible(), false);
+        assert.equal(await page.locator('.popular-posts').isVisible(), false);
+      }
       const observed = await page.evaluate(() => ({
         rows: window.originalRows.map((row, index) => {
           const text = row.querySelector('.text');
@@ -181,6 +250,12 @@ try {
       await page.locator('#original-comment .btn_reply').click();
       await page.waitForFunction(() => getComputedStyle(document.querySelector('#original-comment .comment_reply')).display === 'none');
       assert.equal(await page.locator('html').getAttribute('data-hotdeal-focus-state'), 'ready');
+      await page.evaluate(async () => {
+        document.querySelector('#original-comment .text').remove();
+        await new Promise(resolve => setTimeout(resolve, 0));
+      });
+      assert.equal(await page.evaluate(() => window.__HOTDEAL_FOCUS_DIAGNOSTICS__?.targetReason),
+        'static-role-projection-unclassified-comment-element-removal');
     } finally { await context.close(); }
   }
   for (const width of [1280, 390]) {
@@ -189,8 +264,11 @@ try {
       const page = await context.newPage();
       await page.route('**/*', route => route.fulfill({ status: 200,
         contentType: 'text/html; charset=utf-8', body: emptyCommentHtml }));
+      const observedSource = source.replace('runtime.enterTerminal(`role-projection-${reason}`);',
+        'browserRoot.__HDF_TEST_LAST_PROJECTION_REJECTION__ = reason; runtime.enterTerminal(`role-projection-${reason}`);');
+      assert.notEqual(observedSource, source);
       await page.addInitScript(({ source, control }) => { (0, eval)(control); (0, eval)(source); },
-        { source, control: PREAUTHORIZED_ADGUARD_CONTROL_SOURCE });
+        { source: observedSource, control: PREAUTHORIZED_ADGUARD_CONTROL_SOURCE });
       await page.goto('https://m.ruliweb.com/news/board/1020/read/38542');
       await page.waitForFunction(() => document.documentElement.getAttribute('data-hotdeal-focus-state') === 'ready' &&
         !document.documentElement.hasAttribute('data-hotdeal-focus-lock'), null, { timeout: 5000 });
@@ -273,7 +351,15 @@ try {
       assert.ok(evidence.missingItems.every(result => !result.ok &&
         result.role === 'comments' && result.reason === 'evidence-outside-items'), JSON.stringify(evidence));
       await evidencePage.close();
+      await page.evaluate(async () => {
+        document.querySelector('.comment_view.normal').append(document.createTextNode('분류되지 않은 목록 텍스트'));
+        await new Promise(resolve => setTimeout(resolve, 0));
+      });
+      // The normal recovery path may retain the intact projection while
+      // leaving unknown list text hidden. Assert rejection, not teardown.
+      assert.equal(await page.evaluate(() => window.__HDF_TEST_LAST_PROJECTION_REJECTION__),
+        'unclassified-comment-text');
     } finally { await context.close(); }
   }
-  console.log('Ruliweb preserves 43 native comments and both toolbars through delayed ON updates; zero-to-first-comment refresh and unclassified-comment rejection pass on desktop/mobile.');
+  console.log('Ruliweb preserves 43 native comments through delayed toolbar/profile updates while duplicate BEST content stays hidden; zero-to-first-comment refresh and missing-comment rejection pass on desktop/mobile.');
 } finally { await browser.close(); }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.97
+// @version      0.6.102
 // @description  Content-preserving hot-deal reader with automatic noise filtering.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
@@ -41,7 +41,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.6.97";
+  const GENERATOR_VERSION = "0.6.102";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -386,7 +386,7 @@
             "requiredRoles": ["title", "product", "body", "comments"],
             "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".market-info-view-table"],"ignored":[".market-info-view-table th .tooltip",".market-info-view-table th .common-tooltip",".market-info-view-table th img[alt='info']",".market-info-view-table td img.brand-logo"]},"comments":{"mode":"classified-children"}},
             "hints": {
-              "title": ["h1.title", "h1.v2-view-head__title"],
+              "title": ["h1.title", "h1.v2-view-head__title", "h1.aio-view-head__title"],
               "product": [".market-info-view-table"],
               "body": [".view-content > .note-editor"],
               "comments": ["#ajax-reply-list"],
@@ -404,7 +404,7 @@
             "requiredRoles": ["title", "product", "body", "comments"],
             "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".market-info-view-table"],"ignored":[".market-info-view-table th .tooltip",".market-info-view-table th .common-tooltip",".market-info-view-table th img[alt='info']",".market-info-view-table td img.brand-logo"]},"comments":{"mode":"classified-children"}},
             "hints": {
-              "title": [".content.market-info-view-wrap .view-style01 .tit .ment > h1", "h1.v2-view-head__title"],
+              "title": [".content.market-info-view-wrap .view-style01 .tit .ment > h1", "h1.v2-view-head__title", "h1.aio-view-head__title"],
               "product": [".market-info-view-table"],
               "body": [".view-content > .note-editor"],
               "comments": ["#ajax-reply-list"],
@@ -4916,7 +4916,9 @@
     const insideExternalControlParent = Array.from(
       state.commentControlMutationRoots || [],
     ).some(function matchingExternalControlParent(parent) {
-      return parent === element || parent.contains(element);
+      // Observe replacement of the external control itself, not unrelated
+      // sibling subtrees (for example a duplicate BEST-comment list).
+      return parent === element;
     });
     return state.roles.comments === element ||
       state.roles.comments.contains(element) ||
@@ -5468,6 +5470,7 @@
       commentIgnoredSelectors: commentIgnoredSelectors.slice(),
       commentItemRoots: new Set(roles.commentItems),
       commentControlRoots: new Set(roles.commentControls),
+      dynamicCommentContentElements: new WeakSet(),
       commentControlScope: roles.commentControlScope || roles.comments,
       commentControlMutationRoots: new Set(
         roles.commentControls
@@ -7397,6 +7400,7 @@
         state.ownedElementSet.delete(element);
         state.expectedMarkerShapes.delete(element);
         state.ownedElements.delete(element);
+        state.dynamicCommentContentElements?.delete(element);
       }
     );
   }
@@ -8807,6 +8811,54 @@
         if (!consumeAuthorizedMarkerMutations(authorizedTargets)) return false;
         return synchronizeCommentControlVisibility(control, true);
       };
+    const reconcileCommentItemAddition = function reconcileCommentItemAddition(added, item, adoptedInBatch) {
+      if (!item || !added.isConnected || !item.contains(added)) return false;
+      const elements = [added, ...added.querySelectorAll("*")];
+      if (elements.length > MAX_SEMANTIC_DESCENDANTS) return false;
+      // A connected wrapper and its synchronously appended child produce
+      // separate records, although the first record sees the final subtree.
+      // Only content adopted for this same item in this batch is a duplicate;
+      // original owned content (including moved nodes) never gains authority.
+      if (elements.every(function alreadyAdoptedHere(element) {
+        return adoptedInBatch.get(element) === item &&
+          state.dynamicCommentContentElements.has(element) &&
+          state.ownedElements.has(element) &&
+          markerShapeMatches(element, state.expectedMarkerShapes.get(element));
+      })) return true;
+      if (elements.some(
+        function crossesCommentContract(element) {
+          return state.ownedElements.has(element) || elementMatchesAny(element,
+            state.commentItemSelectors.concat(
+              state.commentControlSelectors, state.commentIgnoredSelectors,
+            ));
+        },
+      )) return false;
+      const validContent = withPublisherVisibilityMeasurement(document, function inspectItemAddition() {
+        return !containsSemanticNoise(added, new WeakMap(), []) &&
+          !containsUnprovenShadowBoundary(added, []) &&
+          !containsPublisherPaintRisk(added, []);
+      }, function rejectUnsafeItemMeasurement() { return false; });
+      if (!validContent) return false;
+      stripOwnedAttributes(added);
+      const authorizedTargets = new Set(elements);
+      for (let ancestor = added.parentElement; ancestor; ancestor = ancestor.parentElement) {
+        authorizedTargets.add(ancestor);
+      }
+      // Preserve the original comment and its separately owned controls.
+      // An avatar is content inside that item, never an additional item root.
+      elements.forEach(function ownNewCommentContent(element) {
+        markOwned(element, state.ownedElements, state.nonce);
+        element.setAttribute(ATTR.deep, "comment-item");
+        element.classList.add(CLASS.deep);
+      });
+      rememberAuthorizedMarkerTree(added, state);
+      if (!consumeAuthorizedMarkerMutations(authorizedTargets)) return false;
+      elements.forEach(function rememberDynamicCommentContent(element) {
+        state.dynamicCommentContentElements.add(element);
+        adoptedInBatch.set(element, item);
+      });
+      return true;
+    };
     const observer = createNativeMutationObserver(browserRoot, function sealProjection(mutations) {
       try {
         const preservingFrozenContent = runtime.releasePhase === "frozen" &&
@@ -8829,6 +8881,7 @@
         const atomicRolesChanged = new Set();
         const dynamicCommentControlsChanged = new Set();
         const commentControlStatesChanged = new Set();
+        const adoptedCommentContentThisBatch = new WeakMap();
         for (const mutation of mutations) {
         if (failureReason) break;
         if (state.readerUi?.nodes.has(mutation.target)) continue;
@@ -8937,6 +8990,10 @@
         );
         const inTitle = insideOwnedTitleSurface(mutationParent);
         const inComments = insideCommentProjection(state, mutationParent);
+        const inDynamicCommentContent = Boolean(mutationParent &&
+          state.ownedElements.has(mutationParent) &&
+          state.dynamicCommentContentElements.has(mutationParent) &&
+          closestTrackedRoot(mutationParent, state.commentItemRoots));
         const inIgnoredProjection = Boolean(mutationParent) && (
           insideAnyRoot(mutationParent, trackedRoots(state.bodyIgnoredRoots)) ||
           insideAnyRoot(mutationParent, trackedRoots(state.productIgnoredRoots)) ||
@@ -9034,7 +9091,7 @@
             failureReason = "atomic-removal";
           } else if (inComments) {
             if (removed.nodeType === 3) {
-              if (normalizeText(removed.data)) {
+              if (normalizeText(removed.data) && !inDynamicCommentContent) {
                 failureReason = "comment-text-removal";
               }
             } else if (removed.nodeType === 8) {
@@ -9050,13 +9107,18 @@
               if (removalKind === "item") {
                 failureReason = "comment-removal";
               } else if (removalKind === null) {
-                const removedOwnedProjection = removed.nodeType === 1 && [
+                const removedOwnedElements = removed.nodeType === 1 ? [
                   removed,
                   ...removed.querySelectorAll("*"),
-                ].some(function removedOwnedElement(element) {
+                ].filter(function removedOwnedElement(element) {
                   return state.ownedElements.has(element);
-                });
-                if (removedOwnedProjection) {
+                }) : [];
+                // A late avatar may be refreshed or removed. Only content
+                // adopted after the original item was proven is replaceable;
+                // a wrapper containing any original comment content still fails.
+                if (removedOwnedElements.some(function removesOriginalCommentContent(element) {
+                  return !state.dynamicCommentContentElements.has(element);
+                })) {
                   failureReason = "unclassified-comment-element-removal";
                 } else {
                   forgetRemovedTree(removed, state);
@@ -9131,9 +9193,18 @@
             continue;
           }
           if (added.nodeType !== 1) {
-            if (added.nodeType === 3 && normalizeText(added.data)) {
+            // Text inside an already validated late-content element belongs
+            // to its original item. Unclassified list/shell text still fails.
+            if (added.nodeType === 3 && normalizeText(added.data) && !inDynamicCommentContent) {
               failureReason = "unclassified-comment-text";
             }
+            continue;
+          }
+          const containingCommentItem = closestTrackedRoot(mutationParent, state.commentItemRoots);
+          if (containingCommentItem && reconcileCommentItemAddition(
+            added, containingCommentItem, adoptedCommentContentThisBatch,
+          )) {
+            commentProjectionChanged = true;
             continue;
           }
           const classification = classifyNewCommentRoot(added);
@@ -9192,6 +9263,12 @@
             if (!synchronizeCommentControlVisibility(added)) {
               failureReason = "comment-control-visibility";
               break;
+            }
+            if (!state.roles.comments.contains(added) && added.parentElement &&
+                state.commentControlScope.contains(added.parentElement)) {
+              // Observe only replacement at this approved control's parent,
+              // not mutations in its unrelated sibling subtrees.
+              state.commentControlMutationRoots.add(added.parentElement);
             }
           }
           commentProjectionChanged = true;
