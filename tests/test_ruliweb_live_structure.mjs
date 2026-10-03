@@ -75,7 +75,18 @@ const emptyCommentHtml = `<!doctype html><html><head>
     <div class="box_line flex_item_1"><a class="btn_comment_go" href="#comment_input"><i class="icon-pencil"></i></a></div>
     <div class="box_line flex_item_1"><button class="btn_comment_refresh"><i class="icon-refresh"></i></button></div>
   </div><div class="comment_disable text_center">로그인이 필요합니다.</div>
-</div></div><aside class="popular-posts">인기글 추천글</aside></article></body></html>`;
+</div></div><aside class="popular-posts">인기글 추천글</aside></article><script>
+window.originalEmptyToolbar = document.querySelector('.comment_btn_wrapper');
+document.querySelector('.btn_comment_refresh').addEventListener('click', () => {
+  window.originalRefreshClicks = (window.originalRefreshClicks || 0) + 1;
+  if (!document.querySelector('.comment_view.normal')) {
+    document.getElementById('cmt').insertAdjacentHTML('beforeend', ${JSON.stringify(
+      `<div class="comment_view normal"><table class="comment_table"><tbody>${row('first-refreshed-comment')}</tbody></table></div>`,
+    )});
+    document.querySelector('.reply_count').textContent = '1';
+  }
+});
+</script></body></html>`;
 
 const browser = await chromium.launch({ headless: true });
 try {
@@ -152,7 +163,46 @@ try {
       assert.equal(await page.locator('.popular-posts').isVisible(), false);
       await page.locator('.best_toggle').click();
       assert.equal(await page.evaluate(() => window.originalBestClicks), 1);
-      const evidence = await page.evaluate(source => {
+      await page.locator('.btn_comment_refresh').click();
+      await page.waitForFunction(() =>
+        document.documentElement.getAttribute('data-hotdeal-focus-state') === 'ready' &&
+        !document.documentElement.hasAttribute('data-hotdeal-focus-lock') &&
+        document.querySelector('#first-refreshed-comment')?.getAttribute('data-hotdeal-focus-role') === 'comment-item',
+      null, { timeout: 5000 }).catch(async error => {
+        console.error('First comment refresh state:', await page.evaluate(source => {
+          const moduleRecord = { exports: {} };
+          new Function('module', source)(moduleRecord);
+          const api = moduleRecord.exports;
+          const layout = api.SITE_CONTRACTS.find(site => site.id === 'ruliweb').layouts
+            .find(layout => layout.id === 'hotdeal');
+          const resolution = api.resolveDocument(document, [layout], null);
+          return {
+            html: Object.fromEntries([...document.documentElement.attributes].filter(a => a.name.startsWith('data-hotdeal')).map(a => [a.name, a.value])),
+            comments: document.getElementById('cmt')?.outerHTML,
+            resolution: { ok: resolution.ok, role: resolution.role, reason: resolution.reason,
+              comments: resolution.roles?.comments?.className, itemCount: resolution.roles?.commentItems?.length },
+          };
+        }, source));
+        throw error;
+      });
+      assert.equal(await page.evaluate(() => window.originalRefreshClicks), 1);
+      assert.equal(await page.locator('#first-refreshed-comment .text').innerText(), commentText);
+      assert.equal(await page.locator('#first-refreshed-comment').isVisible(), true);
+      assert.equal(await page.locator('[data-hotdeal-focus-role="comment-item"]').count(), 1);
+      assert.equal(await page.locator('.comment_btn_wrapper').isVisible(), true);
+      assert.equal(await page.evaluate(() =>
+        document.querySelector('.comment_btn_wrapper') === window.originalEmptyToolbar), true);
+      assert.equal(await page.locator('.view_content').isVisible(), true);
+      assert.equal(await page.locator('.popular-posts').isVisible(), false);
+      await page.locator('.best_toggle').click();
+      assert.equal(await page.evaluate(() => window.originalBestClicks), 2);
+
+      // Exercise negative resolver evidence on an unprojected publisher page;
+      // its deliberate missing-comment mutations must not contaminate the
+      // live refresh/observer regression above.
+      const evidencePage = await browser.newPage({ viewport: { width, height: 844 } });
+      await evidencePage.setContent(emptyCommentHtml);
+      const evidence = await evidencePage.evaluate(source => {
         const moduleRecord = { exports: {} };
         new Function('module', source)(moduleRecord);
         const api = moduleRecord.exports;
@@ -184,7 +234,8 @@ try {
         { ok: false, role: 'comments', reason: 'evidence-outside-items' });
       assert.ok(evidence.missingItems.every(result => !result.ok &&
         result.role === 'comments' && result.reason === 'evidence-outside-items'), JSON.stringify(evidence));
+      await evidencePage.close();
     } finally { await context.close(); }
   }
-  console.log('Ruliweb native comment/reply layout and handlers preserved; observed six-box empty-comment controls work on desktop/mobile while unclassified actual comments remain rejected.');
+  console.log('Ruliweb native comment/reply layout and handlers preserved; six-box controls survive zero-to-first-comment refresh on desktop/mobile while unclassified actual comments remain rejected.');
 } finally { await browser.close(); }

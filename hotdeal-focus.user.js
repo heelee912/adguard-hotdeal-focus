@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.95
+// @version      0.6.96
 // @description  Content-preserving hot-deal reader with automatic noise filtering.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
@@ -41,7 +41,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.6.95";
+  const GENERATOR_VERSION = "0.6.96";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -367,7 +367,7 @@
               "body": [".view_content"],
               "comments": [".comment_view.normal", "#cmt.comment_wrapper"],
               "commentItems": [".comment_view.normal > table.comment_table > tbody > tr.comment_element:not(:has(> td.comment > .nbp_container))"],
-              "commentControls": [".comment_view.normal .comment_more", ".comment_view.normal .pagination", ".comment_view.normal .btn_reply", "#cmt.comment_wrapper:not(:has(.comment_view.normal)) > .comment_btn_wrapper:has(> .box_line.flex_item_1 > button.best_toggle):has(> .box_line.flex_item_1 > button.btn_comment_refresh)"],
+              "commentControls": [".comment_view.normal .comment_more", ".comment_view.normal .pagination", ".comment_view.normal .btn_reply", "#cmt.comment_wrapper > .comment_btn_wrapper:has(> .box_line.flex_item_1 > button.best_toggle):has(> .box_line.flex_item_1 > button.btn_comment_refresh)"],
               "commentIgnored": ["#cmt.comment_wrapper > input", "#cmt.comment_wrapper > .comment_count_wrapper", "#cmt.comment_wrapper > .comment_disable", "#cmt.comment_wrapper > br", ".comment_view.normal > table.comment_table > tbody > tr.comment_element:has(> td.comment > .nbp_container)"]
             }
           }
@@ -8473,6 +8473,28 @@
       }
       return matchesControl ? "control" : "configured-ignored";
     };
+    const commentAdditionRoots = function commentAdditionRoots(node) {
+      if (node.nodeType !== 1 || classifyNewCommentRoot(node)) return [node];
+      // The first refresh may add the native list/table together with its
+      // first reply. Admit only exact policy roots inside that wrapper; their
+      // existing projection path grants ancestors shell, never deep, authority.
+      const items = uniqueElements(queryAllSafe(node, state.commentItemSelectors));
+      if (!items.length) return [node];
+      const roots = uniqueElements(items.concat(
+        queryAllSafe(node, state.commentControlSelectors),
+        queryAllSafe(node, state.commentIgnoredSelectors),
+      ));
+      if (
+        roots.length > MAX_COMMENT_EVIDENCE ||
+        node.querySelectorAll("*").length > MAX_SEMANTIC_DESCENDANTS ||
+        roots.some(function notNewExactRoot(root) {
+          return !classifyNewCommentRoot(root) || state.ownedElements.has(root);
+        }) ||
+        hasUnclassifiedCommentContent(node, roots)
+      ) return [node];
+      stripOwnedAttributes(node);
+      return roots.sort(documentOrder);
+    };
     const explicitlyHiddenByPublisher = function explicitlyHiddenByPublisher(element) {
       const visibility = String(element.style?.getPropertyValue("visibility") || "")
         .trim().toLocaleLowerCase();
@@ -9048,7 +9070,10 @@
             forgetRemovedTree(removed, state);
           }
         }
-        for (const added of mutation.addedNodes) {
+        const addedProjectionNodes = inComments
+          ? Array.from(mutation.addedNodes).flatMap(commentAdditionRoots)
+          : mutation.addedNodes;
+        for (const added of addedProjectionNodes) {
           if (failureReason) break;
           if (state.readerUi?.nodes.has(added)) continue;
           if (added === styleElement) continue;
