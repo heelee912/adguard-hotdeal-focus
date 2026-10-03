@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.101
+// @version      0.6.102
 // @description  Content-preserving hot-deal reader with automatic noise filtering.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
@@ -41,7 +41,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.6.101";
+  const GENERATOR_VERSION = "0.6.102";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -8811,10 +8811,21 @@
         if (!consumeAuthorizedMarkerMutations(authorizedTargets)) return false;
         return synchronizeCommentControlVisibility(control, true);
       };
-    const reconcileCommentItemAddition = function reconcileCommentItemAddition(added, item) {
+    const reconcileCommentItemAddition = function reconcileCommentItemAddition(added, item, adoptedInBatch) {
       if (!item || !added.isConnected || !item.contains(added)) return false;
       const elements = [added, ...added.querySelectorAll("*")];
-      if (elements.length > MAX_SEMANTIC_DESCENDANTS || elements.some(
+      if (elements.length > MAX_SEMANTIC_DESCENDANTS) return false;
+      // A connected wrapper and its synchronously appended child produce
+      // separate records, although the first record sees the final subtree.
+      // Only content adopted for this same item in this batch is a duplicate;
+      // original owned content (including moved nodes) never gains authority.
+      if (elements.every(function alreadyAdoptedHere(element) {
+        return adoptedInBatch.get(element) === item &&
+          state.dynamicCommentContentElements.has(element) &&
+          state.ownedElements.has(element) &&
+          markerShapeMatches(element, state.expectedMarkerShapes.get(element));
+      })) return true;
+      if (elements.some(
         function crossesCommentContract(element) {
           return state.ownedElements.has(element) || elementMatchesAny(element,
             state.commentItemSelectors.concat(
@@ -8844,6 +8855,7 @@
       if (!consumeAuthorizedMarkerMutations(authorizedTargets)) return false;
       elements.forEach(function rememberDynamicCommentContent(element) {
         state.dynamicCommentContentElements.add(element);
+        adoptedInBatch.set(element, item);
       });
       return true;
     };
@@ -8869,6 +8881,7 @@
         const atomicRolesChanged = new Set();
         const dynamicCommentControlsChanged = new Set();
         const commentControlStatesChanged = new Set();
+        const adoptedCommentContentThisBatch = new WeakMap();
         for (const mutation of mutations) {
         if (failureReason) break;
         if (state.readerUi?.nodes.has(mutation.target)) continue;
@@ -9188,7 +9201,9 @@
             continue;
           }
           const containingCommentItem = closestTrackedRoot(mutationParent, state.commentItemRoots);
-          if (containingCommentItem && reconcileCommentItemAddition(added, containingCommentItem)) {
+          if (containingCommentItem && reconcileCommentItemAddition(
+            added, containingCommentItem, adoptedCommentContentThisBatch,
+          )) {
             commentProjectionChanged = true;
             continue;
           }
@@ -9248,6 +9263,12 @@
             if (!synchronizeCommentControlVisibility(added)) {
               failureReason = "comment-control-visibility";
               break;
+            }
+            if (!state.roles.comments.contains(added) && added.parentElement &&
+                state.commentControlScope.contains(added.parentElement)) {
+              // Observe only replacement at this approved control's parent,
+              // not mutations in its unrelated sibling subtrees.
+              state.commentControlMutationRoots.add(added.parentElement);
             }
           }
           commentProjectionChanged = true;

@@ -148,8 +148,16 @@ try {
           const inner = document.createElement('span');
           inner.className = 'profile_image_m_inner';
           inner.style.backgroundImage = 'url("data:image/gif;base64,R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")';
-          outer.append(inner);
-          document.querySelector(`#${commentId} .user_inner_wrapper`).append(outer);
+          const parent = document.querySelector(`#${commentId} .user_inner_wrapper`);
+          if (commentId === 'original-comment') {
+            // Same observer batch: the outer addition already sees inner,
+            // then the connected outer's child-addition record follows.
+            parent.append(outer);
+            outer.append(inner);
+          } else {
+            outer.append(inner);
+            parent.append(outer);
+          }
           await new Promise(resolve => setTimeout(resolve, 0));
         }, commentId);
         assert.equal(await page.locator('html').getAttribute('data-hotdeal-focus-state'), 'ready', commentId);

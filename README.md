@@ -26,16 +26,14 @@ GitHub 가입이나 코드 수정은 필요 없습니다. 아래 주소를 복�
 https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ```
 
-1. AdGuard 앱에서 다음 메뉴를 엽니다.
-   - **Windows:** 보호 → 확장 프로그램 → 확장 프로그램 추가 → 파일 또는 URL에서 가져오기
-   - **Android:** 하단 맨 오른쪽 설정 → 필터링 → 확장 프로그램 → 확장 프로그램 추가 → 파일 또는 URL에서 가져오기
-2. 위 주소를 복사해 붙여넣고 설치를 확인합니다.
-3. 확장 프로그램 전체 스위치와 **AdGuard Hotdeal Focus Reader Gate** 항목을 모두 켭니다.
-4. 이미 열어 둔 핫딜 글은 새로고침합니다.
+- **PC(Windows):** AdGuard 앱에서 **보호 → 확장 프로그램 → 확장 프로그램 추가 → 파일 또는 URL에서 가져오기**를 열고 위 주소를 붙여넣어 설치한 뒤, 확장 프로그램 전체 스위치와 **AdGuard Hotdeal Focus Reader Gate** 항목을 모두 켭니다.
+- **휴대폰(Android):** AdGuard 앱 하단 맨 오른쪽의 **설정 → 필터링 → 확장 → 확장 프로그램 추가 → 파일 또는 URL에서 가져오기 → 다음 → URL 붙여넣기 → 추가 → 정보 확인 → 추가** 순서로 설치한 뒤, 확장 전체 스위치와 **AdGuard Hotdeal Focus Reader Gate** 항목을 모두 켭니다.
+
+이미 열어 둔 핫딜 글은 새로고침합니다.
 
 이전 핫딜 전용 필터·사용자 규칙은 제거하고 이 유저스크립트만 사용해 주세요.
 
-메뉴 명칭은 [AdGuard 공식 유저스크립트 안내](https://adguard.com/kb/ko/general/extensions/#userscripts)와 [Android 확장 프로그램 안내](https://adguard.com/kb/ko/adguard-for-android/features/settings/#extensions)에서 확인할 수 있습니다.
+메뉴 명칭은 [AdGuard 공식 유저스크립트 안내](https://adguard.com/kb/ko/general/extensions/#userscripts)와 [Android 확장 안내](https://adguard.com/kb/ko/adguard-for-android/features/settings/#extensions)에서 확인할 수 있습니다.
 
 ### 보호 확인
 
@@ -48,15 +46,15 @@ https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 
 ### 업데이트와 제거
 
-새 버전은 같은 설치 주소로 배포됩니다. Windows에서는 AdGuard의 **업데이트 확인**으로 앱·필터·확장 프로그램 업데이트를 함께 확인할 수 있습니다. 바로 최신판을 다시 설치하려면 기존 항목을 제거한 뒤 같은 URL을 추가합니다.
+새 버전은 같은 설치 주소로 배포됩니다. Windows에서는 AdGuard의 **업데이트 확인**으로 앱·필터·확장 프로그램 업데이트를 함께 확인할 수 있습니다. Android에서 바로 최신판으로 바꾸려면 같은 URL을 다시 추가하고, 같은 이름이 이미 설치되어 있다는 안내가 나오면 **교체**를 선택합니다. 기존 Android 항목을 먼저 제거할 필요는 없습니다.
 
 제거할 때 Windows에서는 **확장 프로그램** 목록에서 해당 스크립트 행의 **⋮** 메뉴를 사용합니다. Android에서는 목록에서 해당 스크립트를 탭해 상세 화면을 연 뒤 제거합니다. 잠시 끄기만 하려면 스크립트 스위치를 끄고 페이지를 새로고침합니다.
 
 ### 문제 해결
 
-- 아무 변화가 없으면 독립 실행형 AdGuard 앱, 앱 보호, HTTPS 필터링, 확장 프로그램 전체 스위치와 스크립트 항목이 모두 켜져 있는지 확인하고 글을 다시 여십시오.
+- 아무 변화가 없으면 독립 실행형 AdGuard 앱, 앱 보호, HTTPS 필터링, 그리고 Windows의 **확장 프로그램** 또는 Android의 **확장** 화면에서 전체 스위치와 스크립트 항목이 모두 켜져 있는지 확인하고 글을 다시 여십시오.
 - 내용이 잘리거나 불필요한 요소가 남으면 이전 핫딜 필터가 제거됐는지 확인한 뒤 [문제 제보](https://github.com/heelee912/adguard-hotdeal-focus/issues)에 **글 주소·운영체제·브라우저**를 남겨 주세요.
-- Windows 실제 최신 Chrome과 최신 Chrome의 모바일 UA·터치·390px 조건으로 7개 지원 사이트를 확인했습니다. **Android 실기기 동작은 아직 검증하지 않았습니다.**
+- Windows 실제 최신 Chrome과 최신 Chrome의 모바일 UA·터치·390px 조건으로 7개 지원 사이트를 확인했습니다. **2026-10-03 실제 Android 기기의 Chrome에서 지원 7개 사이트의 대표 글을 열어 본문·댓글과 이동 버튼, 주변 요소 숨김을 확인했습니다.**
 
 개발·복구 명령은 [CLI.md](CLI.md), 자동 점검과 설계는 [ARCHITECTURE.md](ARCHITECTURE.md)에 정리되어 있습니다.
 
@@ -90,7 +88,7 @@ Open deal links normally. The **Return to Algumon · Body · Comments** controls
 
 The script rechecks elements that appear or move after loading and can accommodate some structural changes. New versions arrive from the same URL according to AdGuard's update settings. Major site changes can still need a fix; automatic handling of every future change is not guaranteed. If the article structure cannot be confirmed, original content is restored so the article and comments remain accessible.
 
-Checks use real Chrome on Windows and mobile-width layouts. **Android device behavior has not yet been verified.**
+Checks use real Chrome on Windows and mobile-width layouts. **On 2026-10-03, representative articles from all seven supported sites were opened in Chrome on a physical Android device, confirming the article body, comments, navigation controls, and hiding of surrounding elements.**
 
 If it does not apply, check that the script is enabled and that AdGuard protection and HTTPS filtering cover the browser. For missing content or remaining clutter, [report the article URL, device, and browser](https://github.com/heelee912/adguard-hotdeal-focus/issues).
 
@@ -126,7 +124,7 @@ https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 
 読み込み後に追加・移動された要素も再確認し、一部の構造変更には自動対応します。修正版は AdGuard の更新設定に従って同じ URL から取得します。大幅な変更には修正が必要になることがあり、今後のすべての変更への自動対応は保証しません。構造を確認できない場合は、本文とコメントを読めるよう元の内容を復元します。
 
-検証は Windows の実際の Chrome とモバイル幅で行っています。**Android 実機での動作は未検証です。**
+検証は Windows の実際の Chrome とモバイル幅で行っています。**2026-10-03、Android 実機の Chrome で対応 7 サイトの代表記事を開き、本文・コメントと移動ボタンが保持され、周辺要素が非表示になることを確認しました。**
 
 適用されない場合は、スクリプトが有効で、ブラウザーに AdGuard の保護と HTTPS フィルタリングが適用されているかご確認ください。内容の欠落や不要な表示は、[記事 URL・端末・ブラウザーを添えてご報告ください](https://github.com/heelee912/adguard-hotdeal-focus/issues)。
 
@@ -162,7 +160,7 @@ https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 
 脚本会重新检查加载后新增或移动的元素，并自动适应部分结构变化。新版本根据 AdGuard 的更新设置从同一地址获取。网站大幅改版仍可能需要修复，不保证自动处理所有未来变化。无法确认文章结构时，会恢复原始内容，让正文和评论保持可读。
 
-目前使用 Windows 上的真实 Chrome 和移动屏幕宽度检查。**尚未验证 Android 实机行为。**
+目前使用 Windows 上的真实 Chrome 和移动屏幕宽度检查。**2026-10-03，我们在 Android 实机的 Chrome 中打开了全部 7 个支持站点的代表文章，确认正文、评论和导航按钮得到保留，周边元素被隐藏。**
 
 未生效时，请检查脚本是否开启，以及 AdGuard 保护和 HTTPS 过滤是否作用于所用浏览器。发现内容缺失或多余元素时，请[提供文章地址、设备和浏览器](https://github.com/heelee912/adguard-hotdeal-focus/issues)。
 
