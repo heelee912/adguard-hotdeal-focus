@@ -164,10 +164,12 @@ try {
       assert.equal(await page.locator('#original-comment .profile_image_m').getAttribute('data-hotdeal-focus-deep'), 'comment-item');
       assert.equal(await page.locator('#original-comment .profile_image_m').getAttribute('data-hotdeal-focus-role'), null);
       assert.equal(await page.locator('#original-comment .profile_image_m_inner').isVisible(), true);
-      for (const action of ['replace', 'remove']) {
+      for (const action of ['text', 'text-update', 'replace', 'remove']) {
         await page.evaluate(async action => {
           const profile = document.querySelector('#original-comment .profile_image_m');
-          if (action === 'replace') {
+          if (action === 'text' || action === 'text-update') {
+            profile.firstElementChild.textContent = action === 'text' ? '프로필' : '사진';
+          } else if (action === 'replace') {
             const replacement = document.createElement('span');
             replacement.className = 'profile_image_m';
             const inner = document.createElement('span');
@@ -182,10 +184,14 @@ try {
         }, action);
         assert.equal(await page.locator('html').getAttribute('data-hotdeal-focus-state'), 'ready', action);
         assert.equal(await page.locator('[data-hotdeal-focus-role="comment-item"]').count(), 43, action);
-        assert.equal(await page.locator('#original-comment .profile_image_m').count(), action === 'replace' ? 1 : 0);
-        if (action === 'replace') {
+        assert.equal(await page.locator('#original-comment .profile_image_m').count(), action === 'remove' ? 0 : 1);
+        if (action !== 'remove') {
           assert.equal(await page.locator('#original-comment .profile_image_m_inner').isVisible(), true);
           assert.equal(await page.locator('#original-comment .profile_image_m').getAttribute('data-hotdeal-focus-role'), null);
+        }
+        if (action === 'text' || action === 'text-update') {
+          assert.equal(await page.locator('#original-comment .profile_image_m_inner').innerText(),
+            action === 'text' ? '프로필' : '사진');
         }
         assert.equal(await page.locator('#original-comment .text').innerText(), commentText);
         assert.equal(await page.locator('#original-comment .btn_reply').getAttribute('data-hotdeal-focus-role'), 'comment-control');
@@ -250,8 +256,11 @@ try {
       const page = await context.newPage();
       await page.route('**/*', route => route.fulfill({ status: 200,
         contentType: 'text/html; charset=utf-8', body: emptyCommentHtml }));
+      const observedSource = source.replace('runtime.enterTerminal(`role-projection-${reason}`);',
+        'browserRoot.__HDF_TEST_LAST_PROJECTION_REJECTION__ = reason; runtime.enterTerminal(`role-projection-${reason}`);');
+      assert.notEqual(observedSource, source);
       await page.addInitScript(({ source, control }) => { (0, eval)(control); (0, eval)(source); },
-        { source, control: PREAUTHORIZED_ADGUARD_CONTROL_SOURCE });
+        { source: observedSource, control: PREAUTHORIZED_ADGUARD_CONTROL_SOURCE });
       await page.goto('https://m.ruliweb.com/news/board/1020/read/38542');
       await page.waitForFunction(() => document.documentElement.getAttribute('data-hotdeal-focus-state') === 'ready' &&
         !document.documentElement.hasAttribute('data-hotdeal-focus-lock'), null, { timeout: 5000 });
@@ -334,6 +343,14 @@ try {
       assert.ok(evidence.missingItems.every(result => !result.ok &&
         result.role === 'comments' && result.reason === 'evidence-outside-items'), JSON.stringify(evidence));
       await evidencePage.close();
+      await page.evaluate(async () => {
+        document.querySelector('.comment_view.normal').append(document.createTextNode('분류되지 않은 목록 텍스트'));
+        await new Promise(resolve => setTimeout(resolve, 0));
+      });
+      // The normal recovery path may retain the intact projection while
+      // leaving unknown list text hidden. Assert rejection, not teardown.
+      assert.equal(await page.evaluate(() => window.__HDF_TEST_LAST_PROJECTION_REJECTION__),
+        'unclassified-comment-text');
     } finally { await context.close(); }
   }
   console.log('Ruliweb preserves 43 native comments through delayed toolbar/profile updates while duplicate BEST content stays hidden; zero-to-first-comment refresh and missing-comment rejection pass on desktop/mobile.');

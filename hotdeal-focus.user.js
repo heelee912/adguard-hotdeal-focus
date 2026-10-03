@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.99
+// @version      0.6.100
 // @description  Content-preserving hot-deal reader with automatic noise filtering.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
@@ -41,7 +41,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.6.99";
+  const GENERATOR_VERSION = "0.6.100";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -8977,6 +8977,10 @@
         );
         const inTitle = insideOwnedTitleSurface(mutationParent);
         const inComments = insideCommentProjection(state, mutationParent);
+        const inDynamicCommentContent = Boolean(mutationParent &&
+          state.ownedElements.has(mutationParent) &&
+          state.dynamicCommentContentElements.has(mutationParent) &&
+          closestTrackedRoot(mutationParent, state.commentItemRoots));
         const inIgnoredProjection = Boolean(mutationParent) && (
           insideAnyRoot(mutationParent, trackedRoots(state.bodyIgnoredRoots)) ||
           insideAnyRoot(mutationParent, trackedRoots(state.productIgnoredRoots)) ||
@@ -9074,7 +9078,7 @@
             failureReason = "atomic-removal";
           } else if (inComments) {
             if (removed.nodeType === 3) {
-              if (normalizeText(removed.data)) {
+              if (normalizeText(removed.data) && !inDynamicCommentContent) {
                 failureReason = "comment-text-removal";
               }
             } else if (removed.nodeType === 8) {
@@ -9176,7 +9180,9 @@
             continue;
           }
           if (added.nodeType !== 1) {
-            if (added.nodeType === 3 && normalizeText(added.data)) {
+            // Text inside an already validated late-content element belongs
+            // to its original item. Unclassified list/shell text still fails.
+            if (added.nodeType === 3 && normalizeText(added.data) && !inDynamicCommentContent) {
               failureReason = "unclassified-comment-text";
             }
             continue;
