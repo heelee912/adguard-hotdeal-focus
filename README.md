@@ -143,8 +143,8 @@ https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ```
 
 1. 在应用中打开导入菜单：
-   - **Windows：**扩展 → 添加扩展 → 从文件或 URL 导入
-   - **Android：**设置 → 过滤 → 扩展 → 添加扩展 → 从文件或 URL 导入
+   - **Windows：** 扩展 → 添加扩展 → 从文件或 URL 导入
+   - **Android：** 设置 → 过滤 → 扩展 → 添加扩展 → 从文件或 URL 导入
 2. 粘贴地址，安装并启用脚本。
 3. 刷新已经打开的优惠文章。
 
