@@ -231,7 +231,11 @@ class PagesRetryContractTests(unittest.TestCase):
             r"timeout\s+--kill-after=(\d+)([smh])\s+(\d+)([smh])",
             audit_section,
         )
-        self.assertEqual(4, len(timeout_calls))
+        self.assertEqual(5, len(timeout_calls))
+        self.assertIn(
+            "timeout --kill-after=5s 30s node tests/test_algumon_traffic_budget.mjs --browser-fixture",
+            audit_section,
+        )
 
         def seconds(value: str, unit: str) -> int:
             return int(value) * {"s": 1, "m": 60, "h": 3600}[unit]
@@ -1212,6 +1216,69 @@ const article = classifyDestinationResponse({
 });
 if (article.kind !== "article-response" || article.candidateEligible !== true) {
   throw new Error("a final 200 HTML article was rejected");
+}
+const mobileArticleUrl = "https://m.ruliweb.com/news/board/1020/read/105748";
+const mobileResponse = (url, status = 200) => ({ sequence: 0, url, status, contentType: "text/html" });
+const classifyMobile = (response, finalUrl, useFallback = false) => classifyDestinationResponse({
+  finalUrl,
+  ...(useFallback ? { mainDocumentResponse: response } : { mainDocumentResponseChain: [response] }),
+  title: "Normal mobile article",
+  bodyText: "A normal article with product information and comments.",
+  challengeSelectors: [],
+});
+for (const [responseUrl, finalUrl] of [
+  [`${mobileArticleUrl}?_rd=1`, mobileArticleUrl],
+  [`${mobileArticleUrl}?view=compact&_rd=1&sort=old`, `${mobileArticleUrl}?view=compact&sort=old`],
+  [`${mobileArticleUrl}?_rd=1`, `${mobileArticleUrl}#comments`],
+]) {
+  const response = mobileResponse(responseUrl);
+  if (selectFinalMainDocumentResponse([response], finalUrl) !== response) {
+    throw new Error("observed mobile redirect marker cleanup lost its document response");
+  }
+  for (const fallback of [false, true]) {
+    const classified = classifyMobile(response, finalUrl, fallback);
+    if (classified.kind !== "article-response" || !classified.finalDocumentUrlMatches) {
+      throw new Error("observed mobile redirect marker cleanup was rejected");
+    }
+  }
+}
+for (const [responseUrl, finalUrl] of [
+  ...["_rd=0", "_rd=01", "_rd=", "_rd=2", "_rd=%%31", "%%5Frd=1",
+    "_rd=1&_rd=1", "_rd=1&_rd=2", "_rd=2&_rd=1", "_rd=1&%%5Frd=1"]
+    .map(query => [`${mobileArticleUrl}?${query}`, mobileArticleUrl]),
+  [`${mobileArticleUrl}?_rd=1`, `${mobileArticleUrl}?_rd=2`],
+  [`${mobileArticleUrl}?_rd=1&view=compact`, mobileArticleUrl],
+  [`${mobileArticleUrl}?_rd=1`, `${mobileArticleUrl}?view=compact`],
+  [`${mobileArticleUrl}?_rd=1&view=compact`, `${mobileArticleUrl}?view=full`],
+  [`${mobileArticleUrl}?_rd=1&view=compact&view=compact`, `${mobileArticleUrl}?view=compact`],
+  [`${mobileArticleUrl}?_rd=1&a=1&b=2`, `${mobileArticleUrl}?b=2&a=1`],
+  [`${mobileArticleUrl}?_rd=1&q=one%%20two`, `${mobileArticleUrl}?q=one+two`],
+  [`${mobileArticleUrl}?_rd=1`, mobileArticleUrl.replace("105748", "105749")],
+  ...[mobileArticleUrl.replace("/1020/", "/1021/"), `${mobileArticleUrl}/extra`,
+    mobileArticleUrl.replace("m.ruliweb.com", "bbs.ruliweb.com"),
+    mobileArticleUrl.replace("m.ruliweb.com", "m.ruliweb.com.attacker.test"),
+    mobileArticleUrl.replace("https:", "http:"),
+    mobileArticleUrl.replace("m.ruliweb.com", "m.ruliweb.com:8443"),
+    mobileArticleUrl.replace("m.ruliweb.com", "user:secret@m.ruliweb.com")]
+    .map(url => [`${url}?_rd=1`, url]),
+  [`${mobileArticleUrl}?_rd=1`, mobileArticleUrl.replace("m.ruliweb.com", "bbs.ruliweb.com")],
+  [mobileArticleUrl, `${mobileArticleUrl}?_rd=1`],
+]) {
+  const response = mobileResponse(responseUrl);
+  if (selectFinalMainDocumentResponse([response], finalUrl) !== null) {
+    throw new Error("non-observed document URL normalization was accepted");
+  }
+  for (const fallback of [false, true]) {
+    if (classifyMobile(response, finalUrl, fallback).candidateEligible !== false) {
+      throw new Error("a mismatched document URL was accepted through the classifier");
+    }
+  }
+}
+const cleanedMobile403 = mobileResponse(`${mobileArticleUrl}?_rd=1`, 403);
+const wrongMobile200 = mobileResponse(mobileArticleUrl.replace("105748", "105749"));
+if (selectFinalMainDocumentResponse([cleanedMobile403, wrongMobile200], mobileArticleUrl) !== cleanedMobile403 ||
+  classifyMobile(cleanedMobile403, mobileArticleUrl).candidateEligible !== false) {
+  throw new Error("mobile query cleanup accepted a WAF response or a different article response");
 }
 const waf = classifyDestinationResponse({
   finalUrl: articleUrl,

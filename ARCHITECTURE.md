@@ -108,8 +108,11 @@ before bounded discovery is attempted. Entry eligibility does not itself reveal
 the page: one complete projection and the rendering checks must still pass.
 
 Signed relay provenance is instead a **cloud collection and promotion** boundary
-in `scripts/audit_pages.mjs`. Collection reads server-rendered documents with
-page JavaScript blocked. A missing interactive source picker is recorded as
+in `scripts/audit_pages.mjs`. Collection permits the publisher's ordinary
+JavaScript, styles, images, and bounded same-origin document transitions. It
+waits at most 12 seconds after initial navigation for the exact requested feed
+and deal cards; it does not click verification controls or initiate reloads.
+A missing interactive source picker is recorded as
 `source-picker-unavailable`, not mistaken for a broken seven-source inventory.
 When a picker is present, its inventory is checked; either way, all seven
 configured sources require their own validated filtered feeds. Unknown or
@@ -146,9 +149,14 @@ exact Algumon inventory
 → live HTTPS byte attestation
 ```
 
-The only live Algumon source pass has an exact request-start budget of 29: one
-global inventory, one source document for each of the seven identities, and
-three signed relays per identity. Candidate proof and promotion retest consume
+The only live Algumon source pass has an explicit acquisition-start budget of
+29: one global inventory, one source visit for each of the seven identities,
+and three signed relays per identity. This is not a total HTTP request count.
+Browser request events, automatic document transitions, subresources, and
+blocked attempts are counted separately without double-counting routed requests.
+Each source context retains the existing 4,096-request and 128-host network
+limits, public DNS/IP validation, and a maximum of 32 main-document starts.
+Candidate proof and promotion retest consume
 the immutable `base-audit-report.json` snapshot and therefore start zero
 additional Algumon requests. Freshness is checked against the recorded,
 canonical relay acquisition time, not by refetching a signed relay later.

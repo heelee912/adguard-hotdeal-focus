@@ -10,7 +10,9 @@ import {
   captureAlgumonSourceFailure,
   countExistingApprovedLayoutMatches,
   createAlgumonRequestStartBudget,
+  createAlgumonSourceBrowserBudget,
   createLowTrafficAlgumonProbePlan,
+  finishAlgumonSourceBrowser,
   navigateAlgumonSourcePage,
   transferAlgumonRelaySession,
 } from "../scripts/audit_pages.mjs";
@@ -136,6 +138,53 @@ function testHardRequestStartBudget() {
     () => createAlgumonRequestStartBudget(DEFAULT_ALGUMON_REQUEST_START_BUDGET + 1),
     /must be an integer/,
   );
+}
+
+function testSourceBrowserKeepsNormalResourcesAndBoundsNavigation() {
+  const feed = "https://www.algumon.com/n/deal";
+  const budget = createAlgumonSourceBrowserBudget(feed);
+  assert.equal(budget.observe(feed, true).allowed, true);
+  for (let index = 0; index < 600; index += 1) {
+    assert.equal(budget.observe(`https://cdn.algumon.com/asset-${index}.js`, false).allowed, true,
+      "normal resources reuse the established network cap, not an arbitrary small source cap");
+  }
+  assert.equal(budget.observe("https://www.algumon.com/request/check?token=fixture", true).allowed, true);
+  assert.equal(budget.observe(feed, true).allowed, true);
+  assert.equal(budget.snapshot().requestStarts, 603);
+  assert.equal(budget.snapshot().subresourceStarts, 600);
+  assert.equal(budget.observe("https://unrelated.example/feed", true).allowed, false);
+  assert.deepEqual(budget.snapshot().violations, ["source-browser-navigation-origin-denied"]);
+  const looping = createAlgumonSourceBrowserBudget(feed);
+  for (let index = 0; index < looping.snapshot().maximumNavigationStarts; index += 1) {
+    assert.equal(looping.observe(feed, true).allowed, true);
+  }
+  assert.equal(looping.observe(feed, true).reason, "source-browser-navigation-budget-exceeded");
+  const wrongInitial = createAlgumonSourceBrowserBudget(feed);
+  assert.equal(wrongInitial.observe("https://www.algumon.com/request/check", true).allowed, false);
+  const deduplicated = createAlgumonSourceBrowserBudget(feed);
+  const request = { url: () => feed, isNavigationRequest: () => true,
+    frame: () => ({ parentFrame: () => null }) };
+  assert.equal(deduplicated.observeRequest(request).allowed, true);
+  assert.equal(deduplicated.observeRequest(request).allowed, true);
+  assert.equal(deduplicated.snapshot().requestStarts, 1, "request and route observe the same start once");
+}
+
+async function testSourceBrowserBudgetSurvivesFailedSeal() {
+  const budget = createAlgumonSourceBrowserBudget("https://www.algumon.com/n/deal");
+  budget.observe("https://www.algumon.com/n/deal", true);
+  budget.observe("https://www.algumon.com/check.js", false);
+  const transition = { actual: {} };
+  const result = await finishAlgumonSourceBrowser({
+    sealNetworkPolicyEvidence: async () => { throw new Error("closed context https://example.test/private-token"); },
+    sourceBrowserBudgetSnapshot: () => budget.snapshot(),
+  }, { status: "ok", failures: [], links: [{}] }, transition);
+  assert.equal(result.status, "source-or-infrastructure-failure");
+  assert.deepEqual(result.links, []);
+  assert.deepEqual(result.failures, ["source-browser-network-seal-failed"]);
+  assert.equal(transition.actual.sourceBrowserRequestStarts, 2);
+  assert.equal(transition.actual.sourceBrowserNavigationStarts, 1);
+  assert.equal(transition.actual.sourceBrowserSubresourceStarts, 1);
+  assert.equal(JSON.stringify(result).includes("private-token"), false);
 }
 
 function testCapturedSnapshotProducesNoSourceRequests() {
@@ -324,6 +373,7 @@ async function testNavigationErrorsPersistOnlyCategoryAndDigest() {
       errorSha256: createHash("sha256").update(message).digest("hex"),
     };
     const page = {
+      on: () => {}, off: () => {},
       goto: async () => { throw new Error(message); },
       url: () => "about:blank",
       title: async () => "",
@@ -340,6 +390,90 @@ async function testNavigationErrorsPersistOnlyCategoryAndDigest() {
     }
   }
   assert.equal(classifyAlgumonSourceResponse({ status: null }).navigationError, null);
+}
+
+async function testSourceBrowserLocalFlows() {
+  const { chromium } = await import("playwright");
+  const browser = await chromium.launch({ headless: true });
+  const feed = "https://www.algumon.com/n/deal";
+  try {
+    for (const mode of ["normal", "reload-loop", "other-origin"]) {
+      const context = await browser.newContext();
+      const budget = createAlgumonSourceBrowserBudget(feed);
+      const requests = [];
+      let feedVisits = 0;
+      context.on("request", request => {
+        const decision = budget.observeRequest(request);
+        requests.push(request.url());
+        if (!decision.allowed) void context.close().catch(() => {});
+      });
+      await context.route("**/*", async route => {
+        if (!budget.observeRequest(route.request()).allowed) {
+          await route.abort().catch(() => {});
+          return;
+        }
+        const url = new URL(route.request().url());
+        if (url.pathname === "/verify.js") {
+          return route.fulfill({ contentType: "application/javascript", body:
+            'setTimeout(() => location.replace("/request/check?step=1"), 25);' });
+        }
+        if (url.pathname === "/style.css") {
+          return route.fulfill({ contentType: "text/css", body: "body { color: rgb(0, 0, 0); }" });
+        }
+        if (url.pathname === "/logo.svg") {
+          return route.fulfill({ contentType: "image/svg+xml", body:
+            '<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12"><rect width="12" height="12"/></svg>' });
+        }
+        let body;
+        if (url.href === feed) {
+          feedVisits += 1;
+          body = mode === "reload-loop"
+            ? '<script>setTimeout(() => location.reload(), 0)</script>'
+            : mode === "other-origin"
+              ? '<script>location.replace("https://unrelated.invalid/not-the-feed")</script>'
+              : feedVisits === 1
+                ? '<link rel="stylesheet" href="/style.css"><img src="/logo.svg"><script src="/verify.js"></script>'
+                : '<div class="deal-feed-card" id="deal-1001">정상 핫딜</div>';
+        } else if (url.pathname === "/request/check") {
+          const next = url.searchParams.get("step") === "1" ? "/request/check?step=2" : "/n/deal";
+          body = `<script>setTimeout(() => location.replace(${JSON.stringify(next)}), 30)</script>`;
+        } else throw new Error(`unexpected fixture URL: ${url.href}`);
+        await route.fulfill({ contentType: "text/html; charset=utf-8",
+          body: `<!doctype html><html><head><title>알구몬</title></head><body>${body}</body></html>` });
+      });
+      const page = await context.newPage();
+      // A main-world query may lose its context while the original JS navigates.
+      // The next observation must still receive the remaining settlement time.
+      if (mode === "normal") {
+        const title = page.title.bind(page);
+        let interrupted = false;
+        page.title = async () => {
+          if (!interrupted) { interrupted = true; throw new Error("Execution context was destroyed"); }
+          return title();
+        };
+      }
+      try {
+        const evidence = await navigateAlgumonSourcePage(page, feed, 3_000);
+        assert.equal(budget.snapshot().requestStarts, requests.length,
+          `${mode}: observing route and request must not count a browser start twice`);
+        if (mode === "normal") {
+          assert.equal(classifyAlgumonSourceResponse(evidence), null, JSON.stringify(evidence));
+          assert.equal(evidence.finalUrl, feed);
+          assert.equal(feedVisits, 2);
+          assert.equal(budget.snapshot().navigationStarts, 4);
+          for (const path of ["/verify.js", "/style.css", "/logo.svg"]) {
+            assert.ok(requests.includes(new URL(path, feed).href), `${path} must load normally`);
+          }
+        } else {
+          assert.notEqual(classifyAlgumonSourceResponse(evidence), null);
+          assert.equal(budget.snapshot().blockedStarts, 1);
+          assert.deepEqual(budget.snapshot().violations, [mode === "reload-loop"
+            ? "source-browser-navigation-budget-exceeded" : "source-browser-navigation-origin-denied"]);
+        }
+      } finally { await context.close(); }
+    }
+  } finally { await browser.close(); }
+  process.stdout.write("Algumon local browser: normal JS/resource return, reload bound, and foreign-origin rejection passed\n");
 }
 
 async function testSourceFailureScreenshotAddsNoNavigation() {
@@ -367,6 +501,8 @@ async function testSourceFailureScreenshotAddsNoNavigation() {
 
 testLowTrafficProbePlan();
 testHardRequestStartBudget();
+testSourceBrowserKeepsNormalResourcesAndBoundsNavigation();
+await testSourceBrowserBudgetSurvivesFailedSeal();
 testCapturedSnapshotProducesNoSourceRequests();
 testCurrentEncryptedRelaySnapshotRetainsExactProvenance();
 await testSourceSessionCookiesStayInMemoryAndInScope();
@@ -375,4 +511,5 @@ testSourceUrlMismatchRetainsDiagnosticIdentityWithoutQueryValues();
 testSourceFailureRedactsRedirectPathsAndUnknownQueryKeys();
 await testNavigationErrorsPersistOnlyCategoryAndDigest();
 await testSourceFailureScreenshotAddsNoNavigation();
+if (process.argv.includes("--browser-fixture")) await testSourceBrowserLocalFlows();
 process.stdout.write("Algumon traffic budget tests passed\n");
