@@ -619,8 +619,9 @@ if (matchingApprovedPaths(
             "candidate_batch_size: ${{ steps.queue.outputs.candidate_batch_size }}",
             audit_section,
         )
-        self.assertIn("--algumon-source-snapshot .candidate-queue/base-audit-report.json", candidate_section)
+        self.assertIn("--no-discover-algumon", candidate_section)
         self.assertIn("--no-algumon-network", candidate_section)
+        self.assertNotIn("--algumon-source-snapshot", candidate_section)
 
     def test_aggregator_verifies_every_result_before_one_atomic_selection(self) -> None:
         aggregate_section = WATCH_WORKFLOW.split(
@@ -655,8 +656,9 @@ if (matchingApprovedPaths(
         self.assertIn("unrelated drift is not fail-closed", promote_section)
         self.assertIn("--promotion-scope .promotion-package/proof/promotion-ready.json", promote_section)
         self.assertIn("--baseline-report .promotion-package/proof/base-audit-report.json", promote_section)
-        self.assertIn("--algumon-source-snapshot .promotion-package/proof/base-audit-report.json", promote_section)
+        self.assertIn("--no-discover-algumon", promote_section)
         self.assertIn("--no-algumon-network", promote_section)
+        self.assertNotIn("--algumon-source-snapshot", promote_section)
         self.assertIn("candidateProfiles.has(result.profile)", promote_section)
         self.assertIn('case "--promotion-scope":', AUDIT_SCRIPT)
         self.assertIn("distinctCandidateProofs.size < 3", AUDIT_SCRIPT)
@@ -664,16 +666,22 @@ if (matchingApprovedPaths(
         self.assertIn('reason === "already-failed"', AUDIT_SCRIPT)
         self.assertIn("resultIsSafelyReadableOrPublisherVisible", AUDIT_SCRIPT)
 
-    def test_algumon_source_audit_is_weekly_bounded_and_never_self_dispatched(self) -> None:
+    def test_registered_sample_audit_is_weekly_bounded_and_never_contacts_algumon(self) -> None:
         self.assertIn('- cron: "17 18 * * 0"', WATCH_WORKFLOW)
         audit_section = WATCH_WORKFLOW.split("  audit:\n", 1)[1].split(
             "  candidate-proof:\n", 1
         )[0]
         self.assertIn("--algumon-request-budget 29", audit_section)
+        self.assertIn("--no-discover-algumon", audit_section)
+        self.assertIn("--no-algumon-network", audit_section)
+        self.assertEqual(3, WATCH_WORKFLOW.count("--no-discover-algumon"))
+        self.assertEqual(3, WATCH_WORKFLOW.count("--no-algumon-network"))
+        self.assertNotIn("--require-algumon-discovery", WATCH_WORKFLOW)
+        self.assertNotIn("--algumon-source-snapshot", WATCH_WORKFLOW)
         self.assertNotIn("continue-drift-chain:", WATCH_WORKFLOW)
         self.assertNotIn("--workflow watch-dom.yml", WATCH_WORKFLOW)
         self.assertIn(
-            "Candidate proofs reuse frozen source evidence, and no workflow self-dispatches another Algumon audit.",
+            "Candidate proofs use registered article samples without contacting Algumon, and no workflow self-dispatches another live audit.",
             WATCH_WORKFLOW,
         )
 
@@ -1292,7 +1300,9 @@ if (waf.kind !== "source-or-infrastructure-failure" || waf.candidateEligible !==
 }
 if (
   candidateGenerationAllowed("direct-negative", article, 0) ||
-  candidateGenerationAllowed("registered-positive", article, 0) ||
+  !candidateGenerationAllowed("registered-positive", article, 0) ||
+  candidateGenerationAllowed("registered-positive", waf, 0) ||
+  candidateGenerationAllowed("registered-positive", article, 1) ||
   candidateGenerationAllowed("relay-positive", waf, 0) ||
   candidateGenerationAllowed("relay-positive", article, 1) ||
   !candidateGenerationAllowed("relay-positive", article, 0)

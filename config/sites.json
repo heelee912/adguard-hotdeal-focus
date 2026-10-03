@@ -3,7 +3,7 @@
   "metadata": {
     "title": "AdGuard Hotdeal Focus",
     "description": "Shows only the hot-deal title, purchase information, article body, and comments.",
-    "version": "0.6.93",
+    "version": "0.6.94",
     "expires_hours": 12,
     "license": "MIT",
     "rollback_of": null
@@ -23,7 +23,9 @@
           ],
           "page_root": ".content_view",
           "sample_urls": [
-            "https://www.clien.net/service/board/jirum/19230509"
+            "https://www.clien.net/service/board/jirum/19230509",
+            "https://www.clien.net/service/board/jirum/19269363",
+            "https://www.clien.net/service/board/jirum/19268330"
           ],
           "ancestor_markers": [
             ".post_subject",
@@ -106,7 +108,9 @@
           ],
           "page_root": ".wrapper",
           "sample_urls": [
-            "https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu&no=721171"
+            "https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu&no=721171",
+            "https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu&no=737823",
+            "https://www.ppomppu.co.kr/zboard/view.php?id=ppomppu&no=737862"
           ],
           "ancestor_markers": [
             "#topTitle > h1",
@@ -186,7 +190,9 @@
           ],
           "page_root": ".bbs.view",
           "sample_urls": [
-            "https://m.ppomppu.co.kr/new/bbs_view.php?id=ppomppu&no=721171"
+            "https://m.ppomppu.co.kr/new/bbs_view.php?id=ppomppu&no=721171",
+            "https://m.ppomppu.co.kr/new/bbs_view.php?id=ppomppu&no=737823",
+            "https://m.ppomppu.co.kr/new/bbs_view.php?id=ppomppu&no=737862"
           ],
           "ancestor_markers": [
             ".bbs.view > h4",
@@ -277,7 +283,9 @@
           ],
           "page_root": "#board_read",
           "sample_urls": [
-            "https://bbs.ruliweb.com/news/board/1020/read/105748"
+            "https://bbs.ruliweb.com/news/board/1020/read/105748",
+            "https://bbs.ruliweb.com/news/board/1020/read/38542",
+            "https://bbs.ruliweb.com/news/board/1020/read/107755"
           ],
           "ancestor_markers": [
             ".category_text",
@@ -364,7 +372,9 @@
           ],
           "page_root": ".left-con-wrap",
           "sample_urls": [
-            "https://quasarzone.com/bbs/qb_saleinfo/views/1971167"
+            "https://quasarzone.com/bbs/qb_saleinfo/views/1990130",
+            "https://quasarzone.com/bbs/qb_saleinfo/views/1990336",
+            "https://quasarzone.com/bbs/qb_saleinfo/views/1990129"
           ],
           "resource_domains": [
             "img2.quasarzone.com"
@@ -446,7 +456,9 @@
           ],
           "page_root": "#con-body",
           "sample_urls": [
-            "https://quasarzone.com/bbs/qb_saleinfo/views/1971167"
+            "https://quasarzone.com/bbs/qb_saleinfo/views/1990130",
+            "https://quasarzone.com/bbs/qb_saleinfo/views/1990336",
+            "https://quasarzone.com/bbs/qb_saleinfo/views/1990129"
           ],
           "resource_domains": [
             "img2.quasarzone.com"
@@ -540,7 +552,9 @@
           ],
           "page_root": "#bd",
           "sample_urls": [
-            "https://eomisae.co.kr/rt/194871796"
+            "https://eomisae.co.kr/rt/194871796",
+            "https://eomisae.co.kr/rt/204480855",
+            "https://eomisae.co.kr/rt/204507318"
           ],
           "ancestor_markers": [
             "#D_ ._hd h2",
@@ -638,7 +652,9 @@
           ],
           "page_root": "main",
           "sample_urls": [
-            "https://zod.kr/deal/8452555"
+            "https://zod.kr/deal/8452555",
+            "https://zod.kr/deal/8829252",
+            "https://zod.kr/deal/8824758"
           ],
           "ancestor_markers": [
             ".app-board-article-head h1",
@@ -718,7 +734,9 @@
           ],
           "page_root": "article.board-article",
           "sample_urls": [
-            "https://arca.live/b/hotdeal/177371604"
+            "https://arca.live/b/hotdeal/177371604",
+            "https://arca.live/b/hotdeal/184784422",
+            "https://arca.live/b/hotdeal/184750098"
           ],
           "ancestor_markers": [
             ".article-view > .article-head",

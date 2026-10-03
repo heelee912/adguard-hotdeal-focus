@@ -1,6 +1,6 @@
 {
   "name": "adguard-hotdeal-focus",
-  "version": "0.6.93",
+  "version": "0.6.94",
   "private": true,
   "description": "Content-preserving AdGuard hot-deal reader and cloud DOM monitor",
   "type": "module",
@@ -22,7 +22,7 @@
     "test:network": "node tests/test_network_fidelity.mjs && npm run test:algumon-traffic",
     "test:tamper": "node scripts/audit_pages.mjs --tamper-fixture-only --timeout-ms 8000",
     "verify": "npm run check:node && npm test && npm run test:network && npm run build:check && npm run integrity && npm run test:oracle",
-    "audit:dom": "node scripts/audit_pages.mjs --discover-algumon --algumon-request-budget 29"
+    "audit:dom": "node scripts/audit_pages.mjs --no-discover-algumon --no-algumon-network"
   },
   "devDependencies": {
     "playwright": "1.61.1"
