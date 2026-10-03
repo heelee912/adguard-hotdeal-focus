@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import vm from "node:vm";
 import { EventEmitter } from "node:events";
+import { createConnection } from "node:net";
 
 import {
   FIRST_PAINT_PROBE_SOURCE,
@@ -9,6 +10,7 @@ import {
   consumeArticleAccessLease,
   createArticleAccessLease,
   createNetworkPolicyEvidenceRecorder,
+  createPinnedPublicHttpsProxy,
   createStylesheetDependencyRecorder,
   isPrivateOrSpecialIp,
   networkFidelityFailures,
@@ -831,6 +833,96 @@ async function testArticleNavigationPrimingIsScopedAndPublic() {
   }
 }
 
+function testLateConnectRejectionProofPreservesContentFailures() {
+  const pinnedTransport = {
+    mode: "route-approved-numeric-ip-connect", sealed: true,
+    connectRequestCount: 1, lateConnectCount: 1, lateConnectRejectedBeforeUpstreamCount: 1,
+  };
+  const policy = { pinnedTransport };
+  assert.deepEqual(networkFidelityFailures(policy), [], "proven refused CONNECTs are diagnostic only");
+  for (const mutation of [
+    { lateConnectRejectedBeforeUpstreamCount: undefined },
+    { lateConnectRejectedBeforeUpstreamCount: 0 },
+    { lateConnectRejectedBeforeUpstreamCount: 2 },
+    { lateConnectRejectedBeforeUpstreamCount: "1" },
+    { lateConnectRejectedBeforeUpstreamCount: -1 },
+    { lateConnectRejectedBeforeUpstreamCount: 0.5 },
+    { lateConnectCount: undefined },
+    { lateConnectCount: 0 },
+    { lateConnectCount: "1" },
+    { lateConnectCount: -1 },
+    { lateConnectCount: 0.5 },
+    { connectRequestCount: undefined },
+    { connectRequestCount: 0 },
+    { connectRequestCount: "1" },
+    { sealed: false },
+    { mode: "unproven-transport" },
+  ]) {
+    assert.ok(networkFidelityFailures({ pinnedTransport: { ...pinnedTransport, ...mutation } })
+      .some(failure => failure.includes("CONNECT attempts appeared after")), JSON.stringify(mutation));
+  }
+  for (const [requestType, isMainNavigation, url] of [
+    ["xhr", false, "https://publisher.example/api/comments"],
+    ["fetch", false, "https://publisher.example/api/article"],
+    ["document", true, "https://publisher.example/deal/7"],
+  ]) {
+    const entry = { hostname: "publisher.example", requestType, isMainNavigation,
+      urlSha256: networkResourceUrlSha256(url),
+      redirectAncestryStatus: "complete", redirectAncestorUrlSha256s: [] };
+    assert.ok(networkFidelityFailures({ ...policy, lateRequestCount: 1, lateRequests: [entry] })
+      .includes("remote requests appeared after the network evidence seal"));
+    assert.ok(networkFidelityFailures({ ...policy, failedAllowedRequests: [entry] })
+      .includes("an allowed remote request failed before a complete response"));
+  }
+  const imageUrlSha256 = networkResourceUrlSha256("https://cdn.example/retained.png");
+  assert.ok(networkFidelityFailures({ ...policy, failedAllowedRequests: [{
+    hostname: "cdn.example", requestType: "image", isMainNavigation: false,
+    urlSha256: imageUrlSha256, redirectAncestryStatus: "complete", redirectAncestorUrlSha256s: [],
+  }] }, [], { urlSha256s: [imageUrlSha256] })
+    .includes("an allowed remote request failed before a complete response"));
+  assert.ok(networkFidelityFailures({ pinnedTransport: { ...pinnedTransport,
+    rejectedHosts: [{ hostname: "cdn.example", count: 1, reasons: ["transport-sealed"] }],
+  } }, [], ["cdn.example"]).some(failure => failure.includes("required resource hosts failed pinned transport")));
+}
+
+async function testSealedProxyRecordsRejectionBeforeUpstream() {
+  const proxy = await createPinnedPublicHttpsProxy();
+  try {
+    proxy.seal();
+    const localAddress = new URL(proxy.serverUrl);
+    for (let index = 1; index <= 2; index += 1) {
+      const response = await new Promise((resolve, reject) => {
+        const socket = createConnection({ host: localAddress.hostname, port: Number(localAddress.port) });
+        let received = "";
+        socket.setEncoding("utf8");
+        socket.setTimeout(2_000, () => socket.destroy(new Error("local proxy regression timed out")));
+        socket.on("error", reject);
+        socket.on("data", chunk => { received += chunk; });
+        socket.once("end", () => { socket.destroy(); resolve(received); });
+        socket.once("connect", () => socket.write(
+          "CONNECT content-autofill.googleapis.com:443 HTTP/1.1\r\n" +
+          "Host: content-autofill.googleapis.com:443\r\n\r\n" +
+          "unforwarded-head-bytes",
+        ));
+      });
+      assert.match(response, /^HTTP\/1\.1 403 Forbidden\r\n/u);
+      const evidence = proxy.snapshot();
+      assert.equal(evidence.lateConnectCount, index);
+      assert.equal(evidence.lateConnectRejectedBeforeUpstreamCount, index);
+      assert.equal(evidence.activeTunnelCount, 0);
+      assert.equal(evidence.transferByteCount, 0);
+      assert.equal(evidence.approvedHostCount, 0);
+      assert.deepEqual(evidence.connectedHosts, []);
+      assert.deepEqual(evidence.dnsAnswerEvidence, []);
+      assert.deepEqual(evidence.rejectedHosts, [{ hostname: "content-autofill.googleapis.com",
+        count: index, reasons: ["transport-sealed"] }]);
+      assert.deepEqual(networkFidelityFailures({ pinnedTransport: evidence }), []);
+    }
+  } finally {
+    await proxy.close();
+  }
+}
+
 async function testSealDrainAndLateRequest() {
   const recorder = createNetworkPolicyEvidenceRecorder();
   const active = recorder.reserveRemoteRequest("active.example");
@@ -1258,6 +1350,8 @@ async function main() {
   testPublicDnsAnswerCardinalityAndPrivacy();
   testArticleLeaseBudgetsOnlyScopedCookies();
   await testArticleNavigationPrimingIsScopedAndPublic();
+  testLateConnectRejectionProofPreservesContentFailures();
+  await testSealedProxyRecordsRejectionBeforeUpstream();
   await testSealDrainAndLateRequest();
   await testSealDrainTimeoutFailsClosed();
   await testOptionalLifecycleActivityStaysObservedWithoutFailingArticle();
@@ -1268,7 +1362,7 @@ async function main() {
   testSpecialIpRanges();
   testConnectAuthorityParser();
   testHeadStylesheetTraversalBounds();
-  process.stdout.write("PASS network fidelity pure-helper regression tests\n");
+  process.stdout.write("PASS network fidelity helper and local-only proxy regression tests\n");
 }
 
 await main();
