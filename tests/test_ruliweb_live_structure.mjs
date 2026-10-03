@@ -49,6 +49,34 @@ document.querySelectorAll('.like').forEach(button => button.addEventListener('cl
 }));
 </script></body></html>`;
 
+// Observed mobile article 38542: these six repeated boxes are native controls,
+// not six comments. The empty desktop template does not contain this toolbar.
+const emptyCommentHtml = `<!doctype html><html><head>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta property="og:title" content="루리웹 정상 빈 댓글">
+</head><body><article id="board_read">
+<h1 class="subject_inner_text">루리웹 정상 빈 댓글</h1>
+<div class="view_content"><p>댓글이 없어도 원래 상품 설명은 그대로 보여야 합니다.</p></div>
+<div class="comment_container"><div id="cmt" class="comment_wrapper theme_default">
+  <input id="c_mpc" class="c_mpc" type="hidden" value="0">
+  <input class="comment_profile_image_enabled" type="hidden" value="1">
+  <div class="comment_count_wrapper row"></div><br>
+  <div class="comment_btn_wrapper flex flex_wrap text_center padding_h_10" data-nosnippet>
+    <div class="box_line flex_item_1 comment_count"><span class="comment_title">댓글</span>
+      <span class="num_txt"><strong class="reply_count">0</strong></span></div>
+    <div class="box_line flex_item_1"><button class="best_toggle" aria-label="c-best"
+      onclick="window.originalBestClicks=(window.originalBestClicks||0)+1">
+      <span class="icon_best">BEST</span><span class="best_toggle_text_on">ON</span>
+      <span class="best_toggle_text_off screen_out">OFF</span></button></div>
+    <div class="box_line flex_item_1"><button class="btn_comment_video">
+      <i class="icon-youtube-play"></i><span class="btn_comment_video_text">ON</span></button></div>
+    <div class="box_line flex_item_1"><button class="btn_comment_img" data-active="0">
+      <i class="icon-picture"></i>ON</button></div>
+    <div class="box_line flex_item_1"><a class="btn_comment_go" href="#comment_input"><i class="icon-pencil"></i></a></div>
+    <div class="box_line flex_item_1"><button class="btn_comment_refresh"><i class="icon-refresh"></i></button></div>
+  </div><div class="comment_disable text_center">로그인이 필요합니다.</div>
+</div></div><aside class="popular-posts">인기글 추천글</aside></article></body></html>`;
+
 const browser = await chromium.launch({ headless: true });
 try {
   for (const width of [1280, 390]) {
@@ -106,5 +134,57 @@ try {
       assert.equal(await page.locator('html').getAttribute('data-hotdeal-focus-state'), 'ready');
     } finally { await context.close(); }
   }
-  console.log('Ruliweb original comment/reply columns remain native on desktop and stack readably at 390px; native reply/like handlers and hidden forms preserved.');
+  for (const width of [1280, 390]) {
+    const context = await browser.newContext({ viewport: { width, height: 844 } });
+    try {
+      const page = await context.newPage();
+      await page.route('**/*', route => route.fulfill({ status: 200,
+        contentType: 'text/html; charset=utf-8', body: emptyCommentHtml }));
+      await page.addInitScript(({ source, control }) => { (0, eval)(control); (0, eval)(source); },
+        { source, control: PREAUTHORIZED_ADGUARD_CONTROL_SOURCE });
+      await page.goto('https://m.ruliweb.com/news/board/1020/read/38542');
+      await page.waitForFunction(() => document.documentElement.getAttribute('data-hotdeal-focus-state') === 'ready' &&
+        !document.documentElement.hasAttribute('data-hotdeal-focus-lock'), null, { timeout: 5000 });
+      assert.equal(await page.locator('.subject_inner_text').isVisible(), true);
+      assert.equal(await page.locator('.view_content').isVisible(), true);
+      assert.equal(await page.locator('[data-hotdeal-focus-role="comment-item"]').count(), 0);
+      assert.equal(await page.locator('.comment_btn_wrapper').isVisible(), true);
+      assert.equal(await page.locator('.popular-posts').isVisible(), false);
+      await page.locator('.best_toggle').click();
+      assert.equal(await page.evaluate(() => window.originalBestClicks), 1);
+      const evidence = await page.evaluate(source => {
+        const moduleRecord = { exports: {} };
+        new Function('module', source)(moduleRecord);
+        const api = moduleRecord.exports;
+        const current = api.SITE_CONTRACTS.find(site => site.id === 'ruliweb').layouts
+          .find(layout => layout.id === 'hotdeal');
+        const previous = structuredClone(current);
+        previous.hints.commentControls = previous.hints.commentControls
+          .filter(selector => !selector.includes('.comment_btn_wrapper'));
+        const before = api.resolveDocument(document, [previous], null);
+        const missingItems = [];
+        for (const explicit of [true, false]) {
+          // One schema-marked item is explicit evidence; unmarked native
+          // evidence requires repeated siblings, not an arbitrary singleton.
+          const comments = Array.from({ length: explicit ? 1 : 2 }, (_unused, index) => {
+            const comment = document.createElement('div');
+            comment.className = 'comment-item';
+            if (explicit) comment.setAttribute('itemprop', 'comment');
+            comment.textContent = `분류에서 빠졌지만 삭제하면 안 되는 실제 댓글 ${index + 1}입니다.`;
+            document.getElementById('cmt').append(comment);
+            return comment;
+          });
+          const result = api.resolveDocument(document, [current], null);
+          missingItems.push({ ok: result.ok, role: result.role, reason: result.reason });
+          comments.forEach(comment => comment.remove());
+        }
+        return { before: { ok: before.ok, role: before.role, reason: before.reason }, missingItems };
+      }, source);
+      assert.deepEqual(evidence.before,
+        { ok: false, role: 'comments', reason: 'evidence-outside-items' });
+      assert.ok(evidence.missingItems.every(result => !result.ok &&
+        result.role === 'comments' && result.reason === 'evidence-outside-items'), JSON.stringify(evidence));
+    } finally { await context.close(); }
+  }
+  console.log('Ruliweb native comment/reply layout and handlers preserved; observed six-box empty-comment controls work on desktop/mobile while unclassified actual comments remain rejected.');
 } finally { await browser.close(); }

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.94
+// @version      0.6.95
 // @description  Content-preserving hot-deal reader with automatic noise filtering.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
@@ -41,7 +41,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.6.94";
+  const GENERATOR_VERSION = "0.6.95";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -367,7 +367,7 @@
               "body": [".view_content"],
               "comments": [".comment_view.normal", "#cmt.comment_wrapper"],
               "commentItems": [".comment_view.normal > table.comment_table > tbody > tr.comment_element:not(:has(> td.comment > .nbp_container))"],
-              "commentControls": [".comment_view.normal .comment_more", ".comment_view.normal .pagination", ".comment_view.normal .btn_reply"],
+              "commentControls": [".comment_view.normal .comment_more", ".comment_view.normal .pagination", ".comment_view.normal .btn_reply", "#cmt.comment_wrapper:not(:has(.comment_view.normal)) > .comment_btn_wrapper:has(> .box_line.flex_item_1 > button.best_toggle):has(> .box_line.flex_item_1 > button.btn_comment_refresh)"],
               "commentIgnored": ["#cmt.comment_wrapper > input", "#cmt.comment_wrapper > .comment_count_wrapper", "#cmt.comment_wrapper > .comment_disable", "#cmt.comment_wrapper > br", ".comment_view.normal > table.comment_table > tbody > tr.comment_element:has(> td.comment > .nbp_container)"]
             }
           }

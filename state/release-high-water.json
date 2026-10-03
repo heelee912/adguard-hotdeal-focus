@@ -910,6 +910,19 @@
         "canonicalTextSha256": "a1a5e807487a1a412cae5b997ff6a7252a39a4396db21e37519a3bffdb503b21",
         "sha256": "60efc1ce6acd3a03e92fee2061725ccf414ab7db652aba340ac5485a2f568091"
       }
+    },
+    {
+      "bundleSha256": "5f9b580e2993adc4208131c0a3aa8bcc2cc72e658602f4818cdf49a2f87b2091",
+      "manifest": {
+        "bytes": 6280,
+        "sha256": "b9bd382d2d3dbfde9f12d3ef8e4a1d8ba94a37698b62d7f6c0313f5b8aaa2f9f"
+      },
+      "releaseVersion": "0.6.95",
+      "userscript": {
+        "bytes": 424027,
+        "canonicalTextSha256": "7a4779ccbe51cb3a618d503166649f0a8376125ec8c4d4930dd5879c591d979f",
+        "sha256": "41b20b474ca5803753fb12a41a00ab90c19efa70d698002e836ead0fcde629f5"
+      }
     }
   ],
   "schemaVersion": 1

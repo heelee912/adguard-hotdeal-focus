@@ -1544,6 +1544,21 @@ function networkFidelityFailures(
     entry.redirectAncestryStatus === "complete" &&
     Array.isArray(entry.redirectAncestorUrlSha256s) && entry.redirectAncestorUrlSha256s.length === 0;
   const isDataRequestType = (type) => type === "fetch" || type === "xhr";
+  // An exhaustive retained subtree can prove that a presentation-only request
+  // is unrelated to the article. Embedded documents remain conservative: their
+  // inner resources are not enumerated by the top-level DOM collector.
+  const completeFrameFreePresentationEvidence = roleResourceEvidence.rootCount > 0 &&
+    roleResourceEvidence.nodeCount > 0 && roleResourceEvidence.retainedFrameCount === 0 &&
+    Array.isArray(roleResourceEvidence.urlSha256s) &&
+    roleResourceEvidence.urlSha256s.every((digest) => /^[a-f0-9]{64}$/u.test(digest)) &&
+    ["selectorErrorCount", "rootOverflowCount", "nodeOverflowCount", "urlOverflowCount",
+      "hostOverflowCount", "elapsedTimeOverflowCount", "stylesheetRuleOverflowCount",
+      "stylesheetRuleErrorCount", "unsafeReferenceOverflowCount"].every((key) => roleResourceEvidence[key] === 0) &&
+    Array.isArray(roleResourceEvidence.unsafeReferences) && roleResourceEvidence.unsafeReferences.length === 0;
+  const isUnreferencedPresentationRequest = (entry) => completeFrameFreePresentationEvidence &&
+    ["image", "media"].includes(entry.requestType) && entry.isMainNavigation === false &&
+    /^[a-f0-9]{64}$/u.test(entry.urlSha256 ?? "") && entry.redirectAncestryStatus === "complete" &&
+    Array.isArray(entry.redirectAncestorUrlSha256s) && !isRequiredRequest(entry);
   const hasRequiredFailure = (requestKey, hostKey) => {
     const requests = networkPolicyEvidence?.[requestKey];
     if (Array.isArray(requests)) {
@@ -1562,7 +1577,7 @@ function networkFidelityFailures(
     return !Number.isSafeInteger(expectedCount) || expectedCount < 0 ||
       !Array.isArray(entries) || entries.length !== expectedCount || entries.some((entry) => !entry.urlSha256 ||
       (entry.redirectAncestryStatus && entry.redirectAncestryStatus !== "complete") ||
-      isRequiredRequest(entry) || !hasIndependentNoiseEvidence(entry));
+      isRequiredRequest(entry) || (!hasIndependentNoiseEvidence(entry) && !isUnreferencedPresentationRequest(entry)));
   };
   if (
     networkPolicyEvidence?.mode === "bounded-public-https-fidelity" &&
@@ -3362,6 +3377,9 @@ function fidelitySelectorsForLayout(layout) {
 function collectRetainedRoleResourceEvidence(roleSelectors) {
     const maximumRoots = 32;
     const maximumNodes = 2_048;
+    // Normal comment trees exceed the head/CSS inspection budget. Keep their
+    // independent traversal bound without increasing time, URL, or host caps.
+    const maximumRetainedNodes = 16_384;
     const maximumUrls = 4_096;
     const maximumHosts = 128;
     const maximumElapsedMs = 2_000;
@@ -3397,7 +3415,7 @@ function collectRetainedRoleResourceEvidence(roleSelectors) {
     let queueIndex = 0;
     const enqueue = (element) => {
       if (!(element instanceof Element) || nodes.has(element) || queued.has(element)) return true;
-      if (nodes.size + queue.length - queueIndex >= maximumNodes) {
+      if (nodes.size + queue.length - queueIndex >= maximumRetainedNodes) {
         nodeOverflowCount += 1;
         return false;
       }
@@ -3409,7 +3427,7 @@ function collectRetainedRoleResourceEvidence(roleSelectors) {
       const element = queue[queueIndex++];
       queued.delete(element);
       if (!(element instanceof Element) || nodes.has(element)) continue;
-      if (nodes.size >= maximumNodes) {
+      if (nodes.size >= maximumRetainedNodes) {
         nodeOverflowCount += 1;
         continue;
       }
@@ -3550,8 +3568,10 @@ function collectRetainedRoleResourceEvidence(roleSelectors) {
       "shapeOutside", "filter", "backdropFilter", "webkitBackdropFilter", "clipPath",
       "offsetPath", "fill", "stroke", "markerStart", "markerMid", "markerEnd", "webkitBoxReflect",
     ];
+    let retainedFrameCount = 0;
     for (const element of nodes) {
       const tagName = element.localName;
+      if (["iframe", "object", "embed"].includes(tagName)) retainedFrameCount += 1;
       if (tagName === "style") appendInlineFontSources(element);
       if (["img", "video", "audio"].includes(tagName)) {
         append(element.currentSrc);
@@ -3661,6 +3681,7 @@ function collectRetainedRoleResourceEvidence(roleSelectors) {
       urls: [...urls],
       rootCount: roots.size,
       nodeCount: nodes.size,
+      retainedFrameCount,
       headNodeCount,
       stylesheetRuleCount,
       stylesheetRuleOverflowCount,
