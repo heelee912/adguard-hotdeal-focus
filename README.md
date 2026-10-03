@@ -20,7 +20,7 @@
 
 이 프로젝트와 유저스크립트는 무료입니다. AdGuard 독립 실행형 앱은 별도 제품이며, 유저스크립트 기능을 사용하려면 유효한 체험판 또는 라이선스가 필요합니다. 자세한 구분은 [AdGuard 라이선스 안내](https://adguard.com/kb/ko/general/license/what-is/)와 [Android 무료·정식 버전 비교](https://adguard.com/kb/ko/adguard-for-android/features/free-vs-full/)에서 확인할 수 있습니다.
 
-그다음 아래 주소 하나를 유저스크립트로 추가합니다.
+GitHub 가입이나 코드 수정은 필요 없습니다. 아래 주소를 복사해 AdGuard 앱에 추가하면 됩니다.
 
 ```text
 https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js

@@ -857,6 +857,43 @@ function testRetainedUrlBudgetCountsUniqueNormalizedResources() {
     .includes("semantic role resource traversal exceeded its URL budget"));
 }
 
+function testRetainedArticleNodeBudgetIsIndependentOfHeadAndCss() {
+  class FixtureElement {
+    localName = "div";
+    children = [];
+    style = {};
+    getAttribute() { return null; }
+  }
+  const collect = (count, timeExpires = false) => {
+    const root = new FixtureElement();
+    root.children = Array.from({ length: count - 1 }, () => new FixtureElement());
+    let now = 0;
+    return vm.runInNewContext(`(${collectRetainedRoleResourceEvidence.toString()})(["#comments"])`, {
+      Element: FixtureElement,
+      document: { URL: "https://article.example/deal/7", baseURI: "https://article.example/deal/7",
+        head: null, querySelector: () => root },
+      window: { getComputedStyle: () => { if (timeExpires) now = 2001; return {}; } },
+      performance: { now: () => now }, URL,
+    });
+  };
+  for (const count of [3_001, 16_384]) {
+    const evidence = collect(count);
+    assert.equal(evidence.nodeCount, count, "normal comment trees and the exact retained-node boundary are complete");
+    assert.equal(evidence.nodeOverflowCount, 0);
+    assert.equal(evidence.elapsedTimeOverflowCount, 0);
+    assert.deepEqual(networkFidelityFailures({}, [], evidence), []);
+  }
+  const overflow = collect(16_385);
+  assert.equal(overflow.nodeCount, 16_384);
+  assert.equal(overflow.nodeOverflowCount, 1);
+  assert.ok(networkFidelityFailures({}, [], overflow)
+    .includes("semantic role resource traversal exceeded its node budget"));
+  const expired = collect(3_001, true);
+  assert.equal(expired.elapsedTimeOverflowCount, 1, "the two-second total traversal budget is unchanged");
+  assert.ok(networkFidelityFailures({}, [], expired)
+    .includes("semantic role resource traversal exceeded its time budget"));
+}
+
 function testPublicDnsAnswerCardinalityAndPrivacy() {
   const publicRecords = Array.from({ length: 128 }, (_, index) => ({ address: `8.8.8.${index + 1}` }));
   const full = validatePublicDnsAnswers(publicRecords);
@@ -1365,6 +1402,101 @@ async function testFailedNavigationRetainsNetworkEvidenceWithoutRetry() {
   assert.equal(JSON.stringify(failedCapture).includes("secret-query"), false);
 }
 
+async function testUnreferencedPresentationLifecycleRequiresIndependentNoiseProof() {
+  class FixtureElement {
+    constructor(localName = "article", attributes = {}, children = []) {
+      this.localName = localName;
+      this.attributes = attributes;
+      this.children = children;
+      this.style = {};
+    }
+    getAttribute(name) { return this.attributes[name] ?? null; }
+  }
+  const articleUrl = "https://article.example/deal/7";
+  const imageUrl = "https://cdn.example/product.webp";
+  const mediaUrl = "https://cdn.example/product.mp4";
+  const frameUrl = "https://video.example/embed/7";
+  const article = new FixtureElement("article", {}, [
+    new FixtureElement("img", { src: imageUrl }),
+    new FixtureElement("video", { src: mediaUrl }),
+  ]);
+  const collect = () => {
+    const { urls, ...evidence } = vm.runInNewContext(
+      `(${collectRetainedRoleResourceEvidence.toString()})(["#article"])`, {
+        Element: FixtureElement,
+        document: { URL: articleUrl, baseURI: articleUrl, head: null, querySelector: () => article },
+        window: { getComputedStyle: () => ({}) }, performance: { now: () => 0 }, URL,
+      });
+    return { ...evidence, urlSha256s: [...urls].map(networkResourceUrlSha256) };
+  };
+  const roles = collect();
+  const direct = { status: "complete", ancestorUrlSha256s: [] };
+  const lifecycleFailures = ["network evidence sealed with active remote requests",
+    "remote requests did not drain inside the fail-closed deadline"];
+  const check = async (url, type, evidence, optional, redirectEvidence = direct, isMainNavigation = false) => {
+    const recorder = createNetworkPolicyEvidenceRecorder();
+    const resource = { urlText: url, requestType: type, isMainNavigation, redirectEvidence };
+    const reservation = recorder.reserveRemoteRequest(new URL(url).hostname, resource);
+    const sealed = await recorder.sealAndDrain({ quietWindowMs: 1, timeoutMs: 0 });
+    const failures = networkFidelityFailures(sealed, [], evidence);
+    for (const failure of lifecycleFailures) assert.equal(failures.includes(failure), !optional, `${url}: ${failure}`);
+    finishReservation(reservation);
+    assert.equal(recorder.reserveRemoteRequest(new URL(url).hostname, resource).allowed, false,
+      "classification never reopens the sealed network boundary");
+    assert.equal(networkFidelityFailures(recorder.snapshot(), [], evidence)
+      .includes("remote requests appeared after the network evidence seal"), !optional, url);
+  };
+  for (const [url, type, optional] of [
+    // Absence from a complete snapshot does not independently prove that an
+    // unfinished image/media request is unrelated to lazy-loaded article content.
+    ["https://tr.ds.kakao.com/fixture-pixel", "image", false],
+    ["https://image.yes24.com/fixture-ad.webp", "image", false],
+    ["https://cdn.example/unreferenced.mp4", "media", false],
+    ["https://sync.adkernel.com/fixture-pixel", "image", true],
+    [imageUrl, "image", false], [mediaUrl, "media", false],
+    ["https://article.example/api/comments", "xhr", false],
+    ["https://article.example/api/article", "fetch", false],
+    ["https://aem-kakao-collector.onkakao.net/fixture", "xhr", false],
+    ["https://cdn.example/article.css", "stylesheet", false],
+    ["https://cdn.example/article.woff2", "font", false],
+    ["https://cdn.example/article.js", "script", false],
+    [frameUrl, "document", false],
+  ]) await check(url, type, roles, optional);
+  await check("https://cdn.example/redirected.webp", "image", roles, false,
+    { status: "complete", ancestorUrlSha256s: [networkResourceUrlSha256(imageUrl)] });
+  await check("https://cdn.example/unreferenced.webp", "image", roles, false,
+    { status: "overflow", ancestorUrlSha256s: [] });
+  await check("https://cdn.example/unreferenced.webp", "image", roles, false, direct, true);
+  for (const incomplete of [
+    { ...roles, rootCount: 0 },
+    { ...roles, nodeOverflowCount: 1 }, { ...roles, urlOverflowCount: 1 },
+    { ...roles, elapsedTimeOverflowCount: 1 }, { ...roles, urlSha256s: ["invalid"] },
+  ]) await check("https://cdn.example/unreferenced.webp", "image", incomplete, false);
+  for (const [localName, requestType, url] of [
+    ["img", "image", "https://cdn.example/lazy-article.webp"],
+    ["video", "media", "https://cdn.example/lazy-article.mp4"],
+  ]) {
+    const detached = new FixtureElement(localName, { src: url });
+    const beforeInsertion = collect();
+    assert.equal(beforeInsertion.urlSha256s.includes(networkResourceUrlSha256(url)), false);
+    await check(url, requestType, beforeInsertion, false);
+    article.children.push(detached);
+    // A retained-DOM snapshot can become stale before the network seal. The
+    // newly attached article resource must remain fatal even with that snapshot.
+    await check(url, requestType, beforeInsertion, false);
+    assert.equal(collect().urlSha256s.includes(networkResourceUrlSha256(url)), true);
+    article.children.pop();
+  }
+  for (const localName of ["iframe", "object", "embed"]) {
+    article.children.push(new FixtureElement(localName, { src: frameUrl, data: frameUrl }));
+    const withFrame = collect();
+    assert.equal(withFrame.urlSha256s.includes(networkResourceUrlSha256(frameUrl)), true);
+    await check("https://cdn.example/inside-frame.webp", "image", withFrame, false);
+    await check(frameUrl, "document", withFrame, false);
+    article.children.pop();
+  }
+}
+
 async function testPendingArticleApisRequireIndependentNoiseProof() {
   const articleUrl = "https://article.example/deal/7";
   const direct = { status: "complete", ancestorUrlSha256s: [] };
@@ -1658,6 +1790,7 @@ async function main() {
   testInlineStylesheetDependenciesUseActualDocumentUrl();
   testRetainedComputedUrlPropertiesExcludeUnrelatedImages();
   testRetainedUrlBudgetCountsUniqueNormalizedResources();
+  testRetainedArticleNodeBudgetIsIndependentOfHeadAndCss();
   testPublicDnsAnswerCardinalityAndPrivacy();
   testArticleLeaseBudgetsOnlyScopedCookies();
   await testArticleNavigationPrimingIsScopedAndPublic();
@@ -1670,6 +1803,7 @@ async function main() {
   await testSealDrainTimeoutFailsClosed();
   await testOptionalLifecycleActivityStaysObservedWithoutFailingArticle();
   await testFailedNavigationRetainsNetworkEvidenceWithoutRetry();
+  await testUnreferencedPresentationLifecycleRequiresIndependentNoiseProof();
   await testPendingArticleApisRequireIndependentNoiseProof();
   testFailedArticleApisRequireIndependentNoiseProof();
   await testLifecycleIdentityCardinalityFailsClosed();

@@ -910,6 +910,32 @@
         "canonicalTextSha256": "a1a5e807487a1a412cae5b997ff6a7252a39a4396db21e37519a3bffdb503b21",
         "sha256": "60efc1ce6acd3a03e92fee2061725ccf414ab7db652aba340ac5485a2f568091"
       }
+    },
+    {
+      "bundleSha256": "5f9b580e2993adc4208131c0a3aa8bcc2cc72e658602f4818cdf49a2f87b2091",
+      "manifest": {
+        "bytes": 6280,
+        "sha256": "b9bd382d2d3dbfde9f12d3ef8e4a1d8ba94a37698b62d7f6c0313f5b8aaa2f9f"
+      },
+      "releaseVersion": "0.6.95",
+      "userscript": {
+        "bytes": 424027,
+        "canonicalTextSha256": "7a4779ccbe51cb3a618d503166649f0a8376125ec8c4d4930dd5879c591d979f",
+        "sha256": "41b20b474ca5803753fb12a41a00ab90c19efa70d698002e836ead0fcde629f5"
+      }
+    },
+    {
+      "bundleSha256": "096dcc557a2eb681295e0362d8f9993180b9e8336b39f573e6ffbcd69d1ed32f",
+      "manifest": {
+        "bytes": 6280,
+        "sha256": "a13baadeaac4301809c28147d07670c00d1362ea58728cfe65f0baf9b65a4a18"
+      },
+      "releaseVersion": "0.6.96",
+      "userscript": {
+        "bytes": 425268,
+        "canonicalTextSha256": "88568ee5beecd5422273bfc5e2f1fbf49c6e344d57c2aecd81f332fd1058353a",
+        "sha256": "9e9bfa2a2d811232c37464de181bfde915742c101ad17bfb32c8ed6b8e4bbc94"
+      }
     }
   ],
   "schemaVersion": 1

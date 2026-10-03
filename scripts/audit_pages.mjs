@@ -3362,6 +3362,9 @@ function fidelitySelectorsForLayout(layout) {
 function collectRetainedRoleResourceEvidence(roleSelectors) {
     const maximumRoots = 32;
     const maximumNodes = 2_048;
+    // Normal comment trees exceed the head/CSS inspection budget. Keep their
+    // independent traversal bound without increasing time, URL, or host caps.
+    const maximumRetainedNodes = 16_384;
     const maximumUrls = 4_096;
     const maximumHosts = 128;
     const maximumElapsedMs = 2_000;
@@ -3397,7 +3400,7 @@ function collectRetainedRoleResourceEvidence(roleSelectors) {
     let queueIndex = 0;
     const enqueue = (element) => {
       if (!(element instanceof Element) || nodes.has(element) || queued.has(element)) return true;
-      if (nodes.size + queue.length - queueIndex >= maximumNodes) {
+      if (nodes.size + queue.length - queueIndex >= maximumRetainedNodes) {
         nodeOverflowCount += 1;
         return false;
       }
@@ -3409,7 +3412,7 @@ function collectRetainedRoleResourceEvidence(roleSelectors) {
       const element = queue[queueIndex++];
       queued.delete(element);
       if (!(element instanceof Element) || nodes.has(element)) continue;
-      if (nodes.size >= maximumNodes) {
+      if (nodes.size >= maximumRetainedNodes) {
         nodeOverflowCount += 1;
         continue;
       }
