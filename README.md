@@ -13,33 +13,50 @@
 
 ### 설치
 
-**Windows 또는 Android용 AdGuard 앱**에서 아래 주소를 유저스크립트로 추가하면 됩니다. 브라우저에 설치하는 AdGuard 확장 프로그램이나 사용자 필터 목록에 넣는 주소가 아닙니다.
+브라우저 확장 프로그램만으로는 설치할 수 없습니다. 다음 **AdGuard 독립 실행형 앱**을 먼저 설치해 주세요.
+
+- [Windows용 AdGuard 공식 다운로드](https://adguard.com/ko/adguard-windows/overview.html)
+- [Android용 AdGuard 공식 다운로드](https://adguard.com/ko/adguard-android/overview.html)
+
+이 프로젝트와 유저스크립트는 무료입니다. AdGuard 독립 실행형 앱은 별도 제품이며, 유저스크립트 기능을 사용하려면 유효한 체험판 또는 라이선스가 필요합니다. 자세한 구분은 [AdGuard 라이선스 안내](https://adguard.com/kb/ko/general/license/what-is/)와 [Android 무료·정식 버전 비교](https://adguard.com/kb/ko/adguard-for-android/features/free-vs-full/)에서 확인할 수 있습니다.
+
+그다음 아래 주소 하나를 유저스크립트로 추가합니다.
 
 ```text
 https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ```
 
-1. AdGuard 앱에서 추가 메뉴를 엽니다.
-   - **Windows:** 확장 프로그램 → 확장 프로그램 추가 → 파일 또는 URL에서 가져오기
-   - **Android:** 설정 → 필터링 → 확장 프로그램 → 확장 프로그램 추가 → 파일 또는 URL에서 가져오기
-2. 위 주소를 붙여넣어 설치하고 스크립트를 켭니다.
-3. 이미 열어 둔 핫딜 글은 새로고침합니다.
+1. AdGuard 앱에서 다음 메뉴를 엽니다.
+   - **Windows:** 보호 → 확장 프로그램 → 확장 프로그램 추가 → 파일 또는 URL에서 가져오기
+   - **Android:** 하단 맨 오른쪽 설정 → 필터링 → 확장 프로그램 → 확장 프로그램 추가 → 파일 또는 URL에서 가져오기
+2. 위 주소를 복사해 붙여넣고 설치를 확인합니다.
+3. 확장 프로그램 전체 스위치와 **AdGuard Hotdeal Focus Reader Gate** 항목을 모두 켭니다.
+4. 이미 열어 둔 핫딜 글은 새로고침합니다.
 
-스크립트 하나만 설치하면 됩니다. 이전 핫딜 전용 필터 목록을 사용 중이면 해당 목록을 제거하고 이 스크립트만 사용해 주세요.
+이전 핫딜 전용 필터·사용자 규칙은 제거하고 이 유저스크립트만 사용해 주세요.
 
-메뉴가 다르면 [AdGuard 공식 유저스크립트 안내](https://adguard.com/kb/general/extensions/#userscripts)와 [Android 확장 프로그램 안내](https://adguard.com/kb/adguard-for-android/features/settings/#extensions)를 확인해 주세요.
+메뉴 명칭은 [AdGuard 공식 유저스크립트 안내](https://adguard.com/kb/ko/general/extensions/#userscripts)와 [Android 확장 프로그램 안내](https://adguard.com/kb/ko/adguard-for-android/features/settings/#extensions)에서 확인할 수 있습니다.
+
+### 보호 확인
+
+- **Windows:** AdGuard 보호를 켠 뒤 **설정 → 앱 설정 → 네트워크 설정 → HTTPS 필터링**을 켭니다. **앱 관리**에서 사용하는 브라우저의 라우팅·필터링·HTTPS 필터링 표시가 모두 녹색인지 확인합니다.
+- **Android:** 홈 화면의 보호를 켠 뒤 **설정 → 필터링 → 네트워크 → HTTPS 필터링 → 보안 인증서**를 엽니다. Android 11 이상에서는 [AdGuard 공식 인증서 설치 안내](https://adguard.com/kb/ko/adguard-for-android/solving-problems/manual-certificate/)에 따라 AdGuard CA 인증서를 사용자 저장소에 수동 설치합니다.
 
 ### 사용
 
-평소처럼 핫딜 링크를 열면 자동으로 적용됩니다. 글 위쪽에 **알구몬으로 돌아가기 · 본문 · 댓글** 버튼이 보이면 적용된 상태입니다. 잠시 끄려면 AdGuard의 확장 프로그램 목록에서 이 스크립트를 끄고 글을 새로고침하면 됩니다.
+알구몬에서 지원 사이트의 핫딜 글을 엽니다. 가격·구매 링크·사진·영상·본문·전체 댓글과 답글은 원래 모습 그대로 보이고, 광고·사이드바·인기글·추천글·다른 글 목록은 보이지 않아야 합니다. 글 위쪽에 **알구몬으로 돌아가기 · 본문 · 댓글** 버튼이 보이면 적용된 상태입니다. 페이지 로딩 뒤 추가되거나 위치가 바뀐 요소도 다시 검사합니다.
 
-### 동작 범위와 업데이트
+### 업데이트와 제거
 
-페이지가 로딩된 뒤 추가되거나 위치가 바뀐 요소도 다시 검사합니다. 일부 구조 변경은 자동으로 대응하고, 수정된 새 버전은 AdGuard의 업데이트 설정에 따라 같은 설치 주소에서 받습니다. 사이트가 크게 바뀌면 추가 수정이 필요할 수 있으며, 모든 미래의 변경을 자동으로 해결한다고 보장하지는 않습니다. 구조를 확정하지 못한 경우에는 본문·댓글이 사라지지 않도록 원래 내용을 복구합니다.
+새 버전은 같은 설치 주소로 배포됩니다. Windows에서는 AdGuard의 **업데이트 확인**으로 앱·필터·확장 프로그램 업데이트를 함께 확인할 수 있습니다. 바로 최신판을 다시 설치하려면 기존 항목을 제거한 뒤 같은 URL을 추가합니다.
 
-Windows의 실제 Chrome과 모바일 화면 폭으로 확인합니다. **Android 실기기 동작은 아직 검증하지 않았습니다.**
+제거할 때 Windows에서는 **확장 프로그램** 목록에서 해당 스크립트 행의 **⋮** 메뉴를 사용합니다. Android에서는 목록에서 해당 스크립트를 탭해 상세 화면을 연 뒤 제거합니다. 잠시 끄기만 하려면 스크립트 스위치를 끄고 페이지를 새로고침합니다.
 
-적용되지 않으면 스크립트가 켜져 있는지, 사용하는 브라우저에 AdGuard 보호와 HTTPS 필터링이 적용되는지 확인해 주세요. 내용이 잘리거나 불필요한 요소가 남으면 [문제 제보](https://github.com/heelee912/adguard-hotdeal-focus/issues)에 **글 주소·사용 기기·브라우저**를 알려 주세요.
+### 문제 해결
+
+- 아무 변화가 없으면 독립 실행형 AdGuard 앱, 앱 보호, HTTPS 필터링, 확장 프로그램 전체 스위치와 스크립트 항목이 모두 켜져 있는지 확인하고 글을 다시 여십시오.
+- 내용이 잘리거나 불필요한 요소가 남으면 이전 핫딜 필터가 제거됐는지 확인한 뒤 [문제 제보](https://github.com/heelee912/adguard-hotdeal-focus/issues)에 **글 주소·운영체제·브라우저**를 남겨 주세요.
+- Windows 실제 최신 Chrome과 최신 Chrome의 모바일 UA·터치·390px 조건으로 7개 지원 사이트를 확인했습니다. **Android 실기기 동작은 아직 검증하지 않았습니다.**
 
 개발·복구 명령은 [CLI.md](CLI.md), 자동 점검과 설계는 [ARCHITECTURE.md](ARCHITECTURE.md)에 정리되어 있습니다.
 
