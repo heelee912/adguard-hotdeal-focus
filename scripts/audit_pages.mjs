@@ -1654,6 +1654,7 @@ function networkFidelityFailures(
       Number.isSafeInteger(lateConnectCount) && lateConnectCount > 0 &&
       Number.isSafeInteger(pinnedTransport?.connectRequestCount) &&
       pinnedTransport.connectRequestCount >= lateConnectCount &&
+      pinnedTransport.connectRequestCount <= PINNED_PROXY_MAX_CONNECT_REQUESTS &&
       Number.isSafeInteger(rejectedBeforeUpstreamCount) &&
       rejectedBeforeUpstreamCount === lateConnectCount;
     // A locally refused CONNECT never became an upstream request. Its explicit

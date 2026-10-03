@@ -840,6 +840,9 @@ function testLateConnectRejectionProofPreservesContentFailures() {
   };
   const policy = { pinnedTransport };
   assert.deepEqual(networkFidelityFailures(policy), [], "proven refused CONNECTs are diagnostic only");
+  assert.deepEqual(networkFidelityFailures({ pinnedTransport: { ...pinnedTransport,
+    connectRequestCount: 1_024, lateConnectCount: 1_024, lateConnectRejectedBeforeUpstreamCount: 1_024,
+  } }), [], "proven refused CONNECTs at the existing transport limit stay diagnostic");
   for (const mutation of [
     { lateConnectRejectedBeforeUpstreamCount: undefined },
     { lateConnectRejectedBeforeUpstreamCount: 0 },
@@ -855,6 +858,8 @@ function testLateConnectRejectionProofPreservesContentFailures() {
     { connectRequestCount: undefined },
     { connectRequestCount: 0 },
     { connectRequestCount: "1" },
+    { connectRequestCount: 1_025 },
+    { connectRequestCount: 1_025, lateConnectCount: 1_025, lateConnectRejectedBeforeUpstreamCount: 1_025 },
     { sealed: false },
     { mode: "unproven-transport" },
   ]) {
