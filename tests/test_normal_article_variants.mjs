@@ -3,6 +3,8 @@ import fs from "node:fs";
 import { chromium } from "playwright";
 import { PREAUTHORIZED_ADGUARD_CONTROL_SOURCE } from "../scripts/preauthorized_adguard_control.mjs";
 import {
+  FIRST_PAINT_PROBE_SOURCE, auditUserscriptGate, commentControlSelectorDigestsForUrl,
+  resultHasZeroLeak, userscriptGateFailures,
   semanticOracle, semanticOracleEvidence, semanticOracleContractFailures,
 } from "../scripts/audit_pages.mjs";
 
@@ -259,10 +261,11 @@ try {
           return route.fulfill({ status: 200, contentType: "text/html; charset=utf-8", body: fixture(article) });
         });
         const target = { source: "sample", url: "https://arca.live/b/hotdeal/184784422" };
+        const runtimeLayout = contracts.find(site => site.id === "arcalive")
+          .layouts.find(layout => layout.id === "hotdeal");
         await page.goto(target.url);
         const oracle = semanticOracleEvidence(await semanticOracle(page, source,
-          "arcalive", "hotdeal", contracts.find(site => site.id === "arcalive")
-            .layouts.find(layout => layout.id === "hotdeal").required_roles, target), target);
+          "arcalive", "hotdeal", runtimeLayout.required_roles, target), target);
         assert.deepEqual(semanticOracleContractFailures(oracle), [],
           `${article.name}/${width}: ${JSON.stringify(oracle)}`);
         assert.equal(oracle.commentItemCount, (article.comments ?? []).length,
@@ -270,7 +273,8 @@ try {
         assert.equal(oracle.dormantCommentItemCount,
           (article.comments ?? []).filter(comment => comment.hidden).length,
           `${article.name}/${width}: native folded replies are loaded items, not missing comments`);
-        await page.addInitScript(({ source, control }) => {
+        await page.addInitScript(({ source, control, paintProbeSource }) => {
+          (0, eval)(paintProbeSource);
           globalThis.originalArticleNodes = new Map();
           globalThis.originalControlClicks = 0;
           const captureOriginals = () => {
@@ -297,7 +301,7 @@ try {
           }, { once: true });
           (0, eval)(control);
           (0, eval)(source);
-        }, { source, control: PREAUTHORIZED_ADGUARD_CONTROL_SOURCE });
+        }, { source, control: PREAUTHORIZED_ADGUARD_CONTROL_SOURCE, paintProbeSource: FIRST_PAINT_PROBE_SOURCE });
         await page.goto("https://arca.live/b/hotdeal/184784422");
         await page.waitForFunction(() =>
           document.documentElement.getAttribute("data-hotdeal-focus-status") === "ready" &&
@@ -310,6 +314,24 @@ try {
         });
         // Let the release paint and its observer checkpoint both settle.
         await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+        const assertActualAudit = async expectedDormantCount => {
+          const gate = await auditUserscriptGate(page, runtimeLayout.required_roles, 5000,
+            "registered-positive", commentControlSelectorDigestsForUrl(runtimeLayout, target.url));
+          assert.deepEqual(userscriptGateFailures(gate, runtimeLayout.required_roles), [],
+            `${article.name}/${width}: ${JSON.stringify(gate)}`);
+          assert.equal(gate.commentItemStats.approvedDormantCount, expectedDormantCount);
+          assert.equal(resultHasZeroLeak({ userscript: { gate } }), true);
+          return gate;
+        };
+        const gate = await assertActualAudit((article.comments ?? []).filter(comment => comment.hidden).length);
+        if (article.foldedReply) {
+          const unprovenHidden = { ...gate, commentItemStats: {
+            ...gate.commentItemStats, approvedDormantCount: 0,
+          } };
+          assert.ok(userscriptGateFailures(unprovenHidden, runtimeLayout.required_roles)
+            .some(failure => failure.includes("runtime-approved dormant")));
+          assert.equal(resultHasZeroLeak({ userscript: { gate: unprovenHidden } }), false);
+        }
         const observed = await page.evaluate(() => {
           const visible = node => Boolean(node) && getComputedStyle(node).display !== "none" &&
             getComputedStyle(node).visibility === "visible" && node.getBoundingClientRect().height > 0;
@@ -357,6 +379,7 @@ try {
           assert.equal(await page.evaluate(() =>
             document.getElementById("c_2") === globalThis.originalArticleNodes.get("c_2") &&
             document.getElementById("original-control").getAttribute("aria-expanded") === "true"), true, label);
+          await assertActualAudit(0);
           await page.getByRole("button", { name: "답글 펼치기", exact: true }).click();
           await page.waitForFunction(() =>
             document.documentElement.getAttribute("data-hotdeal-focus-status") === "ready" &&
@@ -364,6 +387,7 @@ try {
             document.getElementById("c_2").getBoundingClientRect().height === 0,
           null, { timeout: 5000 });
           assert.equal(await page.evaluate(() => globalThis.originalControlClicks), 2, label);
+          await assertActualAudit(1);
         }
         const fixtureRequests = [target.url, ...(article.imageUrl ? [article.imageUrl] : [])];
         assert.deepEqual(requests, [...fixtureRequests, ...fixtureRequests]);
