@@ -114,6 +114,7 @@ jobs:
           set +e
           status=0
           timeout --kill-after=5s 60s npm run test:network || status=1
+          timeout --kill-after=5s 30s node tests/test_algumon_traffic_budget.mjs --browser-fixture || status=1
           timeout --kill-after=5s 180s npm run test:oracle || status=1
           python -m unittest -v \
             tests.test_workflow_contract.AuditProofLeaseAndExpectationTests.test_projected_hide_selector_uses_native_document_qsa_semantics \
@@ -775,6 +776,7 @@ jobs:
             --previous-high-water-source \
               "${RUNNER_TEMP}/promotion-previous-release-high-water.json"
           timeout --kill-after=5s 60s npm run test:network
+          timeout --kill-after=5s 30s node tests/test_algumon_traffic_budget.mjs --browser-fixture
           timeout --kill-after=5s 180s npm run test:oracle
           timeout --kill-after=5s 60s npm run test:tamper
           timeout --kill-after=10s 15m npm run test:behavior

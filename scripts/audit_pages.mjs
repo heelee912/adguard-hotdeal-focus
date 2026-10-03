@@ -137,8 +137,9 @@ const REQUIRED_USERSCRIPT_GRANTS = Object.freeze([
   "window.onurlchange",
 ]);
 // One global source inventory, one filtered source page per configured site,
-// and three signed relay documents per site. This is an upper bound on every
-// live Algumon document/API start made by one audit invocation.
+// and three signed relay documents per site. This bounds explicit acquisitions,
+// not the normal browser's resources or same-origin automatic document changes;
+// those have separate observed counters and the existing network/time limits.
 const DEFAULT_ALGUMON_REQUEST_START_BUDGET =
   1 + REQUIRED_SITE_IDS.length * (1 + ALGUMON_SITE_LINK_SCAN_LIMIT);
 const REQUIRED_ROLE_NAMES = Object.freeze(["title", "body", "comments"]);
@@ -581,6 +582,59 @@ function reserveAlgumonProbeStart(requestBudget, transitionBudget, kind, url) {
     actual.signedRelayFetches += 1;
   }
   return start;
+}
+
+function createAlgumonSourceBrowserBudget(requestedUrl) {
+  const requested = new URL(canonicalHttpsUrl(requestedUrl, "Algumon source URL"));
+  if (!ALGUMON_HOSTNAMES.has(requested.hostname) || requested.pathname !== "/n/deal") {
+    throw new Error("Algumon source browser requires an exact feed URL");
+  }
+  let requestStarts = 0;
+  let navigationStarts = 0;
+  let blockedStarts = 0;
+  const violations = new Set();
+  const requestDecisions = new WeakMap();
+  return {
+    observeRequest(request) {
+      if (!requestDecisions.has(request)) {
+        requestDecisions.set(request, this.observe(request.url(), isTopLevelNavigationRequest(request)));
+      }
+      return requestDecisions.get(request);
+    },
+    observe(urlText, isMainNavigation) {
+      const parsed = new URL(urlText);
+      if (["about:", "data:", "blob:"].includes(parsed.protocol) && !isMainNavigation) {
+        return { allowed: true, reason: "local-browser-scheme" };
+      }
+      requestStarts += 1;
+      if (isMainNavigation) navigationStarts += 1;
+      const reason = requestStarts > NETWORK_POLICY_MAX_REMOTE_REQUESTS
+        ? "source-browser-request-budget-exceeded"
+        : isMainNavigation && (parsed.origin !== requested.origin || parsed.username || parsed.password)
+          ? "source-browser-navigation-origin-denied"
+          : isMainNavigation && navigationStarts === 1 && parsed.href !== requested.href
+            ? "source-browser-initial-feed-mismatch"
+            : navigationStarts > NETWORK_POLICY_MAX_REDIRECT_ANCESTORS
+              ? "source-browser-navigation-budget-exceeded"
+              : null;
+      if (reason) {
+        blockedStarts += 1;
+        violations.add(reason);
+      }
+      return { allowed: reason === null, reason: reason ?? "bounded-source-browser-request" };
+    },
+    snapshot() {
+      return {
+        maximumRequestStarts: NETWORK_POLICY_MAX_REMOTE_REQUESTS,
+        maximumNavigationStarts: NETWORK_POLICY_MAX_REDIRECT_ANCESTORS,
+        requestStarts,
+        navigationStarts,
+        subresourceStarts: requestStarts - navigationStarts,
+        blockedStarts,
+        violations: [...violations].sort(),
+      };
+    },
+  };
 }
 
 async function readJson(filePath) {
@@ -2938,10 +2992,33 @@ function comparableDocumentUrl(urlText) {
   }
 }
 
+function mainDocumentResponseUrlMatches(responseUrl, finalUrl) {
+  const comparableResponse = comparableDocumentUrl(responseUrl);
+  const comparableFinal = comparableDocumentUrl(finalUrl);
+  if (!comparableResponse || !comparableFinal) return false;
+  if (comparableResponse === comparableFinal) return true;
+  const response = new URL(comparableResponse);
+  const final = new URL(comparableFinal);
+  // The observed mobile redirect returns this marker, then the same article
+  // removes it without another document response. Do not normalize other
+  // queries or accept the broader desktop/mobile article-identity aliases.
+  if (
+    response.origin !== "https://m.ruliweb.com" || final.origin !== response.origin ||
+    !/^\/(?:market|news)\/board\/1020\/read\/\d{1,24}\/?$/u.test(response.pathname) ||
+    final.pathname !== response.pathname ||
+    !siteArticleIdentity(response.href, "ruliweb") ||
+    siteArticleIdentity(response.href, "ruliweb") !== siteArticleIdentity(final.href, "ruliweb") ||
+    response.searchParams.getAll("_rd").length !== 1 || final.searchParams.has("_rd")
+  ) return false;
+  const queryParts = response.search.slice(1).split("&");
+  if (queryParts.filter((part) => part === "_rd=1").length !== 1) return false;
+  response.search = queryParts.filter((part) => part !== "_rd=1").join("&");
+  return response.href === final.href;
+}
+
 function selectFinalMainDocumentResponse(responseChain, finalUrl) {
-  const comparableFinalUrl = comparableDocumentUrl(finalUrl);
   const matchingResponses = (responseChain ?? []).filter(
-    (response) => comparableDocumentUrl(response.url) === comparableFinalUrl,
+    (response) => mainDocumentResponseUrlMatches(response.url, finalUrl),
   );
   return matchingResponses.at(-1) ?? null;
 }
@@ -3541,7 +3618,7 @@ function classifyDestinationResponse(responseEvidence) {
   const suppliedFinalResponse = responseEvidence?.mainDocumentResponse;
   const finalResponse =
     selectedChainResponse ??
-    (comparableDocumentUrl(suppliedFinalResponse?.url) === comparableDocumentUrl(finalUrl)
+    (mainDocumentResponseUrlMatches(suppliedFinalResponse?.url, finalUrl)
       ? suppliedFinalResponse
       : null);
   const status = Number.isInteger(finalResponse?.status)
@@ -3567,7 +3644,7 @@ function classifyDestinationResponse(responseEvidence) {
     contentType,
   );
   const finalDocumentUrlMatches = Boolean(
-    finalResponse && comparableDocumentUrl(finalResponse.url) === comparableDocumentUrl(finalUrl),
+    finalResponse && mainDocumentResponseUrlMatches(finalResponse.url, finalUrl),
   );
   const blockedStatus = status === 401 || status === 403 || status === 429 || status === 503;
   const sourceFailure =
@@ -6152,14 +6229,9 @@ async function createPageContext(
     (contextPolicy.exactResourceHosts ?? []).map((hostname) => normalizedHostname(hostname)),
   );
   const allowPublicHttpsSubresources = contextPolicy.allowPublicHttpsSubresources === true;
-  const blockAlgumonSubresources = contextPolicy.blockAlgumonSubresources === true;
-  const singleAlgumonDocumentUrl = contextPolicy.singleAlgumonDocumentUrl
-    ? canonicalHttpsUrl(
-        contextPolicy.singleAlgumonDocumentUrl,
-        "bounded Algumon source document URL",
-      )
+  const sourceBrowserBudget = contextPolicy.algumonSourceUrl
+    ? createAlgumonSourceBrowserBudget(contextPolicy.algumonSourceUrl)
     : null;
-  let startedBoundedAlgumonDocument = false;
   const networkEvidenceRecorder = createNetworkPolicyEvidenceRecorder({
     allowPublicHttpsSubresources,
   });
@@ -6224,6 +6296,15 @@ async function createPageContext(
   };
   context.on("requestfinished", finishInFlightReservation);
   context.on("requestfailed", failInFlightReservation);
+  const observeSourceRequest = (request) => {
+    return sourceBrowserBudget?.observeRequest(request) ?? null;
+  };
+  if (sourceBrowserBudget) context.on("request", (request) => {
+    // Request events include HTTP redirects even when Playwright does not route
+    // their follow-up requests. Count them too, and terminate a looping/escaped
+    // source context instead of silently publishing an incomplete request total.
+    if (!observeSourceRequest(request).allowed) void context.close().catch(() => {});
+  });
   context.on("response", (response) => {
     const request = response.request();
     const lifecycle = inFlightReservations.get(request);
@@ -6247,38 +6328,15 @@ async function createPageContext(
       return;
     }
     const isMainNavigation = isTopLevelNavigationRequest(request);
-    if (
-      singleAlgumonDocumentUrl &&
-      isMainNavigation &&
-      hostnameMatches(parsed.hostname, "algumon.com")
-    ) {
-      if (
-        parsed.href !== singleAlgumonDocumentUrl ||
-        startedBoundedAlgumonDocument
-      ) {
-        networkEvidenceRecorder.recordBlocked(
-          parsed.hostname,
-          request.resourceType(),
-          "bounded-algumon-source-document-redirect-or-repeat",
-          true,
-        );
-        await route.abort("blockedbyclient");
-        return;
-      }
-      startedBoundedAlgumonDocument = true;
-    }
-    if (
-      blockAlgumonSubresources &&
-      !isMainNavigation &&
-      hostnameMatches(parsed.hostname, "algumon.com")
-    ) {
+    const sourceDecision = observeSourceRequest(request);
+    if (sourceDecision && !sourceDecision.allowed) {
       networkEvidenceRecorder.recordBlocked(
         parsed.hostname,
         request.resourceType(),
-        "bounded-algumon-source-document-only",
-        false,
+        sourceDecision.reason,
+        isMainNavigation,
       );
-      await route.abort("blockedbyclient");
+      await route.abort("blockedbyclient").catch(() => {});
       return;
     }
     const decision = networkRequestDecision(
@@ -6362,14 +6420,12 @@ async function createPageContext(
       await webSocketRoute.close({ code: 1008, reason: "invalid-url" });
       return;
     }
-    if (
-      blockAlgumonSubresources &&
-      hostnameMatches(parsed.hostname, "algumon.com")
-    ) {
+    const sourceDecision = sourceBrowserBudget?.observe(parsed.href, false);
+    if (sourceDecision && !sourceDecision.allowed) {
       networkEvidenceRecorder.recordBlocked(
         parsed.hostname,
         "websocket",
-        "bounded-algumon-source-document-only",
+        sourceDecision.reason,
         false,
       );
       await webSocketRoute.close({ code: 1008, reason: "network-policy" });
@@ -6489,6 +6545,7 @@ async function createPageContext(
     context,
     page,
     approvePublicHost: pinnedTransport.approvePublicHost,
+    sourceBrowserBudgetSnapshot: () => sourceBrowserBudget?.snapshot() ?? null,
     sealNetworkPolicyEvidence: async () => {
       validateAllMainDocumentUrls();
       await networkEvidenceRecorder.sealAndDrain({
@@ -6498,6 +6555,7 @@ async function createPageContext(
       await context.close();
       return {
         ...networkEvidenceRecorder.snapshot(),
+        ...(sourceBrowserBudget ? { sourceBrowser: sourceBrowserBudget.snapshot() } : {}),
         stylesheetDependencies: stylesheetDependencyRecorder.snapshot(),
         pinnedTransport: pinnedTransport.snapshot(),
       };
@@ -9539,12 +9597,50 @@ function classifyAlgumonInventorySnapshot(snapshot, expectedSiteId = null) {
 }
 
 async function navigateAlgumonSourcePage(page, requestedUrl, timeoutMs) {
+  const responseObserver = observeMainDocumentResponses(page);
   let response;
   try {
-    response = await page.goto(requestedUrl, {
-      waitUntil: "domcontentloaded",
-      timeout: timeoutMs,
-    });
+    try {
+      response = await page.goto(requestedUrl, {
+        waitUntil: "domcontentloaded",
+        timeout: timeoutMs,
+      });
+    } catch (error) {
+      return {
+        requestedUrl,
+        finalUrl: page.url(),
+        status: null,
+        responseUrl: null,
+        contentType: "",
+        title: await page.title().catch(() => ""),
+        bodyText: await page.locator("body").innerText({ timeout: 250 }).catch(() => ""),
+        navigationError: algumonNavigationErrorEvidence(error),
+      };
+    }
+    const deadline = Date.now() + Math.min(timeoutMs, DESTINATION_CHALLENGE_SETTLE_MAX_MS);
+    let evidence;
+    do {
+      await page.waitForTimeout(Math.min(250, Math.max(0, deadline - Date.now())));
+      const finalUrl = page.url();
+      const navigation = navigationEvidenceFromObserver(responseObserver, finalUrl, response);
+      evidence = {
+        requestedUrl,
+        finalUrl,
+        status: navigation.status,
+        responseUrl: navigation.mainDocumentResponse?.url ?? null,
+        contentType: navigation.contentType,
+        title: await page.title().catch(() => ""),
+        bodyText: (await page.locator("body").innerText({
+          timeout: Math.max(1, Math.min(250, deadline - Date.now())),
+        }).catch(() => "")).slice(0, 4_096),
+      };
+      const sameOrigin = new URL(finalUrl).origin === new URL(requestedUrl).origin;
+      if (!sameOrigin) break;
+      if (classifyAlgumonSourceResponse(evidence) === null &&
+          await page.locator(".deal-feed-card[id^='deal-']").count().catch(() => 0) > 0) break;
+      // Let the publisher's own JS finish; no clicking, reload, or extra goto.
+    } while (Date.now() < deadline);
+    return evidence;
   } catch (error) {
     return {
       requestedUrl,
@@ -9553,20 +9649,12 @@ async function navigateAlgumonSourcePage(page, requestedUrl, timeoutMs) {
       responseUrl: null,
       contentType: "",
       title: await page.title().catch(() => ""),
-      bodyText: await page.locator("body").innerText().catch(() => ""),
+      bodyText: await page.locator("body").innerText({ timeout: 250 }).catch(() => ""),
       navigationError: algumonNavigationErrorEvidence(error),
     };
+  } finally {
+    responseObserver.stop();
   }
-  await page.waitForTimeout(350);
-  return {
-    requestedUrl,
-    finalUrl: page.url(),
-    status: response?.status() ?? null,
-    responseUrl: response?.url() ?? null,
-    contentType: response?.headers()?.["content-type"] ?? "",
-    title: await page.title().catch(() => ""),
-    bodyText: (await page.locator("body").innerText().catch(() => "")).slice(0, 4_096),
-  };
 }
 
 async function snapshotAlgumonInventoryPage(page, response) {
@@ -9639,6 +9727,37 @@ async function captureAlgumonSourceFailure(page, runDirectory) {
   }
 }
 
+async function finishAlgumonSourceBrowser(session, result, transitionBudget) {
+  let networkPolicy;
+  try {
+    networkPolicy = await session.sealNetworkPolicyEvidence();
+  } catch (error) {
+    networkPolicy = {
+      sourceBrowser: session.sourceBrowserBudgetSnapshot(),
+      sealError: algumonNavigationErrorEvidence(error),
+    };
+  }
+  result.networkPolicy = networkPolicy;
+  const observed = networkPolicy.sourceBrowser;
+  const actual = transitionBudget.actual;
+  actual.sourceBrowserRequestStarts = (actual.sourceBrowserRequestStarts ?? 0) + observed.requestStarts;
+  actual.sourceBrowserNavigationStarts = (actual.sourceBrowserNavigationStarts ?? 0) + observed.navigationStarts;
+  actual.sourceBrowserSubresourceStarts = (actual.sourceBrowserSubresourceStarts ?? 0) + observed.subresourceStarts;
+  actual.sourceBrowserBlockedStarts = (actual.sourceBrowserBlockedStarts ?? 0) + observed.blockedStarts;
+  const budgetFailures = [...observed.violations];
+  if (networkPolicy.sealError) budgetFailures.push("source-browser-network-seal-failed");
+  if (networkPolicy.remoteHostBudgetOverflowCount || networkPolicy.remoteRequestBudgetOverflowCount) {
+    budgetFailures.push("source-browser-network-budget-exceeded");
+  }
+  if (networkPolicy.navigationViolations?.length > 0) budgetFailures.push("source-browser-navigation-violation");
+  if (budgetFailures.length > 0) {
+    result.status = "source-or-infrastructure-failure";
+    result.failures = [...new Set([...(result.failures ?? []), ...budgetFailures])];
+    result.links = [];
+  }
+  return result;
+}
+
 async function collectAlgumonGlobalInventory(
   browser,
   timeoutMs,
@@ -9646,17 +9765,18 @@ async function collectAlgumonGlobalInventory(
   transitionBudget,
   runDirectory = null,
 ) {
-  const { context, page } = await createPageContext(
+  const session = await createPageContext(
     browser,
     "desktop",
     null,
     ["algumon.com"],
     ["algumon.com"],
     {
-      blockAlgumonSubresources: true,
-      singleAlgumonDocumentUrl: ALGUMON_GLOBAL_DISCOVERY_URL,
+      allowPublicHttpsSubresources: true,
+      algumonSourceUrl: ALGUMON_GLOBAL_DISCOVERY_URL,
     },
   );
+  const { context, page } = session;
   try {
     reserveAlgumonProbeStart(
       requestBudget,
@@ -9672,13 +9792,13 @@ async function collectAlgumonGlobalInventory(
     const result = classifyAlgumonInventorySnapshot(
       await snapshotAlgumonInventoryPage(page, response),
     );
-    return {
+    return await finishAlgumonSourceBrowser(session, {
       discoveryUrl: ALGUMON_GLOBAL_DISCOVERY_URL,
       ...result,
       ...(result.status !== "ok" ? { sourceScreenshot: await captureAlgumonSourceFailure(page, runDirectory) } : {}),
-    };
+    }, transitionBudget);
   } catch (error) {
-    return {
+    return await finishAlgumonSourceBrowser(session, {
       discoveryUrl: ALGUMON_GLOBAL_DISCOVERY_URL,
       status: "source-or-infrastructure-failure",
       failures: ["global source navigation or inventory inspection failed"],
@@ -9686,7 +9806,7 @@ async function collectAlgumonGlobalInventory(
       sourceScreenshot: await captureAlgumonSourceFailure(page, runDirectory),
       links: [],
       observedSiteTypes: [],
-    };
+    }, transitionBudget);
   } finally {
     await context.close();
   }
@@ -9703,7 +9823,7 @@ async function collectAlgumonRedirectLinks(
 ) {
   const source = site.algumon_source ?? site.id.toUpperCase();
   const discoveryUrl = `${ALGUMON_ORIGIN}/n/deal?sites=${encodeURIComponent(source)}`;
-  const { context, page } = await createPageContext(
+  const session = await createPageContext(
     browser,
     "desktop",
     null,
@@ -9715,10 +9835,11 @@ async function collectAlgumonRedirectLinks(
         : []),
     ],
     {
-      blockAlgumonSubresources: true,
-      singleAlgumonDocumentUrl: discoveryUrl,
+      allowPublicHttpsSubresources: true,
+      algumonSourceUrl: discoveryUrl,
     },
   );
+  const { context, page } = session;
   try {
     reserveAlgumonProbeStart(
       requestBudget,
@@ -9734,13 +9855,23 @@ async function collectAlgumonRedirectLinks(
     if (result.status === "ok" && relayContext) {
       await transferAlgumonRelaySession(context, relayContext);
     }
-    return {
+    return await finishAlgumonSourceBrowser(session, {
       discoveryUrl,
       ...result,
       siteTypeFailures: result.failures
         .filter((failure) => failure.includes("source-identity"))
         .map((failure) => ({ status: failure })),
-    };
+    }, transitionBudget);
+  } catch (error) {
+    return await finishAlgumonSourceBrowser(session, {
+      discoveryUrl,
+      status: "source-or-infrastructure-failure",
+      failures: ["source navigation or inventory inspection failed"],
+      navigationError: algumonNavigationErrorEvidence(error),
+      links: [],
+      observedSiteTypes: [],
+      siteTypeFailures: [],
+    }, transitionBudget);
   } finally {
     await context.close();
   }
@@ -10052,6 +10183,10 @@ async function discoverLatestTargets(
   const probePlan = createLowTrafficAlgumonProbePlan(sites.length);
   const transitionBudget = {
     policy: {
+      requestStartsCount: "explicit-source-and-relay-acquisitions",
+      sourceBrowserRequestsCount: "observed-request-events-including-redirects-and-blocked-attempts",
+      sourceBrowserRequestsPerAcquisition: NETWORK_POLICY_MAX_REMOTE_REQUESTS,
+      sourceBrowserNavigationsPerAcquisition: NETWORK_POLICY_MAX_REDIRECT_ANCESTORS,
       globalInventoryNavigations: 1,
       siteDiscoveryNavigationsPerSite: 1,
       signedRelayFetchesPerSite: ALGUMON_SITE_LINK_SCAN_LIMIT,
@@ -10078,7 +10213,11 @@ async function discoverLatestTargets(
       requestStarts: 0,
       routeProfileProofTargets: 0,
       destinationAuditNavigationStartsMaximum: 0,
-      totalNetworkStartsMaximum: 0,
+      plannedAcquisitionAndDestinationNavigationsMaximum: 0,
+      sourceBrowserRequestStarts: 0,
+      sourceBrowserNavigationStarts: 0,
+      sourceBrowserSubresourceStarts: 0,
+      sourceBrowserBlockedStarts: 0,
     },
   };
   const inventory = await collectAlgumonGlobalInventory(
@@ -10102,7 +10241,7 @@ async function discoverLatestTargets(
     }
     const requestStarts = requestBudget.snapshot();
     transitionBudget.actual.algumonRequestStarts = requestStarts.startedCount;
-    transitionBudget.actual.totalNetworkStartsMaximum = requestStarts.startedCount;
+    transitionBudget.actual.plannedAcquisitionAndDestinationNavigationsMaximum = requestStarts.startedCount;
     return { targets: [], records, inventory, transitionBudget };
   }
 
@@ -10157,6 +10296,7 @@ async function discoverLatestTargets(
         record.observedSiteTypes = discovery.observedSiteTypes;
         record.siteTypeFailures = discovery.siteTypeFailures;
         record.inventoryFailures = discovery.failures;
+        record.networkPolicy = discovery.networkPolicy;
         if (discovery.status !== "ok") {
           if (discovery.status === "source-or-infrastructure-failure") {
             terminalSourceFailure = true;
@@ -10361,7 +10501,7 @@ async function discoverLatestTargets(
     throw new Error("Algumon request-start budget was exceeded after discovery");
   }
   transitionBudget.actual.algumonRequestStarts = requestStarts.startedCount;
-  transitionBudget.actual.totalNetworkStartsMaximum =
+  transitionBudget.actual.plannedAcquisitionAndDestinationNavigationsMaximum =
     requestStarts.startedCount + transitionBudget.actual.destinationAuditNavigationStartsMaximum;
   return { targets, records, inventory, transitionBudget };
 }
@@ -10576,9 +10716,8 @@ function discoveryFailures(
   } else {
     const expectedLabels = ALGUMON_SOURCE_CONTRACTS.map((source) => source.label).sort();
     const observedLabels = [...(inventory.observedLabels ?? [])].sort();
-    // Current Algumon renders the picker only after loading interactive JS.
-    // Document-only collection intentionally avoids that extra source traffic;
-    // all configured sites still require their own validated filtered feed below.
+    // All configured sites require their own validated filtered feed even if
+    // the responsive source picker is not present in the completed document.
     const pickerUnavailable = inventory.sourceInventoryMode === "source-picker-unavailable" &&
       observedLabels.length === 0;
     if (!pickerUnavailable && canonicalJson(observedLabels) !== canonicalJson(expectedLabels)) {
@@ -11949,7 +12088,7 @@ async function main() {
     }
     if (discovery) {
       const transitionActual = discovery.transitionBudget.actual;
-      transitionActual.totalNetworkStartsMaximum =
+      transitionActual.plannedAcquisitionAndDestinationNavigationsMaximum =
         transitionActual.algumonRequestStarts +
         transitionActual.destinationAuditNavigationStartsMaximum;
       finalizeProfileLandingCoverage(discovery.records, report.results);
@@ -12173,12 +12312,14 @@ export {
   countExistingApprovedLayoutMatches,
   createArticleAccessLease,
   createAlgumonRequestStartBudget,
+  createAlgumonSourceBrowserBudget,
   createLowTrafficAlgumonProbePlan,
   createNetworkPolicyEvidenceRecorder,
   createStylesheetDependencyRecorder,
   createPinnedPublicHttpsProxy,
   exactSignedAlgumonDealUrl,
   fixtureCoverageFailures,
+  finishAlgumonSourceBrowser,
   finalizeProfileLandingCoverage,
   matchingApprovedPaths,
   navigateAlgumonSourcePage,
