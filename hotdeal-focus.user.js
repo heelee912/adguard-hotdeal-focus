@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.100
+// @version      0.6.101
 // @description  Content-preserving hot-deal reader with automatic noise filtering.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
@@ -41,7 +41,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.6.100";
+  const GENERATOR_VERSION = "0.6.101";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -386,7 +386,7 @@
             "requiredRoles": ["title", "product", "body", "comments"],
             "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".market-info-view-table"],"ignored":[".market-info-view-table th .tooltip",".market-info-view-table th .common-tooltip",".market-info-view-table th img[alt='info']",".market-info-view-table td img.brand-logo"]},"comments":{"mode":"classified-children"}},
             "hints": {
-              "title": ["h1.title", "h1.v2-view-head__title"],
+              "title": ["h1.title", "h1.v2-view-head__title", "h1.aio-view-head__title"],
               "product": [".market-info-view-table"],
               "body": [".view-content > .note-editor"],
               "comments": ["#ajax-reply-list"],
@@ -404,7 +404,7 @@
             "requiredRoles": ["title", "product", "body", "comments"],
             "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"required","order":"before-body","selectors":[".market-info-view-table"],"ignored":[".market-info-view-table th .tooltip",".market-info-view-table th .common-tooltip",".market-info-view-table th img[alt='info']",".market-info-view-table td img.brand-logo"]},"comments":{"mode":"classified-children"}},
             "hints": {
-              "title": [".content.market-info-view-wrap .view-style01 .tit .ment > h1", "h1.v2-view-head__title"],
+              "title": [".content.market-info-view-wrap .view-style01 .tit .ment > h1", "h1.v2-view-head__title", "h1.aio-view-head__title"],
               "product": [".market-info-view-table"],
               "body": [".view-content > .note-editor"],
               "comments": ["#ajax-reply-list"],

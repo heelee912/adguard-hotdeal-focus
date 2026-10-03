@@ -32,31 +32,50 @@ const html = `<!doctype html><html><head>
 <li id="comment1990135"><div class="listNode v2-cmt"><div class="contentArea v2-cmt__main"><div class="nickWrap">삣삐삣삐</div><div class="note-editor content-view-ok" id="saveComment_1990135">덕코프 재밌죠 ㅋㅋ</div></div></div></li>
 <li id="comment1990146"><div class="listNode v2-cmt"><div class="contentArea v2-cmt__main"><div class="nickWrap">Emot</div><div class="note-editor content-view-ok" id="saveComment_1990146"><p>FPS는 아니고 탑뷰입니다. (FPS 모딩이 있긴함)</p><p>난이도는 높게 하면 상당히 하드코어합니다.</p></div></div></div></li>
 </ul></div></div><aside>인기글 추천글 광고</aside></main></body></html>`;
+// Actual Android AIO template: #con-body is present but .left-con-wrap is
+// absent, and the title is nested in this native header rather than V2.
+const aioHtml = html
+  .replace('<body><main class="left-con-wrap" id="con-body">',
+    '<body class="qz-enhance-1 has-bottom-sticky-banner"><div id="wrap"><div id="con-body"><div class="info-body">')
+  .replace('<h1 class="v2-view-head__title"><span class="label">진행중</span> ' + title + '</h1>',
+    '<div class="aio-view-head"><div class="aio-view-head__crumb">핫딜 게시판</div>' +
+    '<div class="aio-view-head__title-block"><div class="aio-view-head__title-line">' +
+    '<h1 class="aio-view-head__title">' + title + '</h1></div></div>' +
+    '<div class="aio-view-head__author">원래 작성자</div></div>')
+  .replace('</aside></main></body></html>', '</aside></div></div></div></body></html>');
 
 const browser = await chromium.launch({ headless: true });
 try {
   const page = await browser.newPage();
-  await page.setContent(html);
-  const result = await page.evaluate(({ source }) => {
-    const module = { exports: {} };
-    new Function("module", source)(module);
-    const api = module.exports;
-    const contract = api.SITE_CONTRACTS.find(site => site.id === "quasarzone");
-    const exact = api.resolveDocument(document, contract.layouts, null);
-    const semantic = api.discoverSemanticContract(document, contract.layouts, null);
-    return {
-      exact: { ok: exact.ok, reason: exact.reason, error: exact.error },
-      semantic: { ok: semantic.ok, reason: semantic.reason, error: semantic.error,
-        rejected: semantic.rejected, tuple: semantic.tuple },
-    };
-  }, { source });
-  assert.equal(result.exact.ok, true, JSON.stringify(result));
+  for (const fixture of [html, aioHtml]) {
+    await page.setContent(fixture);
+    const result = await page.evaluate(({ source }) => {
+      const module = { exports: {} };
+      new Function("module", source)(module);
+      const api = module.exports;
+      const contract = api.SITE_CONTRACTS.find(site => site.id === "quasarzone");
+      const exact = api.resolveDocument(document, contract.layouts, null);
+      const semantic = api.discoverSemanticContract(document, contract.layouts, null);
+      return {
+        exact: { ok: exact.ok, reason: exact.reason, error: exact.error,
+          titleClass: exact.roles?.title?.className, commonRootId: exact.commonRoot?.id },
+        semantic: { ok: semantic.ok, reason: semantic.reason, error: semantic.error,
+          rejected: semantic.rejected, tuple: semantic.tuple },
+      };
+    }, { source });
+    assert.equal(result.exact.ok, true, JSON.stringify(result));
+    if (fixture === aioHtml) {
+      assert.equal(result.exact.titleClass, 'aio-view-head__title');
+      assert.equal(result.exact.commonRootId, 'con-body');
+      assert.equal(await page.locator('.left-con-wrap').count(), 0);
+    }
+  }
   await page.close();
-  for (const { width, drift, handler = "native", dark = false, touch = false } of [{ width: 1280, drift: false }, { width: 1280, drift: true }, { width: 390, drift: true }, { width: 1280, drift: true, handler: "mismatch" }, { width: 390, drift: true, handler: "arbitrary" }, { width: 1280, drift: true, dark: true }, { width: 390, drift: true, dark: true, touch: true }]) {
+  for (const { width, drift, handler = "native", dark = false, touch = false, aio = false } of [{ width: 1280, drift: false }, { width: 1280, drift: true }, { width: 390, drift: true }, { width: 1280, drift: true, handler: "mismatch" }, { width: 390, drift: true, handler: "arbitrary" }, { width: 1280, drift: true, dark: true }, { width: 390, drift: true, dark: true, touch: true }, { width: 390, drift: false, aio: true, touch: true }]) {
     const context = await browser.newContext({ viewport: { width, height: 844 }, hasTouch: touch });
     try {
       const runtimePage = await context.newPage();
-      let fixture = drift ? html.replace('class="left-con-wrap" id="con-body"', 'class="info-body" id="publisher-root"') : html;
+      let fixture = aio ? aioHtml : drift ? html.replace('class="left-con-wrap" id="con-body"', 'class="info-body" id="publisher-root"') : html;
       if (dark) fixture = fixture.replace('<html>', '<html class="dark">');
       const nativeHref = `javascript:goToLink('${Buffer.from(destination).toString("base64")}');`;
       const purchaseHref = handler === "mismatch"
@@ -80,6 +99,8 @@ try {
       const state = await runtimePage.evaluate(() => {
         const visible = e => getComputedStyle(e).visibility === "visible" && getComputedStyle(e).display !== "none" && !!e.getClientRects().length;
         return {
+          titleVisible: visible(document.querySelector('h1')),
+          nativeHeaderChromeVisible: [...document.querySelectorAll('.aio-view-head__crumb, .aio-view-head__author')].some(visible),
           body: visible(document.querySelector("#new_contents")),
           items: [...document.querySelectorAll("li[id^='comment']")].map(e => ({visible:visible(e),text:e.innerText})),
           noise: visible(document.querySelector("aside")),
@@ -91,6 +112,8 @@ try {
           proofFrames: globalThis.__HOTDEAL_FOCUS_DIAGNOSTICS__?.standaloneGate?.cascadeProofFrames,
         };
       });
+      assert.equal(state.titleVisible, true);
+      assert.equal(state.nativeHeaderChromeVisible, false);
       assert.equal(state.body, true);
       assert.equal(state.items.length, 2);
       assert.equal(state.items.every(item => item.visible), true);
