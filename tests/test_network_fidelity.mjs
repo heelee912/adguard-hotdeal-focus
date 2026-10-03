@@ -1402,7 +1402,7 @@ async function testFailedNavigationRetainsNetworkEvidenceWithoutRetry() {
   assert.equal(JSON.stringify(failedCapture).includes("secret-query"), false);
 }
 
-async function testUnreferencedPresentationLifecycleUsesCompleteRetainedEvidence() {
+async function testUnreferencedPresentationLifecycleRequiresIndependentNoiseProof() {
   class FixtureElement {
     constructor(localName = "article", attributes = {}, children = []) {
       this.localName = localName;
@@ -1430,7 +1430,6 @@ async function testUnreferencedPresentationLifecycleUsesCompleteRetainedEvidence
     return { ...evidence, urlSha256s: [...urls].map(networkResourceUrlSha256) };
   };
   const roles = collect();
-  assert.equal(roles.retainedFrameCount, 0);
   const direct = { status: "complete", ancestorUrlSha256s: [] };
   const lifecycleFailures = ["network evidence sealed with active remote requests",
     "remote requests did not drain inside the fail-closed deadline"];
@@ -1448,11 +1447,12 @@ async function testUnreferencedPresentationLifecycleUsesCompleteRetainedEvidence
       .includes("remote requests appeared after the network evidence seal"), !optional, url);
   };
   for (const [url, type, optional] of [
-    // Cloud 37106955971: retained DOM was ready while these unrelated images
-    // were still pending. No hostname-wide noise exception is needed.
-    ["https://tr.ds.kakao.com/fixture-pixel", "image", true],
-    ["https://image.yes24.com/fixture-ad.webp", "image", true],
-    ["https://cdn.example/unreferenced.mp4", "media", true],
+    // Absence from a complete snapshot does not independently prove that an
+    // unfinished image/media request is unrelated to lazy-loaded article content.
+    ["https://tr.ds.kakao.com/fixture-pixel", "image", false],
+    ["https://image.yes24.com/fixture-ad.webp", "image", false],
+    ["https://cdn.example/unreferenced.mp4", "media", false],
+    ["https://sync.adkernel.com/fixture-pixel", "image", true],
     [imageUrl, "image", false], [mediaUrl, "media", false],
     ["https://article.example/api/comments", "xhr", false],
     ["https://article.example/api/article", "fetch", false],
@@ -1468,14 +1468,29 @@ async function testUnreferencedPresentationLifecycleUsesCompleteRetainedEvidence
     { status: "overflow", ancestorUrlSha256s: [] });
   await check("https://cdn.example/unreferenced.webp", "image", roles, false, direct, true);
   for (const incomplete of [
-    { ...roles, retainedFrameCount: undefined }, { ...roles, rootCount: 0 },
+    { ...roles, rootCount: 0 },
     { ...roles, nodeOverflowCount: 1 }, { ...roles, urlOverflowCount: 1 },
     { ...roles, elapsedTimeOverflowCount: 1 }, { ...roles, urlSha256s: ["invalid"] },
   ]) await check("https://cdn.example/unreferenced.webp", "image", incomplete, false);
+  for (const [localName, requestType, url] of [
+    ["img", "image", "https://cdn.example/lazy-article.webp"],
+    ["video", "media", "https://cdn.example/lazy-article.mp4"],
+  ]) {
+    const detached = new FixtureElement(localName, { src: url });
+    const beforeInsertion = collect();
+    assert.equal(beforeInsertion.urlSha256s.includes(networkResourceUrlSha256(url)), false);
+    await check(url, requestType, beforeInsertion, false);
+    article.children.push(detached);
+    // A retained-DOM snapshot can become stale before the network seal. The
+    // newly attached article resource must remain fatal even with that snapshot.
+    await check(url, requestType, beforeInsertion, false);
+    assert.equal(collect().urlSha256s.includes(networkResourceUrlSha256(url)), true);
+    article.children.pop();
+  }
   for (const localName of ["iframe", "object", "embed"]) {
     article.children.push(new FixtureElement(localName, { src: frameUrl, data: frameUrl }));
     const withFrame = collect();
-    assert.equal(withFrame.retainedFrameCount, 1);
+    assert.equal(withFrame.urlSha256s.includes(networkResourceUrlSha256(frameUrl)), true);
     await check("https://cdn.example/inside-frame.webp", "image", withFrame, false);
     await check(frameUrl, "document", withFrame, false);
     article.children.pop();
@@ -1788,7 +1803,7 @@ async function main() {
   await testSealDrainTimeoutFailsClosed();
   await testOptionalLifecycleActivityStaysObservedWithoutFailingArticle();
   await testFailedNavigationRetainsNetworkEvidenceWithoutRetry();
-  await testUnreferencedPresentationLifecycleUsesCompleteRetainedEvidence();
+  await testUnreferencedPresentationLifecycleRequiresIndependentNoiseProof();
   await testPendingArticleApisRequireIndependentNoiseProof();
   testFailedArticleApisRequireIndependentNoiseProof();
   await testLifecycleIdentityCardinalityFailsClosed();

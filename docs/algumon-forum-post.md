@@ -19,6 +19,8 @@
 
 이 프로젝트와 유저스크립트는 무료입니다. AdGuard 독립 실행형 앱은 별도 제품이며, 유저스크립트 기능을 사용하려면 유효한 체험판 또는 라이선스가 필요합니다. 자세한 구분은 [AdGuard 라이선스 안내](https://adguard.com/kb/ko/general/license/what-is/)와 [Android 무료·정식 버전 비교](https://adguard.com/kb/ko/adguard-for-android/features/free-vs-full/)에서 확인할 수 있습니다.
 
+GitHub 가입이나 코드 수정은 필요 없습니다.
+
 1. AdGuard 앱에서 다음 메뉴를 엽니다.
    - **Windows:** 보호 → 확장 프로그램 → 확장 프로그램 추가 → 파일 또는 URL에서 가져오기
    - **Android:** 하단 맨 오른쪽 설정 → 필터링 → 확장 프로그램 → 확장 프로그램 추가 → 파일 또는 URL에서 가져오기
