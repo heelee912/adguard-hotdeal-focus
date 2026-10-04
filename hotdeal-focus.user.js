@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         AdGuard Hotdeal Focus Reader Gate
 // @namespace    https://github.com/heelee912/adguard-hotdeal-focus
-// @version      0.6.103
+// @version      0.6.104
 // @description  Content-preserving hot-deal reader with automatic noise filtering.
 // @match        https://*.clien.net/*
 // @match        https://*.ppomppu.co.kr/*
@@ -41,7 +41,7 @@
   "use strict";
 
   const PROTOCOL_VERSION = "2";
-  const GENERATOR_VERSION = "0.6.103";
+  const GENERATOR_VERSION = "0.6.104";
   const RELEASE_URLS = Object.freeze({
     download: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
     update: "https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js",
@@ -295,10 +295,10 @@
             "pageRoot": ".content_view",
             "allowEmptyComments": true,
             "requiredRoles": ["title", "body", "comments"],
-            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"optional","order":"before-body","selectors":[".post_content > .attached_link"],"ignored":[]},"comments":{"mode":"classified-children"}},
+            "roleProjection": {"title":{"mode":"metadata-shallow"},"body":{"mode":"atomic-boundary","ignored":[]},"product":{"mode":"atomic-boundary","cardinality":"optional","order":"before-body","selectors":[".post_content > .attached_link",".post_view > .attached_link"],"ignored":[]},"comments":{"mode":"classified-children"}},
             "hints": {
               "title": [".post_subject"],
-              "product": [".post_content > .attached_link"],
+              "product": [".post_content > .attached_link", ".post_view > .attached_link"],
               "body": [".post_article"],
               "comments": [".post_comment"],
               "commentItems": [".post_comment > .comment .comment_row"],
