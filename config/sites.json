@@ -3,7 +3,7 @@
   "metadata": {
     "title": "AdGuard Hotdeal Focus",
     "description": "Shows only the hot-deal title, purchase information, article body, and comments.",
-    "version": "0.6.102",
+    "version": "0.6.103",
     "expires_hours": 12,
     "license": "MIT",
     "rollback_of": null
@@ -29,11 +29,13 @@
           ],
           "ancestor_markers": [
             ".post_subject",
+            ".post_content > .attached_link",
             ".post_article",
             ".post_comment",
             ".post_comment > .comment"
           ],
           "preserve_deep": [
+            ".post_content > .attached_link",
             ".post_article",
             ".post_comment > .comment"
           ],
@@ -61,9 +63,10 @@
             "title": { "mode": "metadata-shallow" },
             "body": { "mode": "atomic-boundary", "ignored": [] },
             "product": {
-              "mode": "absent",
-              "cardinality": "zero",
-              "selectors": [],
+              "mode": "atomic-boundary",
+              "cardinality": "optional",
+              "order": "before-body",
+              "selectors": [".post_content > .attached_link"],
               "ignored": []
             },
             "comments": { "mode": "classified-children" }
