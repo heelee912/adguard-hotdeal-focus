@@ -53,7 +53,7 @@ https://heelee912.github.io/adguard-hotdeal-focus/hotdeal-focus.user.js
 ### 문제 해결
 
 - 아무 변화가 없으면 독립 실행형 AdGuard 앱, 앱 보호, HTTPS 필터링, 그리고 Windows의 **확장 프로그램** 또는 Android의 **확장** 화면에서 전체 스위치와 스크립트 항목이 모두 켜져 있는지 확인하고 글을 다시 여십시오.
-- `DNS_PROBE_FINISHED_NXDOMAIN`이 뜨면 **DNS 필터**에 이 `.user.js` 주소를 잘못 등록하지 않았는지 확인합니다. 잘못 등록된 항목만 끄고, 기존 DNS 서버와 DNS 보호는 그대로 유지합니다.
+- `DNS_PROBE_FINISHED_NXDOMAIN`이 뜨면 AdGuard의 **최근 활동**에서 글 사이트 도메인이 DNS 규칙에 차단됐는지 확인하고, 차단된 글 사이트 도메인만 허용합니다. **DNS 필터**에 이 `.user.js` 주소를 잘못 등록했다면 해당 항목만 끕니다. 기존 DNS 서버와 DNS 보호는 그대로 유지합니다.
 - 내용이 잘리거나 불필요한 요소가 남으면 이전 핫딜 필터가 제거됐는지 확인한 뒤 [문제 제보](https://github.com/heelee912/adguard-hotdeal-focus/issues)에 **글 주소·운영체제·브라우저**를 남겨 주세요.
 - Windows 실제 최신 Chrome과 최신 Chrome의 모바일 UA·터치·390px 조건으로 7개 지원 사이트를 확인했습니다. **2026-10-03 실제 Android 기기의 Chrome에서 지원 7개 사이트의 대표 글을 열어 본문·댓글과 이동 버튼, 주변 요소 숨김을 확인했습니다.**
 
