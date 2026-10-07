@@ -221,6 +221,26 @@ class StandaloneUserscriptReleaseWorkflowTests(unittest.TestCase):
                 self.assertNotIn("--force", section)
 
 class PagesRetryContractTests(unittest.TestCase):
+    def test_browser_install_uses_https_mirror_and_bounded_network_waits(self) -> None:
+        installs = []
+        for workflow in (VERIFY_WORKFLOW, WATCH_WORKFLOW):
+            installs.extend(
+                step for step in workflow.split("      - name: ")[1:]
+                if "npx playwright install --with-deps chromium" in step
+            )
+        self.assertEqual(4, len(installs))
+        for step in installs:
+            with self.subTest(step=step.splitlines()[0]):
+                self.assertIn("'https://archive.ubuntu.com/ubuntu/'", step)
+                self.assertIn("sudo tee /etc/apt/apt-mirrors.txt", step)
+                self.assertIn('Acquire::http::Timeout "15";', step)
+                self.assertIn('Acquire::https::Timeout "15";', step)
+                self.assertIn('Acquire::Retries "1";', step)
+                self.assertRegex(step, r"timeout-minutes: (10|15)\n")
+                self.assertLess(step.index("apt-mirrors.txt"), step.index("npx playwright install"))
+                for insecure_option in ("--allow-unauthenticated", "trusted=yes", "Verify-Peer \"false\""):
+                    self.assertNotIn(insecure_option, step)
+
     def test_audit_job_budget_exceeds_all_subprocess_timeouts_and_margin(self) -> None:
         audit_section = WATCH_WORKFLOW.split("  audit:\n", 1)[1].split(
             "  candidate-proof:\n", 1

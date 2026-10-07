@@ -104,7 +104,11 @@ jobs:
 
       - name: Install GitHub-hosted Chromium
         if: steps.preflight.outputs.status == '0'
-        run: npx playwright install --with-deps chromium
+        timeout-minutes: 10
+        run: |
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          printf '%s\n' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' | sudo tee /etc/apt/apt.conf.d/99-hotdeal-focus-network >/dev/null
+          npx playwright install --with-deps chromium
 
       - name: Audit bounded registered article samples without Algumon access
         if: steps.preflight.outputs.status == '0'
@@ -248,8 +252,11 @@ jobs:
       - name: Install locked dependency and Chromium
         id: dependencies
         continue-on-error: true
+        timeout-minutes: 15
         run: |
           timeout --kill-after=10s 4m npm ci --ignore-scripts --no-audit --no-fund
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          printf '%s\n' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' | sudo tee /etc/apt/apt.conf.d/99-hotdeal-focus-network >/dev/null
           timeout --kill-after=10s 8m npx playwright install --with-deps chromium
 
       - name: Download the digest-bound sealed candidate queue
@@ -754,8 +761,11 @@ jobs:
           echo "commit_sha=$(git rev-parse HEAD)" >> "${GITHUB_OUTPUT}"
 
       - name: Install locked dependencies and Chromium
+        timeout-minutes: 15
         run: |
           npm ci --ignore-scripts --no-audit --no-fund
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          printf '%s\n' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' | sudo tee /etc/apt/apt.conf.d/99-hotdeal-focus-network >/dev/null
           npx playwright install --with-deps chromium
 
       - name: Audit the exact candidate profiles and passing sibling baseline
