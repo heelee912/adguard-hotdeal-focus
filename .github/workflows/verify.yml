@@ -71,7 +71,11 @@ jobs:
 
       - name: Install Chromium for differential behavior fixtures
         if: steps.contract.outputs.status == '0'
-        run: npx playwright install --with-deps chromium
+        timeout-minutes: 10
+        run: |
+          printf '%s\n' 'https://archive.ubuntu.com/ubuntu/' | sudo tee /etc/apt/apt-mirrors.txt >/dev/null
+          printf '%s\n' 'Acquire::http::Timeout "15";' 'Acquire::https::Timeout "15";' 'Acquire::Retries "1";' | sudo tee /etc/apt/apt.conf.d/99-hotdeal-focus-network >/dev/null
+          npx playwright install --with-deps chromium
 
       - name: Compare June/July behavior with the released allow-set
         if: steps.contract.outputs.status == '0'
